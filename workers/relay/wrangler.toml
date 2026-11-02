@@ -1,0 +1,9 @@
+# Deploy with: pnpm dlx wrangler deploy
+# Wrangler is not a dependency of this workspace; it is only needed to deploy.
+#
+# No bindings and no routes yet. The relay carries WebRTC signalling and room
+# codes only (M5), so it never has a reason to hold state or receive media.
+name = "kara-relay"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+workers_dev = false
