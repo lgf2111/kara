@@ -63,6 +63,19 @@ function formatBytes(bytes: number | null): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 }
 
+/**
+ * Names the phase the page has entered. The Playwright harness installs
+ * `karaPhase` and resets its stall watchdog on every call, so a hang is
+ * attributed to a phase instead of to the run as a whole.
+ */
+function phase(name: string, detail?: unknown): void {
+  console.log(`[spike] ${name}${detail === undefined ? '' : ` ${JSON.stringify(detail)}`}`);
+  const report = (globalThis as unknown as Record<string, unknown>)['karaPhase'];
+  if (typeof report === 'function') {
+    (report as (name: string, detail?: unknown) => void)(name, detail);
+  }
+}
+
 function formatSeconds(ms: number): string {
   return `${(ms / 1000).toFixed(1)} s`;
 }
@@ -105,12 +118,24 @@ export function SpikeApp() {
   }, []);
 
   const decode = useCallback(async (bytes: ArrayBuffer, name: string, synthetic: boolean): Promise<Loaded> => {
-    audioContext.current ??= new AudioContext();
-    const buffer = await audioContext.current.decodeAudioData(bytes);
+    // Decoding deliberately uses an OfflineAudioContext. A plain AudioContext
+    // needs an audio output device, and in a headless browser it never leaves
+    // the suspended state, which makes decodeAudioData hang forever with the
+    // renderer idle. This cost 69 minutes of wall clock to find.
+    // The context's rate is the rate the data comes back at, so asking for
+    // 44.1 kHz also resamples anything else to what the models require.
+    phase('decode-start', { bytes: bytes.byteLength, name });
+    const context = new OfflineAudioContext({ numberOfChannels: 2, length: 1, sampleRate: 44100 });
+    const buffer = await context.decodeAudioData(bytes);
     const channels: Float32Array[] = [];
     for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
       channels.push(buffer.getChannelData(channel).slice());
     }
+    phase('decode-done', {
+      seconds: Number((buffer.length / buffer.sampleRate).toFixed(2)),
+      sampleRate: buffer.sampleRate,
+      channels: channels.length,
+    });
     return { name, synthetic, sampleRate: buffer.sampleRate, channels };
   }, []);
 
@@ -119,15 +144,19 @@ export function SpikeApp() {
       setBusy(true);
       setError(null);
       setProgress(null);
+      phase('run-start', options);
       await clearStems();
+      phase('opfs-cleared');
 
       const memoryBefore = await fullSample();
+      phase('memory-sampled', { agentBytes: memoryBefore.agentBytes, jsHeapBytes: memoryBefore.jsHeapBytes });
       const stopHeartbeat = startHeartbeat();
       const startedAt = new Date().toISOString();
 
       const worker = new Worker(new URL('./spike/separation.worker.ts', import.meta.url), {
         type: 'module',
       });
+      phase('worker-created');
 
       const payload: AudioPayload = {
         sampleRate: input.sampleRate,
@@ -138,18 +167,23 @@ export function SpikeApp() {
         worker.addEventListener('message', (event: MessageEvent<WorkerMessage>) => {
           const message = event.data;
           if (message.kind === 'progress') {
+            phase(message.stage, { done: message.done, total: message.total });
             setProgress(message);
             return;
           }
           if (message.kind === 'done') {
+            phase('run-done');
             resolve({ result: message.result, error: null });
             return;
           }
+          phase('run-failed', { stage: message.stage, error: message.error });
           resolve({ result: null, error: `${message.stage}: ${message.error}` });
         });
         worker.addEventListener('error', (event) => {
+          phase('worker-error', { message: event.message });
           resolve({ result: null, error: event.message });
         });
+        phase('worker-posting-request');
         worker.postMessage(
           {
             kind: 'separate',
@@ -204,15 +238,19 @@ export function SpikeApp() {
   useEffect(() => {
     const api = {
       async runFromUrl(url: string, options: RunOptions): Promise<SpikeReport> {
+        phase('fixture-fetch-start', { url });
         const response = await fetch(url);
+        const bytes = await response.arrayBuffer();
+        phase('fixture-fetched', { bytes: bytes.byteLength, status: response.status });
         const name = url.slice(url.lastIndexOf('/') + 1);
-        const input = await decode(await response.arrayBuffer(), name, true);
+        const input = await decode(bytes, name, true);
         setLoaded(input);
         return run(options, input);
       },
       models: SEPARATION_MODELS.map((model) => model.id),
     };
     (globalThis as unknown as Record<string, unknown>)['karaSpike'] = api;
+    phase('page-ready', { crossOriginIsolated });
   }, [decode, run]);
 
   const play = useCallback(async (stemFile: string) => {
@@ -321,6 +359,7 @@ export function SpikeApp() {
           <select value={mode} onChange={(event) => setMode(event.target.value as RunMode)}>
             <option value="audio">audio (writes stems)</option>
             <option value="bench">bench (inference only)</option>
+            <option value="load">load (session creation only)</option>
           </select>
         </label>
         <label>
