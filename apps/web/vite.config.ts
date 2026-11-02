@@ -1,8 +1,10 @@
+import { createReadStream, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 
 import { headersForPattern, parseHeadersFile } from './src/security-headers.ts';
 
@@ -16,9 +18,96 @@ const isolationOnly = Object.fromEntries(
   Object.entries(production).filter(([name]) => name.toLowerCase().startsWith('cross-origin-')),
 );
 
+const CONTENT_TYPES = new Map([
+  ['.json', 'application/json'],
+  ['.onnx', 'application/octet-stream'],
+  ['.wasm', 'application/wasm'],
+  ['.mjs', 'text/javascript'],
+  ['.js', 'text/javascript'],
+  ['.jsep', 'application/octet-stream'],
+  ['.wav', 'audio/wav'],
+]);
+
+/** Size of a regular file, or null for anything else. */
+function fileSize(path: string): number | null {
+  try {
+    const stats = statSync(path);
+    return stats.isFile() ? stats.size : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Serves one directory read-only under a URL prefix, for the dev server only.
+ * Nothing here reaches the production build, and the spike loads every byte
+ * from its own origin, so the production CSP needs no weights exception.
+ */
+function serveDirectory(prefix: string, root: string): Plugin {
+  return {
+    name: `kara-serve-${prefix.replaceAll('/', '')}`,
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use(prefix, (request, response, next) => {
+        const relative = decodeURIComponent((request.url ?? '/').split('?')[0] ?? '/').replace(/^\/+/u, '');
+        if (relative === '' || relative.includes('..')) {
+          next();
+          return;
+        }
+        const path = `${root}/${relative}`;
+        const size = fileSize(path);
+        if (size === null) {
+          next();
+          return;
+        }
+        const extension = path.slice(path.lastIndexOf('.'));
+        response.setHeader('content-type', CONTENT_TYPES.get(extension) ?? 'application/octet-stream');
+        response.setHeader('content-length', String(size));
+        response.setHeader('cache-control', 'no-cache');
+        createReadStream(path).pipe(response);
+      });
+    },
+  };
+}
+
+/** `/spike` is nicer to type than `/spike.html`, and only exists in dev. */
+function spikeRoute(): Plugin {
+  return {
+    name: 'kara-spike-route',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use((request, _response, next) => {
+        if (request.url === '/spike' || request.url === '/spike/') {
+          request.url = '/spike.html';
+        }
+        next();
+      });
+    },
+  };
+}
+
+const require = createRequire(import.meta.url);
+const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
+const ortDist = require.resolve('onnxruntime-web').replace(/\/[^/]+$/u, '');
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    spikeRoute(),
+    serveDirectory('/spike-models', `${repoRoot}models`),
+    serveDirectory('/spike-ort', ortDist),
+    // Synthesised fixtures only, for the Playwright run. Gitignored, and the
+    // route does not exist in a production build.
+    serveDirectory('/spike-fixtures', `${repoRoot}fixtures/generated`),
+  ],
   server: { headers: isolationOnly },
   preview: { headers: production },
-  build: { target: 'es2022' },
+  optimizeDeps: { exclude: ['onnxruntime-web', '@huggingface/transformers'] },
+  worker: { format: 'es' },
+  build: {
+    target: 'es2022',
+    // Only the real app ships. spike.html and everything it imports stay out
+    // of the production build.
+    rollupOptions: { input: fileURLToPath(new URL('./index.html', import.meta.url)) },
+  },
 });
