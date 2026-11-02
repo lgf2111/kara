@@ -78,11 +78,3 @@ export function findAttribution(text) {
   }
   return findings;
 }
-
-/**
- * @param {string} text
- * @returns {boolean}
- */
-export function hasAttribution(text) {
-  return ATTRIBUTION_PATTERNS.some(({ pattern }) => pattern.test(text));
-}
