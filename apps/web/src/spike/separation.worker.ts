@@ -211,6 +211,52 @@ async function runDemucsChain(
 
 /* ----------------------------------------------------------------- run ---- */
 
+/**
+ * The graph is the authority on its own input shape. `raydotac`'s
+ * metadata.json says dim_f 3072 for Inst_HQ_5, and the graph wants 2560, so
+ * the declared contract is read back and the model's answer wins.
+ */
+function readInputShape(session: ort.InferenceSession): number[] | null {
+  const metadata = (
+    session as unknown as {
+      inputMetadata?: readonly { readonly name: string; readonly shape?: readonly (number | string)[] }[];
+    }
+  ).inputMetadata;
+  const first = metadata?.[0];
+  if (first?.shape === undefined) {
+    return null;
+  }
+  return first.shape.map((dimension) => (typeof dimension === 'number' ? dimension : -1));
+}
+
+/** What the worker itself can see of the GPU, which is what actually matters. */
+async function describeWorkerGpu(): Promise<string> {
+  const gpu = (
+    navigator as unknown as {
+      gpu?: {
+        requestAdapter: () => Promise<{
+          info?: { vendor?: string; architecture?: string };
+          isFallbackAdapter?: boolean;
+        } | null>;
+      };
+    }
+  ).gpu;
+  if (gpu === undefined) {
+    return 'no navigator.gpu in worker';
+  }
+  try {
+    const adapter = await gpu.requestAdapter();
+    if (adapter === null) {
+      return 'no adapter in worker';
+    }
+    return `${adapter.info?.vendor ?? '?'}/${adapter.info?.architecture ?? '?'} fallback=${String(
+      adapter.isFallbackAdapter ?? 'unknown',
+    )}`;
+  } catch (error) {
+    return `adapter threw: ${String(error)}`;
+  }
+}
+
 async function separate(request: SeparationRequest): Promise<RunResult> {
   const model = separationModel(request.modelId);
   const caveats: string[] = [];
@@ -224,11 +270,17 @@ async function separate(request: SeparationRequest): Promise<RunResult> {
     }
   };
 
-  progress('loading model', 0, 1, []);
+  progress(`worker-received ${request.modelId}/${request.backend}/${request.mode}`, 0, 1, []);
+  if (request.backend === 'webgpu') {
+    progress(`worker-gpu ${await describeWorkerGpu()}`, 0, 1, []);
+  }
+  progress('ort-init', 0, 1, []);
   const loadStart = performance.now();
 
   let sessions: ort.InferenceSession[];
   let manifest: SplitManifest | null = null;
+  /** Filled in from the graph once the session exists; overrides the registry. */
+  let graphContract: { dimF: number; dimT: number } | null = null;
 
   if (model.family === 'demucs') {
     manifest = await loadManifest(model);
@@ -240,15 +292,49 @@ async function separate(request: SeparationRequest): Promise<RunResult> {
       progress('loading pieces', index + 1, manifest.pieces.length, []);
     }
   } else {
+    progress('creating session', 0, 1, []);
     sessions = [
       await ort.InferenceSession.create(
         `${MODEL_BASE}/${model.id}/UVR-MDX-NET-Inst_HQ_5.onnx`,
         providers(request.backend),
       ),
     ];
+    const shape = sessions[0] === undefined ? null : readInputShape(sessions[0]);
+    if (shape !== null) {
+      progress(`graph input shape [${shape.join(', ')}]`, 1, 1, []);
+      const graphDimF = shape[2];
+      const graphDimT = shape[3];
+      if (graphDimF !== undefined && graphDimF > 0 && graphDimT !== undefined && graphDimT > 0) {
+        graphContract = { dimF: graphDimF, dimT: graphDimT };
+      }
+    }
+    progress('session ready', 1, 1, []);
   }
   const loadMs = performance.now() - loadStart;
   noteHeap();
+
+  if (request.mode === 'load') {
+    for (const session of sessions) {
+      await session.release();
+    }
+    return {
+      task: 'separation',
+      modelId: model.id,
+      backend: request.backend,
+      mode: 'load',
+      loadMs,
+      segments: 0,
+      segmentMs: [],
+      inferenceMs: 0,
+      totalMs: performance.now() - startedAt,
+      audioSeconds: 0,
+      realtimeFactor: 0,
+      peakJsHeapBytes,
+      stems: [],
+      transcription: null,
+      caveats: ['load mode: sessions created and released, no inference and no audio'],
+    };
+  }
 
   const sampleRate = request.audio?.sampleRate ?? model.sampleRate;
   const channels = request.audio?.channels ?? [];
@@ -328,14 +414,18 @@ async function separate(request: SeparationRequest): Promise<RunResult> {
       }
       caveats.push('bench mode: one fixed input tensor, inference cost only, no audio produced');
       const options = mdxOptions(model);
+      const dimF = graphContract?.dimF ?? contract.dimF;
+      const dimT = graphContract?.dimT ?? contract.dimT;
       const left = channels[0] ?? new Float32Array(model.segmentSamples);
       const right = channels[1] ?? left;
+      progress('stft', 0, 1, []);
       const input = packMdxInput(
         stft(sliceChannel(left, 0, model.segmentSamples), options),
         stft(sliceChannel(right, 0, model.segmentSamples), options),
-        contract.dimF,
-        contract.dimT,
+        dimF,
+        dimT,
       );
+      progress('stft done', 1, 1, []);
 
       for (const [index] of starts.entries()) {
         const began = performance.now();
@@ -358,8 +448,10 @@ async function separate(request: SeparationRequest): Promise<RunResult> {
       throw new Error('mdx contract missing');
     }
     const options = mdxOptions(model);
+    const dimF = graphContract?.dimF ?? contract.dimF;
+    const dimT = graphContract?.dimT ?? contract.dimT;
     const bins = contract.nFft / 2 + 1;
-    const segment = model.segmentSamples;
+    const segment = contract.hop * (dimT - 1);
     const stride = Math.max(1, Math.round(segment * (1 - model.overlap)));
     const fade = segment - stride;
 
@@ -384,8 +476,8 @@ async function separate(request: SeparationRequest): Promise<RunResult> {
       const input = packMdxInput(
         stft(leftSlice, options),
         stft(rightSlice, options),
-        contract.dimF,
-        contract.dimT,
+        dimF,
+        dimT,
       );
 
       const began = performance.now();
@@ -400,12 +492,7 @@ async function separate(request: SeparationRequest): Promise<RunResult> {
         throw new Error('model returned no output');
       }
       const raw = first.data as Float32Array;
-      const [primaryLeftSpectrum, primaryRightSpectrum] = unpackMdxOutput(
-        raw,
-        contract.dimF,
-        contract.dimT,
-        bins,
-      );
+      const [primaryLeftSpectrum, primaryRightSpectrum] = unpackMdxOutput(raw, dimF, dimT, bins);
       for (const tensor of Object.values(outputs)) {
         tensor.dispose();
       }

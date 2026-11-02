@@ -64,6 +64,15 @@ function serveDirectory(prefix: string, root: string): Plugin {
         response.setHeader('content-type', CONTENT_TYPES.get(extension) ?? 'application/octet-stream');
         response.setHeader('content-length', String(size));
         response.setHeader('cache-control', 'no-cache');
+        // The page is cross-origin isolated, and onnxruntime-web loads its
+        // emscripten glue as a nested worker script. Chrome then requires the
+        // response itself to assert COEP and CORP, reporting
+        // CoepFrameResourceNeedsCoepHeader otherwise. Without these the fetch
+        // is blocked, InferenceSession.create never settles, and the renderer
+        // sits idle forever instead of raising an error.
+        response.setHeader('cross-origin-embedder-policy', 'require-corp');
+        response.setHeader('cross-origin-resource-policy', 'cross-origin');
+        response.setHeader('access-control-allow-origin', '*');
         createReadStream(path).pipe(response);
       });
     },

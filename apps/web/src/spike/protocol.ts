@@ -3,10 +3,12 @@
 export type Backend = 'webgpu' | 'wasm';
 
 /**
- * `bench` measures inference cost with shape-correct tensors and produces no
- * audio. `audio` runs the whole host pipeline and writes stems to OPFS.
+ * `load` creates the sessions and stops, which isolates model load and shader
+ * compilation from everything else. `bench` measures inference cost with
+ * shape-correct tensors and produces no audio. `audio` runs the whole host
+ * pipeline and writes stems to OPFS.
  */
-export type RunMode = 'bench' | 'audio';
+export type RunMode = 'load' | 'bench' | 'audio';
 
 export interface MemorySample {
   /** performance.memory.usedJSHeapSize, Chrome only, excludes WASM and GPU. */

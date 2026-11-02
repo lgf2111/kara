@@ -59,7 +59,10 @@ export const SEPARATION_MODELS: readonly SeparationModel[] = [
     mdx: {
       nFft: 7680,
       hop: 1024,
-      dimF: 3072,
+      // The repo's metadata.json claims 3072. The graph rejects that and wants
+      // 2560, so the worker reads the shape back from the session and this is
+      // only the fallback. Measured, not assumed.
+      dimF: 2560,
       dimT: 256,
       compensate: 1.021,
       primaryStem: 'Instrumental',
@@ -111,7 +114,7 @@ export const TRANSCRIPTION_MODELS: readonly TranscriptionModel[] = [
     id: 'whisper-base',
     label: 'whisper-base, int8 encoder and merged decoder (73 MiB)',
     repo: 'onnx-community/whisper-base',
-    licence: 'Apache-2.0 (ONNX repo); upstream openai/whisper weights MIT',
+    licence: 'Apache-2.0 (ONNX repo); upstream Whisper weights MIT',
     totalBytes: Math.round(73.3 * MIB),
     largestFileBytes: Math.round(51.2 * MIB),
   },
