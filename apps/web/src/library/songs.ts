@@ -11,6 +11,20 @@ export type SongStatus = 'separating' | 'ready' | 'cancelled' | 'failed';
 
 export type SourceKind = 'audio' | 'video';
 
+/** One line of lyrics, timed from the start of the song. */
+export interface LyricLine {
+  readonly startMs: number;
+  readonly endMs: number;
+  readonly text: string;
+}
+
+export interface SongLyrics {
+  readonly lines: readonly LyricLine[];
+  /** How the lines were got. One way so far: read off the video's own picture. */
+  readonly source: 'video-ocr';
+  readonly readAt: string;
+}
+
 export interface SongRecord {
   /** The separation job id, so reopening the same file finds its stems. */
   readonly id: string;
@@ -28,6 +42,12 @@ export interface SongRecord {
   /** Where a video's own bytes are kept for the room background, else null. */
   readonly sourcePath: string | null;
   readonly createdAt: string;
+  /**
+   * Lines read off the video, absent until someone asks for them. They stay on
+   * this device: a recipe carries timings, and lyric text only when the person
+   * exporting ticks the box.
+   */
+  readonly lyrics?: SongLyrics;
 }
 
 export interface SongStore {
@@ -72,6 +92,28 @@ export function titleFromFileName(fileName: string): string {
     .replace(/\s+/gu, ' ')
     .trim();
   return cleaned === '' ? fileName : cleaned;
+}
+
+/**
+ * Whether there is anything to read lyrics from. Only the video's own picture
+ * carries words, and only while the worker is not holding its files open.
+ */
+export function canReadLyrics(song: SongRecord): boolean {
+  return song.sourceKind === 'video' && song.sourcePath !== null && song.status !== 'separating';
+}
+
+export function withLyrics(song: SongRecord, lyrics: SongLyrics): SongRecord {
+  return { ...song, lyrics };
+}
+
+/**
+ * The record without its lines, which is how lyrics are taken away again. The
+ * field goes rather than turning empty, so a song nobody has read lyrics for
+ * and a song whose lyrics were removed are the same record.
+ */
+export function withoutLyrics(song: SongRecord): SongRecord {
+  const { lyrics, ...rest } = song;
+  return lyrics === undefined ? song : rest;
 }
 
 export function createMemorySongStore(initial: readonly SongRecord[] = []): SongStore {

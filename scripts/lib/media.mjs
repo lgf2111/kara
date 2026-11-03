@@ -53,6 +53,7 @@ export const MODEL_WEIGHT_EXTENSIONS = new Set([
   '.pth',
   '.safetensors',
   '.tflite',
+  '.traineddata',
 ]);
 
 /**

@@ -14,6 +14,57 @@ export function sourcePathFor(directory: string, fileName: string): string {
 }
 
 /**
+ * Containers whose type a video element wants told. The browser sniffs the
+ * bytes too, but a blob with no type at all is refused outright, and the
+ * record keeps the extension rather than the type the file arrived with.
+ */
+const VIDEO_TYPES = new Map([
+  ['mp4', 'video/mp4'],
+  ['m4v', 'video/mp4'],
+  ['mov', 'video/quicktime'],
+  ['mkv', 'video/x-matroska'],
+  ['webm', 'video/webm'],
+  ['avi', 'video/x-msvideo'],
+]);
+
+export function videoTypeFor(path: string): string {
+  const extension = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
+  return VIDEO_TYPES.get(extension) ?? 'video/mp4';
+}
+
+/** Read in pieces this big, so a long video is never one allocation. */
+const CHUNK_BYTES = 8 * 1024 * 1024;
+
+/**
+ * A kept source file, back out of the store as a blob a video element can
+ * open.
+ *
+ * Read in chunks rather than whole: a four-minute video is tens of megabytes,
+ * and the browser is free to keep a blob built from pieces on disk, which one
+ * big typed array would not be.
+ */
+export async function sourceBlob(
+  store: Store,
+  path: string,
+  type: string,
+  chunkBytes = CHUNK_BYTES,
+): Promise<Blob> {
+  const size = await store.sizeOf(path);
+  if (size === null) {
+    throw new Error(`the file kept for this song is gone from ${path}`);
+  }
+  const pieces: Uint8Array<ArrayBuffer>[] = [];
+  for (let offset = 0; offset < size; offset += chunkBytes) {
+    const chunk = await store.readBytes(path, offset, Math.min(chunkBytes, size - offset));
+    if (chunk === null || chunk.byteLength === 0) {
+      throw new Error(`${path} ended after ${String(offset)} of ${String(size)} bytes`);
+    }
+    pieces.push(chunk as Uint8Array<ArrayBuffer>);
+  }
+  return new Blob(pieces, { type });
+}
+
+/**
  * Bytes one song occupies: its stems, its job state and any kept source.
  *
  * A stem being written is locked by the worker, so while a job runs its size

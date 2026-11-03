@@ -15,6 +15,7 @@ models/
 *.pt
 *.pth
 *.bin
+*.traineddata
 
 # No audio or video in this repo, ever. Test fixtures are synthesised on demand
 # by ffmpeg into fixtures/generated/ and stay untracked.

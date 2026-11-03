@@ -23,7 +23,13 @@ describe('classifyPath', () => {
   });
 
   it('rejects model weights', () => {
-    for (const path of ['models/separator.onnx', 'models/separator.onnx_data', 'w.safetensors', 'w.bin']) {
+    for (const path of [
+      'models/separator.onnx',
+      'models/separator.onnx_data',
+      'w.safetensors',
+      'w.bin',
+      'models/tessdata/eng.traineddata',
+    ]) {
       expect(classifyPath(path)?.rule, path).toBe('model-weights');
     }
   });

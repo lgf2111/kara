@@ -1,13 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import {
+  describeRead,
+  readLyricsFromVideo,
+  type RunningLyricsRead,
+} from '../lyrics/read.ts';
 import { jobIdFor, jobPaths } from '../separation/job.ts';
 import { createOpfsStore } from '../storage/opfs-store.ts';
 import { decodeFile, startSeparation, type RunningSeparation } from './ingest.ts';
 import { createIdbSongStore } from './idb-song-store.ts';
 import { deleteSong, songSizes, sourcePathFor } from './storage.ts';
-import { sourceKindFor, titleFromFileName, type SongRecord } from './songs.ts';
+import {
+  sourceKindFor,
+  titleFromFileName,
+  withLyrics,
+  withoutLyrics,
+  type SongRecord,
+} from './songs.ts';
 
-/** The library screen's state and the three things it can do. */
+/** The library screen's state and the things it can do. */
 
 export interface ActiveJob {
   readonly title: string;
@@ -19,6 +30,15 @@ export interface ActiveJob {
   readonly resumedFrom: number;
 }
 
+/** A lyric read in flight, which belongs to exactly one song. */
+export interface LyricsJob {
+  readonly songId: string;
+  readonly stage: string;
+  readonly framesDone: number;
+  readonly framesTotal: number;
+  readonly etaMs: number | null;
+}
+
 export interface Library {
   readonly songs: readonly SongRecord[];
   /** Bytes each song occupies in OPFS, keyed by song id. */
@@ -28,10 +48,15 @@ export interface Library {
   readonly active: ActiveJob | null;
   /** Cancel was asked for; the worker stops after the segment it is on. */
   readonly cancelling: boolean;
+  readonly lyricsJob: LyricsJob | null;
+  readonly cancellingLyrics: boolean;
   readonly error: string | null;
   add(file: File): void;
   cancel(): void;
   remove(song: SongRecord): void;
+  readLyrics(song: SongRecord): void;
+  cancelLyrics(): void;
+  removeLyrics(song: SongRecord): void;
 }
 
 function errorText(cause: unknown): string {
@@ -47,8 +72,11 @@ export function useLibrary(): Library {
   const [quotaBytes, setQuotaBytes] = useState<number | null>(null);
   const [active, setActive] = useState<ActiveJob | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [lyricsJob, setLyricsJob] = useState<LyricsJob | null>(null);
+  const [cancellingLyrics, setCancellingLyrics] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const running = useRef<RunningSeparation | null>(null);
+  const reading = useRef<RunningLyricsRead | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
     const list = await songStore.list();
@@ -67,8 +95,8 @@ export function useLibrary(): Library {
 
   const add = useCallback(
     (file: File): void => {
-      if (running.current !== null) {
-        setError('one song at a time: this machine cannot separate two at once');
+      if (running.current !== null || reading.current !== null) {
+        setError('one job at a time: this machine cannot run two at once');
         return;
       }
       setError(null);
@@ -164,6 +192,92 @@ export function useLibrary(): Library {
     [fileStore, refresh, songStore],
   );
 
+  const readLyrics = useCallback(
+    (song: SongRecord): void => {
+      const path = song.sourcePath;
+      if (path === null) {
+        setError(`${song.title} has no kept video to read lyrics from`);
+        return;
+      }
+      if (running.current !== null || reading.current !== null) {
+        setError('one job at a time: this machine cannot run two at once');
+        return;
+      }
+      setError(null);
+      setLyricsJob({
+        songId: song.id,
+        stage: 'reading the file',
+        framesDone: 0,
+        framesTotal: 0,
+        etaMs: null,
+      });
+
+      const run = readLyricsFromVideo({
+        store: fileStore,
+        path,
+        onProgress: (progress) => {
+          setLyricsJob({ songId: song.id, ...progress });
+        },
+      });
+      reading.current = run;
+
+      void (async () => {
+        try {
+          const outcome = await run.finished;
+          // Counts and timings. The lines themselves never reach the console.
+          console.info(describeRead(outcome));
+          if (outcome.cancelled) {
+            return;
+          }
+          if (outcome.lines.length === 0) {
+            setError(`no words could be read from the picture of ${song.title}`);
+            return;
+          }
+          // Read back rather than written over: the record may have been
+          // touched while the video was being read.
+          const current = (await songStore.get(song.id)) ?? song;
+          await songStore.put(
+            withLyrics(current, {
+              lines: outcome.lines,
+              source: 'video-ocr',
+              readAt: new Date().toISOString(),
+            }),
+          );
+        } catch (cause) {
+          setError(errorText(cause));
+        } finally {
+          reading.current = null;
+          setLyricsJob(null);
+          setCancellingLyrics(false);
+          await refresh();
+        }
+      })().catch((cause: unknown) => {
+        setError(errorText(cause));
+      });
+    },
+    [fileStore, refresh, songStore],
+  );
+
+  const cancelLyrics = useCallback((): void => {
+    if (reading.current === null) {
+      return;
+    }
+    setCancellingLyrics(true);
+    reading.current.cancel();
+  }, []);
+
+  const removeLyrics = useCallback(
+    (song: SongRecord): void => {
+      void songStore
+        .put(withoutLyrics(song))
+        .then(refresh)
+        .catch((cause: unknown) => {
+          setError(errorText(cause));
+        });
+    },
+    [refresh, songStore],
+  );
+
   return {
     songs,
     sizes,
@@ -171,9 +285,14 @@ export function useLibrary(): Library {
     quotaBytes,
     active,
     cancelling,
+    lyricsJob,
+    cancellingLyrics,
     error,
     add,
     cancel,
     remove,
+    readLyrics,
+    cancelLyrics,
+    removeLyrics,
   };
 }
