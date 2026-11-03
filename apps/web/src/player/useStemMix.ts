@@ -9,6 +9,8 @@ import {
   driftAction,
   stemGains,
   stemSampleRate,
+  type StemMixState,
+  type StemReadiness,
   type VocalChoice,
 } from './stem-mix.ts';
 
@@ -21,11 +23,7 @@ import {
  * again whenever it moves on its own.
  */
 
-export type StemMixState = 'absent' | 'loading' | 'ready' | 'failed';
-
-export interface StemMix {
-  readonly state: StemMixState;
-  readonly error: string | null;
+export interface StemMix extends StemReadiness {
   /** The picture must carry no sound: the stems are the sound. */
   readonly silenceVideo: boolean;
 }

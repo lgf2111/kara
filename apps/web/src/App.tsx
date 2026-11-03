@@ -7,7 +7,7 @@ import type { SongRecord } from './library/songs.ts';
 import { totalBytes } from './library/storage.ts';
 import { useLibrary } from './library/useLibrary.ts';
 import { Player } from './player/Player.tsx';
-import { DEFAULT_VOCAL_CHOICE, type VocalChoice } from './player/stem-mix.ts';
+import { defaultVocalChoice, type VocalChoice } from './player/stem-mix.ts';
 import { useSongRoute } from './player/useSongRoute.ts';
 
 export function App() {
@@ -15,7 +15,9 @@ export function App() {
   const route = useSongRoute();
   // Above the player, so going back to the library and putting the next song
   // on keeps the choice. A room sets this once an evening, not once a song.
-  const [vocals, setVocals] = useState<VocalChoice>(DEFAULT_VOCAL_CHOICE);
+  // Null until someone sets it, because what a song should start on depends
+  // on whether it has a picture of its own.
+  const [vocals, setVocals] = useState<VocalChoice | null>(null);
   const active = library.active;
   const songCount = library.songs.length;
   const playing =
@@ -52,7 +54,7 @@ export function App() {
       <Player
         song={playing}
         onBack={route.openLibrary}
-        vocals={vocals}
+        vocals={vocals ?? defaultVocalChoice(playing.sourcePath !== null)}
         onVocals={setVocals}
       />
     );

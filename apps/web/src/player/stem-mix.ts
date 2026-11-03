@@ -2,8 +2,9 @@ import type { SongStatus } from '../library/songs.ts';
 import { clampVolume } from './time.ts';
 
 /**
- * The arithmetic behind playing a song's stems against its own picture, kept
- * away from Web Audio so it can be tested without a browser.
+ * The arithmetic behind playing a song's stems, against its own picture or,
+ * for a song that has none, on their own. Kept away from Web Audio so it can
+ * be tested without a browser.
  *
  * Two clocks are involved and only one of them can be driven: the video
  * element keeps time, and a buffer source, once started, runs on the audio
@@ -36,6 +37,27 @@ export interface VocalChoice {
  * part, and the fader is there for the verse they do not know.
  */
 export const DEFAULT_VOCAL_CHOICE: VocalChoice = { mode: 'instrumental', guidePercent: 0 };
+
+/**
+ * What a song starts on before anyone in the room has said otherwise.
+ *
+ * A song with no picture is nothing but its stems, and taking the voice out
+ * of a song the moment it goes on reads as a fault rather than a feature when
+ * there is nothing else to look at; the instrumental is one button away. A
+ * song with its own picture gets the room default.
+ */
+export function defaultVocalChoice(hasOwnPicture: boolean): VocalChoice {
+  return hasOwnPicture ? DEFAULT_VOCAL_CHOICE : { mode: 'original', guidePercent: 0 };
+}
+
+/** How far the stems have got towards being playable. */
+export type StemMixState = 'absent' | 'loading' | 'ready' | 'failed';
+
+/** What a control needs to know about the stems: are they here, and if not why. */
+export interface StemReadiness {
+  readonly state: StemMixState;
+  readonly error: string | null;
+}
 
 /** Frames in a stem of this many bytes. A short tail of odd bytes is ignored. */
 export function frameCount(bytes: number, channels = STEM_CHANNELS): number {
@@ -125,6 +147,20 @@ export function stemGains(choice: VocalChoice, volume: number, muted: boolean): 
   }
   const out = muted ? 0 : clampVolume(volume);
   return { instrumental: out, vocals: out * guideGain(choice.guidePercent) };
+}
+
+/**
+ * The same, for a song with no picture, where the stems are the only sound
+ * there is.
+ *
+ * Original cannot mean silence here: the two stems add back up to the
+ * mixture, so the song as it arrived is the backing with the voice at full,
+ * and the volume has to reach them in both modes.
+ */
+export function audioStemGains(choice: VocalChoice, volume: number, muted: boolean): StemGains {
+  const out = muted ? 0 : clampVolume(volume);
+  const voice = choice.mode === 'original' ? 1 : guideGain(choice.guidePercent);
+  return { instrumental: out, vocals: out * voice };
 }
 
 /** Where the stems were started, and from what point in the song. */

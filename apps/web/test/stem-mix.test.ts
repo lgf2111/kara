@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_VOCAL_CHOICE,
   STEM_SAMPLE_RATE,
+  audioStemGains,
+  defaultVocalChoice,
   driftAction,
   frameCount,
   guideGain,
@@ -139,6 +141,51 @@ describe('stemGains', () => {
   it('survives a volume no element would accept', () => {
     expect(stemGains(instrumental(0), 4, false)).toEqual({ instrumental: 1, vocals: 0 });
     expect(stemGains(instrumental(0), Number.NaN, false)).toEqual({ instrumental: 0, vocals: 0 });
+  });
+});
+
+describe('audioStemGains', () => {
+  it('sums both stems in original mode: the guide at full is the song as it arrived', () => {
+    expect(audioStemGains({ mode: 'original', guidePercent: 0 }, 1, false)).toEqual({
+      instrumental: 1,
+      vocals: 1,
+    });
+  });
+
+  it('takes the voice out in instrumental mode, and the fader brings it back', () => {
+    expect(audioStemGains({ mode: 'instrumental', guidePercent: 0 }, 1, false)).toEqual({
+      instrumental: 1,
+      vocals: 0,
+    });
+    expect(audioStemGains({ mode: 'instrumental', guidePercent: 40 }, 1, false)).toEqual({
+      instrumental: 1,
+      vocals: 0.4,
+    });
+  });
+
+  it('answers to the player volume in both modes: nothing else carries the sound', () => {
+    expect(audioStemGains({ mode: 'original', guidePercent: 0 }, 0.5, false)).toEqual({
+      instrumental: 0.5,
+      vocals: 0.5,
+    });
+    expect(audioStemGains({ mode: 'original', guidePercent: 0 }, 1, true)).toEqual({
+      instrumental: 0,
+      vocals: 0,
+    });
+    expect(audioStemGains({ mode: 'instrumental', guidePercent: 50 }, 0.5, false)).toEqual({
+      instrumental: 0.5,
+      vocals: 0.25,
+    });
+  });
+});
+
+describe('defaultVocalChoice', () => {
+  it('leaves a song with its own picture on the room default', () => {
+    expect(defaultVocalChoice(true)).toEqual(DEFAULT_VOCAL_CHOICE);
+  });
+
+  it('starts a song with no picture on the original', () => {
+    expect(defaultVocalChoice(false)).toEqual({ mode: 'original', guidePercent: 0 });
   });
 });
 

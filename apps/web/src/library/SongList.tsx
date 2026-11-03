@@ -1,6 +1,6 @@
 import { LyricsActions } from './LyricsActions.tsx';
 import { describeStatus, formatBytes, formatDuration } from './format.ts';
-import type { SongRecord } from './songs.ts';
+import { canPlay, type SongRecord } from './songs.ts';
 import type { LyricsJob } from './useLibrary.ts';
 
 interface SongListProps {
@@ -58,8 +58,8 @@ export function SongList({
             />
           </div>
           <div className="song-actions">
-            {/* The kept picture plays on its own, whatever the stems are doing. */}
-            {song.sourcePath !== null && (
+            {/* A kept picture plays on its own; stems play on a stage of their own. */}
+            {canPlay(song) && (
               <button
                 type="button"
                 onClick={() => {

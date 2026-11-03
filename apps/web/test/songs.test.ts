@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   byNewest,
+  canPlay,
   canReadLyrics,
   createMemorySongStore,
   sourceKindFor,
@@ -74,6 +75,22 @@ describe('byNewest', () => {
       'c',
       'a',
     ]);
+  });
+});
+
+describe('canPlay', () => {
+  it('plays a kept picture whatever its stems are doing', () => {
+    const video = { sourceKind: 'video', sourcePath: 'songs/x/source.mp4' } as const;
+
+    expect(canPlay(song({ ...video, status: 'separating' }))).toBe(true);
+    expect(canPlay(song({ ...video, status: 'failed' }))).toBe(true);
+  });
+
+  it('plays a song with no picture once its stems are there, and not before', () => {
+    expect(canPlay(song())).toBe(true);
+    expect(canPlay(song({ status: 'separating' }))).toBe(false);
+    expect(canPlay(song({ status: 'cancelled' }))).toBe(false);
+    expect(canPlay(song({ status: 'failed' }))).toBe(false);
   });
 });
 
