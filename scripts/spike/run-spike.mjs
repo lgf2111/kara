@@ -599,6 +599,20 @@ async function main() {
         console.log(`realtime factor  ${String(run.realtimeFactor.toFixed(2))}x (upper bound: shared machine)`);
       }
       console.log(`peak worker heap ${run.peakJsHeapBytes === null ? 'n/a' : mib(run.peakJsHeapBytes)}`);
+      const stages = Object.entries(run.stageMs ?? {});
+      if (stages.length > 0) {
+        const hostMs = stages.reduce((sum, [, ms]) => sum + Number(ms), 0);
+        const perSegment = run.segments > 0 ? hostMs / run.segments : 0;
+        console.log(
+          `host stages      ${String(Math.round(hostMs))} ms total, ${String(Math.round(perSegment))} ms per segment`,
+        );
+        for (const [name, ms] of stages.sort((a, b) => Number(b[1]) - Number(a[1]))) {
+          const share = hostMs > 0 ? (Number(ms) / hostMs) * 100 : 0;
+          console.log(
+            `  ${name.padEnd(12)} ${String(Math.round(Number(ms))).padStart(7)} ms  ${share.toFixed(0)}% of host`,
+          );
+        }
+      }
       console.log(
         `agent memory     ${report.memoryBefore?.agentBytes === null ? 'n/a' : mib(report.memoryBefore?.agentBytes ?? 0)} -> ${report.memoryAfter?.agentBytes === null ? 'n/a' : mib(report.memoryAfter?.agentBytes ?? 0)}`,
       );

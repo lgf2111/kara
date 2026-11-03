@@ -84,6 +84,8 @@ export interface RunResult {
   readonly segments: number;
   readonly segmentMs: readonly number[];
   readonly inferenceMs: number;
+  /** Host-side cost by stage, summed over segments, in milliseconds. */
+  readonly stageMs: Readonly<Record<string, number>>;
   readonly totalMs: number;
   readonly audioSeconds: number;
   readonly realtimeFactor: number;
