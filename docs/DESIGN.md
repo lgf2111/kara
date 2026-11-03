@@ -22,7 +22,7 @@ Non-goals: acquiring music, hosting music, a catalogue, accounts, any server tha
 | No copyrighted material in the repo | `scripts/check-no-media.mjs` fails CI on tracked audio, video, weights or any file over 2 MiB; `.gitignore` lists the same extensions |
 | Fixtures are synthesised | ffmpeg writes tones and noise into `fixtures/generated/`, which stays untracked |
 | Exports carry no audio | Recipe schema below has no audio field; lyric text is opt-in |
-| Lyrics come from the user | Transcription runs locally; there is no lyric-site client |
+| Lyrics come from the user | Transcription and video OCR run locally; there is no lyric-site client |
 
 Weight licences are checked per model before a model is used, and recorded here when chosen.
 
@@ -45,7 +45,9 @@ room: WebRTC data channels ◀─▶ relay Worker (signalling only) ◀─▶ ph
   cannot drift from production.
 - **Inference.** ONNX Runtime Web, WebGPU first with a WASM fallback, always in a Web Worker.
   Separation from the Demucs family, or a smaller model if that is the only thing that fits.
-  Transcription and alignment from the Whisper family.
+  Transcription and alignment from the Whisper family. A video that already has the words in its
+  picture is read with tesseract.js instead, which is cheaper and more accurate than transcribing
+  the singing; see `docs/lyrics-ocr.md`.
 - **DSP.** WASM and AudioWorklet: key shift that preserves tempo, tempo change that preserves key,
   fingerprinting. The vocal switch is a gain change on an already-loaded stem, so it is gapless by
   construction rather than by reloading anything.
@@ -73,13 +75,17 @@ Jobs are resumable: progress is recorded per window, so closing the tab loses on
 
 Metadata in IndexedDB, bytes in OPFS. Nothing is stored in both.
 
-IndexedDB database `kara`, version 1:
+IndexedDB database `kara`, version 2:
 
 | Store | Key | Holds |
 | --- | --- | --- |
-| `songs` | `songId` | title, artist, duration, sample rate, channels, source kind (audio or video), source file name and size, fingerprint, timestamps |
+| `songs` | `songId` | title, artist, duration, sample rate, channels, source kind (audio or video), source file name and size, fingerprint, timestamps, and one optional set of lyric lines |
 | `stems` | `[songId, kind]` | kind (`vocals`, `accompaniment`), OPFS path, codec, window size used |
 | `lyrics` | `[songId, lyricsId]` | source (`pasted`, `transcribed`), language, script, lines, unit timings, romanisation |
+
+Version 2 put the first lyrics on the song record itself: one set, read off a kept video, as
+`{ lines: [{ startMs, endMs, text }], source: 'video-ocr', readAt }`. See `docs/lyrics-ocr.md`. The
+`lyrics` store above is still ahead of us, for when a song can have several sets in several scripts.
 | `settings` | `songId` | key semitones, tempo ratio, guide-vocal gain, count-in beats, lyric offset |
 | `jobs` | `jobId` | songId, stage, state, windows done, total, error |
 | `scores` | `scoreId` | songId, singer name, score, timestamp |
@@ -160,6 +166,7 @@ workers/relay             signalling Worker, deployed with pnpm dlx wrangler
 scripts                   repo guards, plain Node ESM, typechecked with checkJs
 .githooks/commit-msg      rejects tool attribution before a message is written
 docs/DESIGN.md            this file
+docs/lyrics-ocr.md        reading lyrics off a video, and where its model data comes from
 ```
 
 ## Quality gates
@@ -175,7 +182,7 @@ on pushes to `main`; the guard job scans the whole pull request range.
 | M0 | foundation: workspace, lint, typecheck, tests, CI, this doc |
 | M1 | feasibility spike: separation and transcription on an 8 GB M1, WebGPU versus WASM, memory peaks |
 | M2 | ingest and library: drop in audio or video, separation, resumable jobs with progress and ETA |
-| M3 | lyrics: transcription, paste-to-align, line and unit timing editor, romanisation |
+| M3 | lyrics: read off a lyric video, transcription, paste-to-align, line and unit timing editor, romanisation |
 | M4 | player: wiping lyrics, vocal switch, guide-vocal fader, key, tempo, count-in |
 | M5 | room: queue, cut and push to top, singer names, phones as remotes over WebRTC |
 | M6 | microphone: echo and reverb, Bluetooth latency warning, pitch bar, score, local leaderboard |

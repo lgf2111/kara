@@ -26,6 +26,7 @@ const CONTENT_TYPES = new Map([
   ['.js', 'text/javascript'],
   ['.jsep', 'application/octet-stream'],
   ['.wav', 'audio/wav'],
+  ['.traineddata', 'application/octet-stream'],
 ]);
 
 /** Size of a regular file, or null for anything else. */
@@ -101,6 +102,13 @@ function devRoutes(): Plugin {
 const require = createRequire(import.meta.url);
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const ortDist = require.resolve('onnxruntime-web').replace(/\/[^/]+$/u, '');
+// tesseract.js loads three things at runtime: its own worker script, the core
+// wasm and a language's traineddata. Left alone it takes all three from
+// jsdelivr, which connect-src 'self' forbids, so each one gets a route here.
+const tesseractDist = require.resolve('tesseract.js').replace(/\/src\/index\.js$/u, '/dist');
+const tesseractCore = require
+  .resolve('tesseract.js-core', { paths: [require.resolve('tesseract.js')] })
+  .replace(/\/[^/]+$/u, '');
 // transformers.js pins its own onnxruntime-web build, and its wasm must match
 // that version rather than ours.
 const hfOrtDist = require
@@ -117,6 +125,13 @@ export default defineConfig({
     serveDirectory('/weights', `${repoRoot}models`),
     serveDirectory('/spike-ort', ortDist),
     serveDirectory('/spike-hf-ort', hfOrtDist),
+    // Most specific first: the /tesseract route would otherwise be asked for
+    // files that are not in the dist folder. The traineddata is not in
+    // node_modules and is not committed either, so it comes from the
+    // gitignored models folder; docs/lyrics-ocr.md says where to get it.
+    serveDirectory('/tesseract/core', tesseractCore),
+    serveDirectory('/tesseract/tessdata', `${repoRoot}models/tessdata`),
+    serveDirectory('/tesseract', tesseractDist),
     // Synthesised fixtures only, for the Playwright run. Gitignored, and the
     // route does not exist in a production build.
     serveDirectory('/spike-fixtures', `${repoRoot}fixtures/generated`),

@@ -7,10 +7,16 @@ import { byNewest, type SongRecord, type SongStore } from './songs.ts';
  *
  * One object store for now. Later milestones add their own under a higher
  * version rather than widening this one.
+ *
+ * Version 2 added the optional `lyrics` field to a song record. Nothing had to
+ * be rewritten: a record saved under version 1 simply has no lyrics, which is
+ * exactly what a song nobody has read lyrics for looks like either way. The
+ * number is bumped so the shape change is on the record rather than in
+ * somebody's memory.
  */
 
 const DATABASE = 'kara';
-const VERSION = 1;
+const VERSION = 2;
 const SONGS = 'songs';
 
 let connection: Promise<IDBDatabase> | null = null;

@@ -1,5 +1,7 @@
+import { LyricsActions } from './LyricsActions.tsx';
 import { describeStatus, formatBytes, formatDuration } from './format.ts';
 import type { SongRecord } from './songs.ts';
+import type { LyricsJob } from './useLibrary.ts';
 
 interface SongListProps {
   readonly songs: readonly SongRecord[];
@@ -7,10 +9,26 @@ interface SongListProps {
   readonly sizes: ReadonlyMap<string, number>;
   /** A song being worked on cannot be deleted: the worker holds its files. */
   readonly busy: boolean;
+  /** The lyric read in flight, on whichever song it belongs to. */
+  readonly lyricsJob: LyricsJob | null;
+  readonly cancellingLyrics: boolean;
   readonly onDelete: (song: SongRecord) => void;
+  readonly onReadLyrics: (song: SongRecord) => void;
+  readonly onCancelLyrics: () => void;
+  readonly onRemoveLyrics: (song: SongRecord) => void;
 }
 
-export function SongList({ songs, sizes, busy, onDelete }: SongListProps) {
+export function SongList({
+  songs,
+  sizes,
+  busy,
+  lyricsJob,
+  cancellingLyrics,
+  onDelete,
+  onReadLyrics,
+  onCancelLyrics,
+  onRemoveLyrics,
+}: SongListProps) {
   if (songs.length === 0) {
     return <p className="note">No songs yet.</p>;
   }
@@ -27,10 +45,20 @@ export function SongList({ songs, sizes, busy, onDelete }: SongListProps) {
               {song.sourceKind} file
               {song.sourcePath === null ? '' : ', kept as the background'}
             </p>
+            <LyricsActions
+              song={song}
+              job={lyricsJob?.songId === song.id ? lyricsJob : null}
+              cancelling={cancellingLyrics}
+              busy={busy || lyricsJob !== null}
+              onRead={onReadLyrics}
+              onCancel={onCancelLyrics}
+              onRemove={onRemoveLyrics}
+            />
           </div>
           <button
             type="button"
-            disabled={busy && song.status === 'separating'}
+            // Whatever is holding this song's files holds them open.
+            disabled={(busy && song.status === 'separating') || lyricsJob?.songId === song.id}
             onClick={() => {
               onDelete(song);
             }}

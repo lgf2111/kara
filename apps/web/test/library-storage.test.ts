@@ -5,8 +5,10 @@ import {
   deleteSong,
   songBytes,
   songSizes,
+  sourceBlob,
   sourcePathFor,
   totalBytes,
+  videoTypeFor,
 } from '../src/library/storage.ts';
 import { createMemoryStore, type Store } from '../src/storage/store.ts';
 
@@ -45,6 +47,47 @@ describe('sourcePathFor', () => {
 
   it('ignores dots inside the name', () => {
     expect(sourcePathFor('songs/x', 'take.2.mov')).toBe('songs/x/source.mov');
+  });
+});
+
+describe('videoTypeFor', () => {
+  it('names the container from the extension, whatever its case', () => {
+    expect(videoTypeFor('songs/x/source.mp4')).toBe('video/mp4');
+    expect(videoTypeFor('songs/x/source.MOV')).toBe('video/quicktime');
+    expect(videoTypeFor('songs/x/source.webm')).toBe('video/webm');
+  });
+
+  it('guesses mp4 for a path that says nothing', () => {
+    expect(videoTypeFor('songs/x/source')).toBe('video/mp4');
+  });
+});
+
+describe('sourceBlob', () => {
+  const path = 'songs/a/source.mp4';
+
+  it('reads the kept bytes back as something a video element can open', async () => {
+    const store = createMemoryStore();
+    const bytes = new Uint8Array(40).fill(7);
+    await store.writeBlob(path, new Blob([bytes]));
+
+    const blob = await sourceBlob(store, path, videoTypeFor(path));
+
+    expect(blob.type).toBe('video/mp4');
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(bytes);
+  });
+
+  it('stitches the pieces back in the order they were read', async () => {
+    const store = createMemoryStore();
+    const bytes = Uint8Array.from({ length: 25 }, (_unused, index) => index);
+    await store.writeBlob(path, new Blob([bytes]));
+
+    const blob = await sourceBlob(store, path, 'video/mp4', 10);
+
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(bytes);
+  });
+
+  it('says so rather than handing back an empty video', async () => {
+    await expect(sourceBlob(createMemoryStore(), path, 'video/mp4')).rejects.toThrow(/gone/u);
   });
 });
 

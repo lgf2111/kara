@@ -16,12 +16,18 @@ export function App() {
     }
   };
 
+  const askThenRemoveLyrics = (song: SongRecord): void => {
+    if (confirm(`Remove the lyrics read for ${song.title}? Reading them again takes minutes.`)) {
+      library.removeLyrics(song);
+    }
+  };
+
   return (
     <main className="library">
       <h1>Kara</h1>
       <p className="tagline">Upload a song you own. Get a KTV room.</p>
 
-      <DropZone busy={active !== null} onFile={library.add} />
+      <DropZone busy={active !== null || library.lyricsJob !== null} onFile={library.add} />
 
       {library.error !== null && (
         <section>
@@ -62,7 +68,12 @@ export function App() {
           songs={library.songs}
           sizes={library.sizes}
           busy={active !== null}
+          lyricsJob={library.lyricsJob}
+          cancellingLyrics={library.cancellingLyrics}
           onDelete={askThenDelete}
+          onReadLyrics={library.readLyrics}
+          onCancelLyrics={library.cancelLyrics}
+          onRemoveLyrics={askThenRemoveLyrics}
         />
       </section>
 
@@ -79,7 +90,7 @@ export function App() {
         <p className="note">
           Upload only, by design: there is no link import and no downloader. Your file is decoded
           and separated in this tab, and what you share with a friend holds timings and settings,
-          never audio.
+          never audio. Lyrics read off your own video stay on this device too.
         </p>
         <p className="note">
           Cross-origin isolation: <strong>{crossOriginIsolated ? 'on' : 'off'}</strong>. Separation

@@ -27,8 +27,8 @@ These are not preferences. They are enforced in code, in tests and in CI.
 4. **Exports carry no audio.** What you share with a friend is a recipe: a fingerprint, timings and
    settings. Your friend plays their own copy of the song. Lyric text is excluded by default and
    including it is a labelled opt-in at export time.
-5. **Lyrics come from you.** Paste them, or transcribe your own file locally. No lyric site is
-   ever scraped.
+5. **Lyrics come from you.** Paste them, read them off your own lyric video, or transcribe your own
+   file locally. All three happen in the browser. No lyric site is ever scraped.
 6. **The relay never touches media.** It exists for WebRTC signalling and room codes. It refuses
    request bodies outright, so there is nothing to upload to.
 
@@ -64,6 +64,7 @@ apps/web          static site: the KTV app, all processing in the browser
 workers/relay     Cloudflare Worker: WebRTC signalling and room codes only
 scripts           repo guards, run locally and in CI
 docs/DESIGN.md    architecture, data model, recipe format, legal rationale
+docs/lyrics-ocr.md  reading lyrics off a video you own
 .githooks         tracked git hooks
 ```
 

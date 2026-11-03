@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest';
 
 import {
   byNewest,
+  canReadLyrics,
   createMemorySongStore,
   sourceKindFor,
   titleFromFileName,
+  withLyrics,
+  withoutLyrics,
+  type SongLyrics,
   type SongRecord,
 } from '../src/library/songs.ts';
 
@@ -70,6 +74,45 @@ describe('byNewest', () => {
       'c',
       'a',
     ]);
+  });
+});
+
+describe('canReadLyrics', () => {
+  const video = { sourceKind: 'video', sourcePath: 'songs/x/source.mp4' } as const;
+
+  it('needs a video whose own bytes are still kept', () => {
+    expect(canReadLyrics(song(video))).toBe(true);
+    expect(canReadLyrics(song({ ...video, sourcePath: null }))).toBe(false);
+    expect(canReadLyrics(song({ sourceKind: 'audio', sourcePath: null }))).toBe(false);
+  });
+
+  it('waits for the separation worker to let go of the files', () => {
+    expect(canReadLyrics(song({ ...video, status: 'separating' }))).toBe(false);
+    expect(canReadLyrics(song({ ...video, status: 'cancelled' }))).toBe(true);
+  });
+});
+
+describe('withLyrics and withoutLyrics', () => {
+  // Placeholder words: no real lyric is ever committed, test or not.
+  const lyrics: SongLyrics = {
+    lines: [{ startMs: 1000, endMs: 2000, text: 'alpha beta' }],
+    source: 'video-ocr',
+    readAt: '2026-11-03T00:00:00.000Z',
+  };
+
+  it('puts the lines on the record and takes them off again', () => {
+    const read = withLyrics(song(), lyrics);
+
+    expect(read.lyrics).toEqual(lyrics);
+    expect(withoutLyrics(read)).toEqual(song());
+  });
+
+  it('leaves no empty field behind, so a saved record carries no key', () => {
+    expect(Object.hasOwn(withoutLyrics(withLyrics(song(), lyrics)), 'lyrics')).toBe(false);
+  });
+
+  it('says nothing about a song that never had lyrics', () => {
+    expect(withoutLyrics(song())).toEqual(song());
   });
 });
 
