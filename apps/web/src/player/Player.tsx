@@ -5,10 +5,14 @@ import type { SongRecord } from '../library/songs.ts';
 import { playableSource } from '../library/storage.ts';
 import { createOpfsStore } from '../storage/opfs-store.ts';
 import { VideoStage } from './VideoStage.tsx';
+import type { VocalChoice } from './stem-mix.ts';
 
 interface PlayerProps {
   readonly song: SongRecord;
   readonly onBack: () => void;
+  /** Held by the caller, so the room's choice outlives one song. */
+  readonly vocals: VocalChoice;
+  readonly onVocals: (choice: VocalChoice) => void;
 }
 
 /**
@@ -16,10 +20,10 @@ interface PlayerProps {
  *
  * This plays the picked file as it stands, so it works the moment the file is
  * in: before separation has finished, and for a song whose separation was
- * cancelled or failed. The stems will become another track against the same
- * picture later.
+ * cancelled or failed. Once the stems exist they play against the same
+ * picture in place of its own sound.
  */
-export function Player({ song, onBack }: PlayerProps) {
+export function Player({ song, onBack, vocals, onVocals }: PlayerProps) {
   const store = useMemo(() => createOpfsStore(), []);
   const path = song.sourcePath;
   const [url, setUrl] = useState<string | null>(null);
@@ -77,7 +81,9 @@ export function Player({ song, onBack }: PlayerProps) {
 
       {path !== null && error === null && url === null && <p className="note">Opening the file…</p>}
 
-      {url !== null && <VideoStage url={url} title={song.title} />}
+      {url !== null && (
+        <VideoStage url={url} song={song} vocals={vocals} onVocals={onVocals} />
+      )}
     </main>
   );
 }
