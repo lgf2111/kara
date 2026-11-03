@@ -103,3 +103,165 @@
   padding-top: 1rem;
   border-top: 1px solid #2c2e36;
 }
+.song-actions {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.songs .lyric-lines {
+  margin-top: 0.5rem;
+}
+
+.songs .lyric-lines summary {
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.songs .lyric-lines ol {
+  max-height: 18rem;
+  margin: 0.5rem 0 0;
+  padding: 0.5rem 0.75rem;
+  overflow-y: auto;
+  list-style: none;
+  border-left: 2px solid #2c2e36;
+}
+
+.songs .lyric-lines li {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.1rem 0;
+  font-size: 0.9rem;
+}
+
+.songs .lyric-lines .at {
+  flex: none;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The player. */
+
+.player {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 4rem;
+}
+
+.player p {
+  margin: 0.25rem 0;
+}
+
+.player .note {
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+}
+
+.player .error {
+  color: #ff9f9f;
+}
+
+.player h1 {
+  margin: 0.75rem 0 0;
+  font-size: 1.4rem;
+}
+
+.player button {
+  padding: 0.4rem 0.9rem;
+  background: #2c2e36;
+  color: inherit;
+  border: 1px solid #44464f;
+  border-radius: 0.3rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.player button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.player .back {
+  margin: 0;
+}
+
+.stage {
+  margin-top: 1rem;
+  background: #000;
+  border: 1px solid #2c2e36;
+  border-radius: 0.6rem;
+  overflow: hidden;
+}
+
+.stage video {
+  display: block;
+  width: 100%;
+  /* Letterboxed rather than cropped: a lyric video's words are at the edge. */
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  background: #000;
+  cursor: pointer;
+}
+
+/* Fullscreen shows the picture and the bar, nothing else. */
+.stage:fullscreen {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  border: 0;
+  border-radius: 0;
+}
+
+.stage:fullscreen video {
+  flex: 1;
+  aspect-ratio: auto;
+  min-height: 0;
+}
+
+.controls {
+  padding: 0.75rem;
+  background: #16181d;
+}
+
+.controls .bar,
+.controls .buttons {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.controls .buttons {
+  margin-top: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.controls .spacer {
+  flex: 1;
+}
+
+.controls .clock {
+  flex: none;
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.controls .seek {
+  flex: 1;
+  min-width: 6rem;
+}
+
+.controls .volume {
+  flex: none;
+  width: 6rem;
+}
+
+.controls .play {
+  min-width: 5rem;
+}
+
+.controls .note {
+  margin-top: 0.6rem;
+}

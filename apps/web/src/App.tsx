@@ -4,11 +4,16 @@ import { describeStage, describeStorage, formatBytes, formatEta } from './librar
 import type { SongRecord } from './library/songs.ts';
 import { totalBytes } from './library/storage.ts';
 import { useLibrary } from './library/useLibrary.ts';
+import { Player } from './player/Player.tsx';
+import { useSongRoute } from './player/useSongRoute.ts';
 
 export function App() {
   const library = useLibrary();
+  const route = useSongRoute();
   const active = library.active;
   const songCount = library.songs.length;
+  const playing =
+    route.songId === null ? null : (library.songs.find((song) => song.id === route.songId) ?? null);
 
   const askThenDelete = (song: SongRecord): void => {
     if (confirm(`Delete ${song.title}? Its stems and anything kept with them go with it.`)) {
@@ -21,6 +26,24 @@ export function App() {
       library.removeLyrics(song);
     }
   };
+
+  if (route.songId !== null) {
+    // The list arrives a moment after the first render, and a hash typed in or
+    // reloaded can name a song that has since been deleted.
+    if (playing === null) {
+      return (
+        <main className="player">
+          <button type="button" className="back" onClick={route.openLibrary}>
+            back to the library
+          </button>
+          <p className="note">
+            {library.loaded ? 'That song is not in this library.' : 'Looking for that song…'}
+          </p>
+        </main>
+      );
+    }
+    return <Player song={playing} onBack={route.openLibrary} />;
+  }
 
   return (
     <main className="library">
@@ -70,6 +93,9 @@ export function App() {
           busy={active !== null}
           lyricsJob={library.lyricsJob}
           cancellingLyrics={library.cancellingLyrics}
+          onPlay={(song) => {
+            route.openPlayer(song.id);
+          }}
           onDelete={askThenDelete}
           onReadLyrics={library.readLyrics}
           onCancelLyrics={library.cancelLyrics}
