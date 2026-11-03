@@ -1,0 +1,4 @@
+#!/bin/sh
+# Install with: pnpm run hooks:install
+# Git runs hooks from the top level of the worktree.
+exec node scripts/check-commit-message.mjs "$1"

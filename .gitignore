@@ -1,0 +1,39 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.wrangler/
+.DS_Store
+*.local
+
+# Model weights are fetched on first use and cached in OPFS. Never committed.
+models/
+*.onnx
+*.onnx_data
+*.safetensors
+*.gguf
+*.pt
+*.pth
+*.bin
+
+# No audio or video in this repo, ever. Test fixtures are synthesised on demand
+# by ffmpeg into fixtures/generated/ and stay untracked.
+fixtures/generated/
+*.mp3
+*.m4a
+*.aac
+*.wav
+*.flac
+*.ogg
+*.oga
+*.opus
+*.wma
+*.aiff
+*.mp4
+*.m4v
+*.mov
+*.mkv
+*.webm
+*.avi
+*.wmv
+*.flv

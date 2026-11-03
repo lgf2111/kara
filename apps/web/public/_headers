@@ -1,0 +1,14 @@
+# Cloudflare Pages response headers. Single source of truth: vite.config.ts
+# reads this file so the dev and preview servers cannot drift from production.
+#
+# Cross-origin isolation is required for SharedArrayBuffer, which the WASM
+# runtimes need. connect-src 'self' is the network half of the promise that
+# audio never leaves the device: the page can talk to its own origin only.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: same-origin
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
+  Permissions-Policy: camera=(), geolocation=(), microphone=(self)
