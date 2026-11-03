@@ -131,8 +131,8 @@ export function transcriptionModel(id: string): TranscriptionModel {
 /** Whisper language codes the spike exercises beyond English. */
 export const SPIKE_LANGUAGES = ['en', 'zh', 'ja', 'ko'] as const;
 
-/** Dev-only route where the Vite plugin serves the gitignored models folder. */
-export const MODEL_BASE = '/spike-models';
+/** Same-origin weights path, served by Vite in dev from the models/ folder. */
+export const MODEL_BASE = '/weights';
 
 /** One asset may not exceed this on Cloudflare Pages. */
 export const PAGES_FILE_LIMIT_BYTES = 25 * MIB;

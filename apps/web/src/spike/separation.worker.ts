@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 import * as ort from 'onnxruntime-web/webgpu';
 
-import { createStftPlan, stft, type Spectrum, type StftOptions } from './dsp/stft.ts';
+import { createStftPlan, stft, type Spectrum, type StftOptions } from '../dsp/stft.ts';
 import { cheapSample } from './memory.ts';
 import { MODEL_BASE, separationModel, type SeparationModel } from './models.ts';
 import { createStemWriter } from './opfs.ts';
