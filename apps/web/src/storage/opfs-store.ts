@@ -110,6 +110,15 @@ export function createOpfsStore(): Store {
       await stream.write(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
       await stream.close();
     },
+    async writeBlob(path, blob) {
+      const [directory, name] = await directoryFor(path, true);
+      const handle = await directory.getFileHandle(name, { create: true });
+      const stream = await handle.createWritable({ keepExistingData: false });
+      // Handing the blob straight to the stream copies it on the browser's
+      // side, so the bytes never pass through this heap.
+      await stream.write(blob);
+      await stream.close();
+    },
     async readBytes(path, offset, length) {
       try {
         const [directory, name] = await directoryFor(path, false);
