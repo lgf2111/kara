@@ -17,6 +17,13 @@ export interface StartMessage {
   /** Cap the segments for a probe. null runs the whole input. */
   readonly maxSegments: number | null;
   /**
+   * Which stems to write. `pair` is the vocal and one summed instrumental,
+   * which is all the player needs. `all` adds drums, bass and other, which
+   * costs two and a half times the disk and is for judging separation by ear.
+   * Defaults to `pair`.
+   */
+  readonly stems?: 'pair' | 'all';
+  /**
    * ONNX graph optimisation level. Worth lowering when a backend miscompiles a
    * graph: the fp16 htdemucs chain is sensitive to this.
    */
@@ -36,6 +43,8 @@ export interface ProgressMessage {
   readonly segmentsTotal: number;
   readonly etaMs: number | null;
   readonly resumedFrom: number;
+  /** The segment just finished, or null before any has been. */
+  readonly stemSumError: number | null;
 }
 
 export interface StemFile {
@@ -65,6 +74,12 @@ export interface SeparationResult {
    * large number here means the host maths is wrong, not that the model is.
    */
   readonly stemSumError: number | null;
+  /**
+   * The same measure for every segment this run processed, in order, starting
+   * at `resumedFrom`. One bad segment hides inside an average, so the run
+   * reports them all.
+   */
+  readonly stemSumErrors: readonly number[];
   /** Tensor types and sanity counts from the first segment, for diagnosis. */
   readonly diagnostics: Readonly<Record<string, string | number>>;
 }

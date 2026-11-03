@@ -9,6 +9,9 @@ import type {
 } from './separation/protocol.ts';
 import { createOpfsStore } from './storage/opfs-store.ts';
 
+/** The element the automation driver puts a local file into. */
+const FILE_INPUT_ID = 'pipeline-file';
+
 interface Loaded {
   readonly source: JobSource;
   readonly channels: Float32Array[];
@@ -19,6 +22,7 @@ interface RunOptions {
   readonly backend: Backend;
   readonly overlap: number;
   readonly maxSegments: number | null;
+  readonly stems?: 'pair' | 'all';
   readonly optimisation?: 'disabled' | 'basic' | 'extended' | 'all';
 }
 
@@ -30,12 +34,20 @@ interface Snapshot {
   readonly resumedFrom: number;
 }
 
+/**
+ * The phase hook the Playwright driver installs. Whether it exists is also how
+ * the page tells being driven from being clicked.
+ */
+function automationHook(): ((name: string, detail?: unknown) => void) | undefined {
+  const hook = (globalThis as unknown as Record<string, unknown>)['karaPhase'];
+  return typeof hook === 'function'
+    ? (hook as (name: string, detail?: unknown) => void)
+    : undefined;
+}
+
 function report(name: string, detail?: unknown): void {
   console.log(`[pipeline] ${name}${detail === undefined ? '' : ` ${JSON.stringify(detail)}`}`);
-  const hook = (globalThis as unknown as Record<string, unknown>)['karaPhase'];
-  if (typeof hook === 'function') {
-    (hook as (name: string, detail?: unknown) => void)(name, detail);
-  }
+  automationHook()?.(name, detail);
 }
 
 /** Decoding needs no audio output device, so an OfflineAudioContext is right. */
@@ -61,6 +73,19 @@ async function decode(bytes: ArrayBuffer, name: string): Promise<Loaded> {
   return { source, channels };
 }
 
+/**
+ * Decodes a chosen file, labelling a failure so the driver knows to retry
+ * through ffmpeg. Chrome accepts more containers than it can decode, and an
+ * mp4 whose audio it will not touch is the common case.
+ */
+async function decodeFile(file: File): Promise<Loaded> {
+  try {
+    return await decode(await file.arrayBuffer(), file.name);
+  } catch (cause) {
+    throw new Error(`decode-failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+  }
+}
+
 function formatSeconds(ms: number | null): string {
   return ms === null ? 'unknown' : `${(ms / 1000).toFixed(0)} s`;
 }
@@ -69,9 +94,26 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1048576).toFixed(1)} MiB`;
 }
 
+/**
+ * Base64 for handing a slice of a stem to the automation driver, which is the
+ * only way bytes leave the browser sandbox for a local tool to pick up. Built
+ * in small pieces because spreading a megabyte into `String.fromCharCode`
+ * overflows the argument list.
+ */
+function toBase64(bytes: Uint8Array): string {
+  const step = 0x8000;
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += step) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + step));
+  }
+  return btoa(binary);
+}
+
 export function PipelineApp() {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
-  const [backend, setBackend] = useState<Backend>('webgpu');
+  // WASM by default: the WebGPU backend returns NaN for every value of this
+  // model's chain, and the worker refuses to write those stems.
+  const [backend, setBackend] = useState<Backend>('wasm');
   const [segmentCap, setSegmentCap] = useState('0');
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [result, setResult] = useState<SeparationResult | null>(null);
@@ -112,6 +154,8 @@ export function PipelineApp() {
                 total: message.segmentsTotal,
                 etaMs: message.etaMs === null ? null : Math.round(message.etaMs),
                 resumedFrom: message.resumedFrom,
+                sumError:
+                  message.stemSumError === null ? null : Number(message.stemSumError.toFixed(5)),
               });
               setSnapshot(message);
               return;
@@ -135,6 +179,7 @@ export function PipelineApp() {
               audio: { sampleRate: input.source.sampleRate, channels },
               overlap: options.overlap,
               maxSegments: options.maxSegments,
+              stems: options.stems ?? 'pair',
               optimisation: options.optimisation ?? 'all',
             },
             channels.map((channel) => channel.buffer),
@@ -173,6 +218,22 @@ export function PipelineApp() {
         setLoaded(input);
         return run(options, input);
       },
+      /**
+       * Separates whatever file is sitting in the page's file input. This is
+       * how a real local file arrives: the driver sets it with
+       * `setInputFiles` and the browser decodes it, exactly as it would for a
+       * person choosing the file by hand. Nothing is uploaded or copied.
+       */
+      async runFile(options: RunOptions): Promise<SeparationResult> {
+        const element = document.getElementById(FILE_INPUT_ID);
+        const file = element instanceof HTMLInputElement ? element.files?.[0] : undefined;
+        if (file === undefined) {
+          throw new Error('no file is selected on the page');
+        }
+        const input = await decodeFile(file);
+        setLoaded(input);
+        return run(options, input);
+      },
       cancel,
       async jobState(name: string, bytes: number, samples: number): Promise<unknown> {
         const source: JobSource = { name, bytes, sampleRate: 44100, samples };
@@ -185,6 +246,14 @@ export function PipelineApp() {
           vocals: await store.sizeOf(paths.stem('vocals')),
           instrumental: await store.sizeOf(paths.stem('instrumental')),
         };
+      },
+      /** One slice of a finished stem, for the driver to write out as WAV. */
+      async readStemChunk(path: string, offset: number, length: number): Promise<string> {
+        const bytes = await createOpfsStore().readBytes(path, offset, length);
+        if (bytes === null) {
+          throw new Error(`no stem at ${path}`);
+        }
+        return toBase64(bytes);
       },
       async clear(): Promise<void> {
         await createOpfsStore().remove('songs');
@@ -228,11 +297,18 @@ export function PipelineApp() {
       <section>
         <h2>Input</h2>
         <input
+          id={FILE_INPUT_ID}
           type="file"
           accept="audio/*,video/*"
           onChange={(event) => {
             const file = event.target.files?.[0];
             if (file === undefined) {
+              return;
+            }
+            if (automationHook() !== undefined) {
+              // The driver fills this input and then calls runFile, which
+              // decodes. Decoding here too would do the work twice and hold
+              // two copies of the audio, which this target cannot spare.
               return;
             }
             void file
@@ -257,8 +333,8 @@ export function PipelineApp() {
         <label>
           Backend{' '}
           <select value={backend} onChange={(event) => setBackend(event.target.value as Backend)}>
-            <option value="webgpu">webgpu</option>
-            <option value="wasm">wasm (slow fallback)</option>
+            <option value="wasm">wasm</option>
+            <option value="webgpu">webgpu (returns NaN for this model)</option>
           </select>
         </label>
         <label>

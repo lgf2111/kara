@@ -194,10 +194,29 @@ describe('memory store', () => {
     expect(await store.list('songs/')).toEqual([]);
   });
 
+  it('reads a byte range, which is how a stem is copied out', async () => {
+    const store = createMemoryStore();
+    await store.writeFloat32('songs/x/vocals.f32', Float32Array.from([1, 2, 3, 4]));
+
+    const middle = await store.readBytes('songs/x/vocals.f32', 4, 8);
+
+    expect(middle?.byteLength).toBe(8);
+    expect([...new Float32Array(middle?.slice().buffer ?? new ArrayBuffer(0))]).toEqual([2, 3]);
+  });
+
+  it('clips a range that runs past the end', async () => {
+    const store = createMemoryStore();
+    await store.writeFloat32('songs/x/vocals.f32', Float32Array.from([1, 2]));
+
+    expect((await store.readBytes('songs/x/vocals.f32', 4, 999))?.byteLength).toBe(4);
+    expect((await store.readBytes('songs/x/vocals.f32', 8, 4))?.byteLength).toBe(0);
+  });
+
   it('returns null for files it does not have', async () => {
     const store = createMemoryStore();
     expect(await store.readFloat32('nope')).toBeNull();
     expect(await store.readJson('nope')).toBeNull();
     expect(await store.sizeOf('nope')).toBeNull();
+    expect(await store.readBytes('nope', 0, 8)).toBeNull();
   });
 });

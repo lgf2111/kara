@@ -204,7 +204,13 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
   const jobId = jobIdFor(source);
   const paths = jobPaths(jobId);
   const plan = planJob(source.samples, SEGMENT_SAMPLES, request.overlap);
-  const stemNames = ['vocals', 'instrumental'] as const;
+  // 'all' keeps each source as its own file as well as the summed
+  // instrumental, so separation can be judged one instrument at a time. The
+  // player only ever needs the pair, so that stays the default.
+  const writeAllStems = request.stems === 'all';
+  const stemNames: readonly string[] = writeAllStems
+    ? [...SOURCES, 'instrumental']
+    : ['vocals', 'instrumental'];
 
   const stemSizes: Record<string, number | null> = {};
   for (const name of stemNames) {
@@ -218,6 +224,7 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
     segmentsTotal: plan.total,
     etaMs: null,
     resumedFrom: resume.from,
+    stemSumError: null,
   });
 
   const total = request.maxSegments === null ? plan.total : Math.min(plan.total, request.maxSegments);
@@ -242,6 +249,7 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
       segmentsTotal: manifest.pieces.length,
       etaMs: null,
       resumedFrom: resume.from,
+      stemSumError: null,
     });
   }
   const loadMs = performance.now() - loadStart;
@@ -270,6 +278,31 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
   const vocals = new Float32Array(SEGMENT_SAMPLES * 2);
   const instrumental = new Float32Array(SEGMENT_SAMPLES * 2);
 
+  // Only in 'all' mode, and never for the vocal: `vocals` already holds the
+  // vocal alone, so a second buffer for it would be the same numbers twice.
+  const sourceBuffers = new Map<string, Float32Array>();
+  if (writeAllStems) {
+    for (const name of SOURCES) {
+      if (name !== 'vocals') {
+        sourceBuffers.set(name, new Float32Array(SEGMENT_SAMPLES * 2));
+      }
+    }
+  }
+
+  const freshFor = (name: string): Float32Array => {
+    if (name === 'vocals') {
+      return vocals;
+    }
+    if (name === 'instrumental') {
+      return instrumental;
+    }
+    const buffer = sourceBuffers.get(name);
+    if (buffer === undefined) {
+      throw new Error(`no segment buffer for stem ${name}`);
+    }
+    return buffer;
+  };
+
   interface StemState {
     readonly name: string;
     readonly file: Awaited<ReturnType<typeof store.openAppend>>;
@@ -292,7 +325,7 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
     stemStates.push({
       name,
       file,
-      fresh: name === 'vocals' ? vocals : instrumental,
+      fresh: freshFor(name),
       stitcher,
     });
   }
@@ -302,6 +335,7 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
   let samplesWritten = resume.samplesWritten;
   let segmentsDone = resume.from;
   let stemSumError: number | null = null;
+  const stemSumErrors: number[] = [];
   let cancelled = false;
 
   const persist = async (status: JobState['status']): Promise<void> => {
@@ -436,13 +470,20 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
     vocals.fill(0);
     instrumental.fill(0);
     for (let stem = 0; stem < SOURCES.length; stem += 1) {
-      const target = stem === VOCALS_INDEX ? vocals : instrumental;
+      const summed = stem === VOCALS_INDEX ? vocals : instrumental;
+      const own = stem === VOCALS_INDEX ? undefined : sourceBuffers.get(SOURCES[stem] ?? '');
       for (let channel = 0; channel < 2; channel += 1) {
         readStemSpectrum(x, stem, channel, bins, frames, stemRe, stemIm);
         host.ispec(stemRe, stemIm, stemChannel);
         const branch = readStemWaveform(xt, stem, channel, SEGMENT_SAMPLES);
         for (let i = 0; i < SEGMENT_SAMPLES; i += 1) {
-          target[i * 2 + channel] = (target[i * 2 + channel] ?? 0) + (stemChannel[i] ?? 0) + (branch[i] ?? 0);
+          const at = i * 2 + channel;
+          const value = (stemChannel[i] ?? 0) + (branch[i] ?? 0);
+          summed[at] = (summed[at] ?? 0) + value;
+          if (own !== undefined) {
+            // Written, not accumulated: this source owns the whole buffer.
+            own[at] = value;
+          }
         }
       }
     }
@@ -462,6 +503,9 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
       }
     }
     stemSumError = mixSum > 0 ? Math.sqrt(errorSum / mixSum) : null;
+    if (stemSumError !== null) {
+      stemSumErrors.push(stemSumError);
+    }
 
     const writeAt = performance.now();
     const isLast = index === total - 1;
@@ -489,6 +533,7 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
       segmentsTotal: total,
       etaMs: estimateRemainingMs(segmentMs, total - segmentsDone),
       resumedFrom: resume.from,
+      stemSumError,
     });
   }
 
@@ -521,6 +566,7 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
     samplesWritten,
     stems,
     stemSumError,
+    stemSumErrors,
     diagnostics,
   };
 }

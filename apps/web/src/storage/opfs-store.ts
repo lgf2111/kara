@@ -110,6 +110,17 @@ export function createOpfsStore(): Store {
       await stream.write(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
       await stream.close();
     },
+    async readBytes(path, offset, length) {
+      try {
+        const [directory, name] = await directoryFor(path, false);
+        const file = await (await directory.getFileHandle(name)).getFile();
+        // Slicing a File reads only the range asked for, so a long stem never
+        // has to be materialised whole.
+        return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+      } catch {
+        return null;
+      }
+    },
     async sizeOf(path) {
       try {
         const [directory, name] = await directoryFor(path, false);
