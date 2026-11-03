@@ -1,4 +1,4 @@
-import { complexTransform } from './fft.ts';
+import { realTransform } from './fft.ts';
 
 /**
  * Short-time Fourier transform in the layout the separation graphs want:
@@ -7,7 +7,7 @@ import { complexTransform } from './fft.ts';
  * `[realL, imagL, realR, imagR]`.
  *
  * `center` reflect-pads by `nFft / 2` and centres frame 0 on sample 0, which is
- * what torch.stft(center=True) does and what the MDX host contract requires.
+ * what torch.stft(center=True) does and what the model host contracts require.
  */
 export interface StftOptions {
   readonly nFft: number;
@@ -60,82 +60,125 @@ function readReflected(signal: Float32Array, index: number): number {
   return signal[at] ?? 0;
 }
 
-export function stft(signal: Float32Array, options: StftOptions): Spectrum {
-  const { nFft, hop, center } = options;
-  const transform = complexTransform(nFft);
-  const window = hannPeriodic(nFft);
-  const bins = nFft / 2 + 1;
-  const frames = frameCount(signal.length, options);
-  const offset = center ? nFft / 2 : 0;
-
-  const re = new Float32Array(bins * frames);
-  const im = new Float32Array(bins * frames);
-  const bufferRe = new Float64Array(nFft);
-  const bufferIm = new Float64Array(nFft);
-
-  for (let frame = 0; frame < frames; frame += 1) {
-    const start = frame * hop - offset;
-    bufferIm.fill(0);
-    for (let n = 0; n < nFft; n += 1) {
-      bufferRe[n] = readReflected(signal, start + n) * (window[n] ?? 0);
-    }
-    transform.forward(bufferRe, bufferIm);
-    for (let bin = 0; bin < bins; bin += 1) {
-      re[bin * frames + frame] = bufferRe[bin] ?? 0;
-      im[bin * frames + frame] = bufferIm[bin] ?? 0;
-    }
-  }
-
-  return { re, im, bins, frames };
+/**
+ * A reusable transform for one set of options.
+ *
+ * Everything it needs is allocated when the plan is made: window, twiddles,
+ * frame scratch and the overlap-add accumulator. The hot path allocates
+ * nothing, which is what makes it usable from an AudioWorklet and what makes
+ * it fast enough to stop dominating separation wall time.
+ */
+export interface StftPlan {
+  readonly options: StftOptions;
+  readonly bins: number;
+  frames(samples: number): number;
+  /** Writes bin-major spectra into `re` and `im`, each `bins * frames` long. */
+  forward(signal: Float32Array, frames: number, re: Float32Array, im: Float32Array): void;
+  /** Overlap-adds `frames` frames into `output`, which it fills completely. */
+  inverse(re: Float32Array, im: Float32Array, frames: number, output: Float32Array): void;
 }
 
-/**
- * Inverse of {@link stft}: overlap-add with window-squared normalisation, so a
- * round trip reproduces the signal wherever the window sum is non-zero.
- */
-export function istft(spectrum: Spectrum, options: StftOptions, length: number): Float32Array {
+function makePlan(options: StftOptions): StftPlan {
   const { nFft, hop, center } = options;
-  const transform = complexTransform(nFft);
+  const transform = realTransform(nFft);
   const window = hannPeriodic(nFft);
+  const bins = transform.bins;
   const offset = center ? nFft / 2 : 0;
-  const { frames, bins } = spectrum;
 
-  const output = new Float64Array(length);
-  const weight = new Float64Array(length);
-  const bufferRe = new Float64Array(nFft);
-  const bufferIm = new Float64Array(nFft);
+  const frame = new Float64Array(nFft);
+  const frameRe = new Float64Array(bins);
+  const frameIm = new Float64Array(bins);
+  let accumulator = new Float64Array(0);
+  let weight = new Float64Array(0);
 
-  for (let frame = 0; frame < frames; frame += 1) {
-    bufferRe.fill(0);
-    bufferIm.fill(0);
-    for (let bin = 0; bin < bins; bin += 1) {
-      const re = spectrum.re[bin * frames + frame] ?? 0;
-      const im = spectrum.im[bin * frames + frame] ?? 0;
-      bufferRe[bin] = re;
-      bufferIm[bin] = im;
-      if (bin > 0 && bin < nFft - bin) {
-        bufferRe[nFft - bin] = re; // hermitian mirror for a real signal
-        bufferIm[nFft - bin] = -im;
+  return {
+    options,
+    bins,
+    frames(samples) {
+      return frameCount(samples, options);
+    },
+    forward(signal, frames, re, im) {
+      for (let index = 0; index < frames; index += 1) {
+        const start = index * hop - offset;
+        if (start >= 0 && start + nFft <= signal.length) {
+          // Interior frame: no reflection needed, so copy straight across.
+          for (let n = 0; n < nFft; n += 1) {
+            frame[n] = (signal[start + n] ?? 0) * (window[n] ?? 0);
+          }
+        } else {
+          for (let n = 0; n < nFft; n += 1) {
+            frame[n] = readReflected(signal, start + n) * (window[n] ?? 0);
+          }
+        }
+        transform.forward(frame, frameRe, frameIm);
+        for (let bin = 0; bin < bins; bin += 1) {
+          re[bin * frames + index] = frameRe[bin] ?? 0;
+          im[bin * frames + index] = frameIm[bin] ?? 0;
+        }
       }
-    }
-    transform.inverse(bufferRe, bufferIm);
-
-    const start = frame * hop - offset;
-    for (let n = 0; n < nFft; n += 1) {
-      const at = start + n;
-      if (at < 0 || at >= length) {
-        continue;
+    },
+    inverse(re, im, frames, output) {
+      const length = output.length;
+      if (accumulator.length < length) {
+        accumulator = new Float64Array(length);
+        weight = new Float64Array(length);
       }
-      const w = window[n] ?? 0;
-      output[at] = (output[at] ?? 0) + (bufferRe[n] ?? 0) * w;
-      weight[at] = (weight[at] ?? 0) + w * w;
-    }
-  }
+      accumulator.fill(0, 0, length);
+      weight.fill(0, 0, length);
 
-  const result = new Float32Array(length);
-  for (let i = 0; i < length; i += 1) {
-    const w = weight[i] ?? 0;
-    result[i] = w > 1e-8 ? (output[i] ?? 0) / w : 0;
+      for (let index = 0; index < frames; index += 1) {
+        for (let bin = 0; bin < bins; bin += 1) {
+          frameRe[bin] = re[bin * frames + index] ?? 0;
+          frameIm[bin] = im[bin * frames + index] ?? 0;
+        }
+        transform.inverse(frameRe, frameIm, frame);
+
+        const start = index * hop - offset;
+        const from = Math.max(0, -start);
+        const to = Math.min(nFft, length - start);
+        for (let n = from; n < to; n += 1) {
+          const at = start + n;
+          const w = window[n] ?? 0;
+          accumulator[at] = (accumulator[at] ?? 0) + (frame[n] ?? 0) * w;
+          weight[at] = (weight[at] ?? 0) + w * w;
+        }
+      }
+
+      for (let i = 0; i < length; i += 1) {
+        const w = weight[i] ?? 0;
+        output[i] = w > 1e-8 ? (accumulator[i] ?? 0) / w : 0;
+      }
+    },
+  };
+}
+
+const plans = new Map<string, StftPlan>();
+
+export function createStftPlan(options: StftOptions): StftPlan {
+  const key = `${String(options.nFft)}:${String(options.hop)}:${String(options.center)}`;
+  const existing = plans.get(key);
+  if (existing !== undefined) {
+    return existing;
   }
-  return result;
+  const created = makePlan(options);
+  plans.set(key, created);
+  return created;
+}
+
+/** Convenience wrapper that allocates its own output. */
+export function stft(signal: Float32Array, options: StftOptions): Spectrum {
+  const plan = createStftPlan(options);
+  const frames = plan.frames(signal.length);
+  const re = new Float32Array(plan.bins * frames);
+  const im = new Float32Array(plan.bins * frames);
+  plan.forward(signal, frames, re, im);
+  return { re, im, bins: plan.bins, frames };
+}
+
+/** Convenience wrapper that allocates its own output. */
+export function istft(spectrum: Spectrum, options: StftOptions, length: number): Float32Array {
+  const plan = createStftPlan(options);
+  const output = new Float32Array(length);
+  plan.inverse(spectrum.re, spectrum.im, spectrum.frames, output);
+  return output;
 }

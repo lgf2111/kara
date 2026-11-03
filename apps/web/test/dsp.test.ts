@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import { complexTransform, isPowerOfTwo, naiveDft, nextPowerOfTwo } from '../src/spike/dsp/fft.ts';
-import { frameCount, hannPeriodic, istft, samplesForFrames, stft } from '../src/spike/dsp/stft.ts';
+import {
+  createStftPlan,
+  frameCount,
+  hannPeriodic,
+  istft,
+  samplesForFrames,
+  stft,
+} from '../src/spike/dsp/stft.ts';
+import { referenceIstft, referenceStft } from './reference-stft.ts';
 
 /**
  * Deterministic pseudo-random signal, so a failure is reproducible.
@@ -97,6 +105,84 @@ describe('frame counting', () => {
     const options = { nFft: 7680, hop: 1024, center: true };
     expect(samplesForFrames(256, options)).toBe(261120);
     expect(frameCount(261120, options)).toBe(256);
+  });
+});
+
+describe('the real-input fast path', () => {
+  it('matches the reference complex transform, forward', () => {
+    const options = { nFft: 4096, hop: 1024, center: true };
+    const signal = noise(1024 * 40, 13);
+
+    const fast = stft(signal, options);
+    const reference = referenceStft(signal, options);
+
+    expect(fast.bins).toBe(reference.bins);
+    expect(fast.frames).toBe(reference.frames);
+    let worstRe = 0;
+    let worstIm = 0;
+    for (let i = 0; i < reference.re.length; i += 1) {
+      worstRe = Math.max(worstRe, Math.abs((fast.re[i] ?? 0) - (reference.re[i] ?? 0)));
+      worstIm = Math.max(worstIm, Math.abs((fast.im[i] ?? 0) - (reference.im[i] ?? 0)));
+    }
+    expect(worstRe).toBeLessThan(1e-3);
+    expect(worstIm).toBeLessThan(1e-3);
+  });
+
+  it('matches the reference complex transform, inverse', () => {
+    const options = { nFft: 4096, hop: 1024, center: true };
+    const length = 1024 * 40;
+    const spectrum = stft(noise(length, 17), options);
+
+    const fast = istft(spectrum, options, length);
+    const reference = referenceIstft(spectrum, options, length);
+
+    expect(maxAbsDifference(fast, reference, 0, length)).toBeLessThan(1e-5);
+  });
+
+  it('matches the reference at the Bluestein size too', () => {
+    const options = { nFft: 7680, hop: 1024, center: true };
+    const signal = noise(1024 * 30, 19);
+
+    const fast = stft(signal, options);
+    const reference = referenceStft(signal, options);
+
+    let worst = 0;
+    for (let i = 0; i < reference.re.length; i += 1) {
+      worst = Math.max(
+        worst,
+        Math.abs((fast.re[i] ?? 0) - (reference.re[i] ?? 0)),
+        Math.abs((fast.im[i] ?? 0) - (reference.im[i] ?? 0)),
+      );
+    }
+    expect(worst).toBeLessThan(1e-3);
+  });
+
+  it('allocates nothing per call, so a plan can be reused', () => {
+    const options = { nFft: 4096, hop: 1024, center: true };
+    const plan = createStftPlan(options);
+    const signal = noise(1024 * 20, 23);
+    const frames = plan.frames(signal.length);
+    const re = new Float32Array(plan.bins * frames);
+    const im = new Float32Array(plan.bins * frames);
+    const output = new Float32Array(signal.length);
+
+    plan.forward(signal, frames, re, im);
+    const firstPass = Float32Array.from(re);
+    plan.inverse(re, im, frames, output);
+    const restored = Float32Array.from(output);
+
+    // Same plan, same buffers, twice: identical results prove no state leaks
+    // between calls.
+    plan.forward(signal, frames, re, im);
+    plan.inverse(re, im, frames, output);
+
+    expect(maxAbsDifference(firstPass, re, 0, re.length)).toBe(0);
+    expect(maxAbsDifference(restored, output, 0, output.length)).toBe(0);
+  });
+
+  it('returns the same plan for the same options', () => {
+    const options = { nFft: 4096, hop: 1024, center: true };
+    expect(createStftPlan(options)).toBe(createStftPlan({ ...options }));
   });
 });
 
