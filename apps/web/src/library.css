@@ -265,3 +265,60 @@
 .controls .note {
   margin-top: 0.6rem;
 }
+
+/* Vocals, under the controls and part of the same band. */
+
+.vocals {
+  padding: 0 0.75rem 0.75rem;
+  background: #16181d;
+}
+
+.vocals .row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.vocals .label {
+  flex: none;
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.vocals button[aria-pressed='true'] {
+  background: #3a3d47;
+  border-color: var(--ink);
+}
+
+.vocals .spacer {
+  flex: 1;
+}
+
+.vocals .guide {
+  display: flex;
+  flex: none;
+  gap: 0.5rem;
+  align-items: center;
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+}
+
+.vocals .guide input {
+  width: 7rem;
+}
+
+.vocals .percent {
+  flex: none;
+  min-width: 2.5rem;
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.vocals .note,
+.vocals .error {
+  margin-top: 0.6rem;
+}

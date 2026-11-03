@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 import { DropZone } from './library/DropZone.tsx';
 import { SongList } from './library/SongList.tsx';
 import { describeStage, describeStorage, formatBytes, formatEta } from './library/format.ts';
@@ -5,11 +7,15 @@ import type { SongRecord } from './library/songs.ts';
 import { totalBytes } from './library/storage.ts';
 import { useLibrary } from './library/useLibrary.ts';
 import { Player } from './player/Player.tsx';
+import { DEFAULT_VOCAL_CHOICE, type VocalChoice } from './player/stem-mix.ts';
 import { useSongRoute } from './player/useSongRoute.ts';
 
 export function App() {
   const library = useLibrary();
   const route = useSongRoute();
+  // Above the player, so going back to the library and putting the next song
+  // on keeps the choice. A room sets this once an evening, not once a song.
+  const [vocals, setVocals] = useState<VocalChoice>(DEFAULT_VOCAL_CHOICE);
   const active = library.active;
   const songCount = library.songs.length;
   const playing =
@@ -42,7 +48,14 @@ export function App() {
         </main>
       );
     }
-    return <Player song={playing} onBack={route.openLibrary} />;
+    return (
+      <Player
+        song={playing}
+        onBack={route.openLibrary}
+        vocals={vocals}
+        onVocals={setVocals}
+      />
+    );
   }
 
   return (
