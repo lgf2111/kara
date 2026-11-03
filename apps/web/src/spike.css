@@ -1,0 +1,56 @@
+.spike {
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 6rem;
+}
+
+.spike .warn {
+  color: #ffd479;
+}
+
+.spike section {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #2c2e36;
+}
+
+.spike label {
+  display: inline-block;
+  margin: 0 1rem 0.5rem 0;
+}
+
+.spike dl {
+  display: grid;
+  grid-template-columns: 16rem 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0;
+}
+
+.spike dt {
+  color: #a9a49a;
+}
+
+.spike dd {
+  margin: 0;
+}
+
+.spike button {
+  margin: 0.5rem 0.5rem 0 0;
+  padding: 0.4rem 0.9rem;
+  background: #2c2e36;
+  color: inherit;
+  border: 1px solid #44464f;
+  border-radius: 0.3rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.spike button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.spike pre {
+  white-space: pre-wrap;
+  color: #ff9f9f;
+}

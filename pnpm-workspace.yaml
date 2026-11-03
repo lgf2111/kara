@@ -1,3 +1,11 @@
 packages:
   - apps/*
   - workers/*
+
+# onnxruntime-node and protobufjs arrive transitively with the spike's
+# transcription runtime and are never used: the browser loads onnxruntime-web.
+# Their install scripts stay unrun, so nothing fetches native binaries we do
+# not need.
+allowBuilds:
+  onnxruntime-node: false
+  protobufjs: false
