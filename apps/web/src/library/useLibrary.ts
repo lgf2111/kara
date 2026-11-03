@@ -41,6 +41,8 @@ export interface LyricsJob {
 
 export interface Library {
   readonly songs: readonly SongRecord[];
+  /** The first read of the records is done, so an empty list means empty. */
+  readonly loaded: boolean;
   /** Bytes each song occupies in OPFS, keyed by song id. */
   readonly sizes: ReadonlyMap<string, number>;
   readonly usageBytes: number | null;
@@ -67,6 +69,7 @@ export function useLibrary(): Library {
   const fileStore = useMemo(() => createOpfsStore(), []);
   const songStore = useMemo(() => createIdbSongStore(), []);
   const [songs, setSongs] = useState<readonly SongRecord[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [sizes, setSizes] = useState<ReadonlyMap<string, number>>(() => new Map());
   const [usageBytes, setUsageBytes] = useState<number | null>(null);
   const [quotaBytes, setQuotaBytes] = useState<number | null>(null);
@@ -81,6 +84,7 @@ export function useLibrary(): Library {
   const refresh = useCallback(async (): Promise<void> => {
     const list = await songStore.list();
     setSongs(list);
+    setLoaded(true);
     setSizes(await songSizes(fileStore, list));
     const estimate = await navigator.storage.estimate();
     setUsageBytes(estimate.usage ?? null);
@@ -280,6 +284,7 @@ export function useLibrary(): Library {
 
   return {
     songs,
+    loaded,
     sizes,
     usageBytes,
     quotaBytes,

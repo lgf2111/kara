@@ -1,4 +1,5 @@
-import { formatEta } from './format.ts';
+import { formatDuration, formatEta } from './format.ts';
+import { describeLyrics } from './lyrics-summary.ts';
 import { canReadLyrics, type SongRecord } from './songs.ts';
 import type { LyricsJob } from './useLibrary.ts';
 
@@ -49,10 +50,23 @@ export function LyricsActions({
   if (lyrics !== undefined) {
     return (
       <div className="lyrics">
-        <p className="note">
-          {String(lyrics.lines.length)} lyric {lyrics.lines.length === 1 ? 'line' : 'lines'} read
-          from the video, kept on this device.
-        </p>
+        {/*
+          Shut until it is opened: the lines are the person's own reading of
+          their own video, and a library of songs would be a wall of words.
+          They are shown in this app and nowhere else.
+        */}
+        <details className="lyric-lines">
+          <summary>{describeLyrics(lyrics)}</summary>
+          <ol>
+            {lyrics.lines.map((line, index) => (
+              <li key={`${String(line.startMs)}-${String(index)}`}>
+                <span className="at">{formatDuration(line.startMs)}</span>
+                <span className="said">{line.text}</span>
+              </li>
+            ))}
+          </ol>
+          <p className="note">Read from the video's own picture, kept on this device.</p>
+        </details>
         <button
           type="button"
           onClick={() => {

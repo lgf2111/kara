@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { createMemorySongStore, type SongRecord } from '../src/library/songs.ts';
 import {
   deleteSong,
+  playableSource,
   songBytes,
   songSizes,
   sourceBlob,
@@ -88,6 +89,26 @@ describe('sourceBlob', () => {
 
   it('says so rather than handing back an empty video', async () => {
     await expect(sourceBlob(createMemoryStore(), path, 'video/mp4')).rejects.toThrow(/gone/u);
+  });
+});
+
+describe('playableSource', () => {
+  const path = 'songs/a/source.mov';
+
+  it('hands the whole file over, labelled for a media element', async () => {
+    const store = createMemoryStore();
+    const bytes = Uint8Array.from({ length: 30 }, (_unused, index) => index);
+    await store.writeBlob(path, new Blob([bytes]));
+
+    const blob = await playableSource(store, path);
+
+    expect(blob.type).toBe('video/quicktime');
+    expect(blob.size).toBe(30);
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(bytes);
+  });
+
+  it('says so when the kept file is gone', async () => {
+    await expect(playableSource(createMemoryStore(), path)).rejects.toThrow(/gone/u);
   });
 });
 

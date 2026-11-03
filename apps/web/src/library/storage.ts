@@ -65,6 +65,23 @@ export async function sourceBlob(
 }
 
 /**
+ * A kept source file for something that will stream it, labelled with the
+ * type a media element wants told.
+ *
+ * Unlike {@link sourceBlob} this never reads a byte: the store hands back a
+ * handle to what is on disk, and `slice` relabels it without copying, so the
+ * player can hold a whole video open for nothing. Use the chunked read only
+ * where the bytes themselves are needed.
+ */
+export async function playableSource(store: Store, path: string): Promise<Blob> {
+  const blob = await store.readBlob(path);
+  if (blob === null) {
+    throw new Error(`the file kept for this song is gone from ${path}`);
+  }
+  return blob.slice(0, blob.size, videoTypeFor(path));
+}
+
+/**
  * Bytes one song occupies: its stems, its job state and any kept source.
  *
  * A stem being written is locked by the worker, so while a job runs its size

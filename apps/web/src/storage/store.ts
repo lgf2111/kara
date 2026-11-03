@@ -30,6 +30,13 @@ export interface Store {
    */
   writeBlob(path: string, blob: Blob): Promise<void>;
   /**
+   * A whole file as a blob, without its bytes passing through this heap: the
+   * filesystem hands back a File, which is a handle to what is on disk. This
+   * is how a kept video reaches a media element, which streams from the blob
+   * as it plays rather than wanting it all at once.
+   */
+  readBlob(path: string): Promise<Blob | null>;
+  /**
    * One byte range, so a stem can be copied out in pieces. Reading a whole
    * four-minute stem costs 80 MB, which this target cannot spare.
    */
@@ -98,6 +105,13 @@ export function createMemoryStore(initial: Readonly<Record<string, Uint8Array>> 
     },
     async writeBlob(path, blob) {
       files.set(path, new Uint8Array(await blob.arrayBuffer()));
+    },
+    readBlob(path) {
+      const bytes = files.get(path);
+      if (bytes === undefined) {
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(new Blob([bytes.slice()]));
     },
     readBytes(path, offset, length) {
       const bytes = files.get(path);

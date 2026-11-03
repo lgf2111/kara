@@ -119,6 +119,16 @@ export function createOpfsStore(): Store {
       await stream.write(blob);
       await stream.close();
     },
+    async readBlob(path) {
+      try {
+        const [directory, name] = await directoryFor(path, false);
+        // The File is a handle, not a copy: nothing is read until whoever
+        // holds it asks for a range, which is what a media element does.
+        return await (await directory.getFileHandle(name)).getFile();
+      } catch {
+        return null;
+      }
+    },
     async readBytes(path, offset, length) {
       try {
         const [directory, name] = await directoryFor(path, false);

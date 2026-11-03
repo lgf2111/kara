@@ -12,6 +12,7 @@ interface SongListProps {
   /** The lyric read in flight, on whichever song it belongs to. */
   readonly lyricsJob: LyricsJob | null;
   readonly cancellingLyrics: boolean;
+  readonly onPlay: (song: SongRecord) => void;
   readonly onDelete: (song: SongRecord) => void;
   readonly onReadLyrics: (song: SongRecord) => void;
   readonly onCancelLyrics: () => void;
@@ -24,6 +25,7 @@ export function SongList({
   busy,
   lyricsJob,
   cancellingLyrics,
+  onPlay,
   onDelete,
   onReadLyrics,
   onCancelLyrics,
@@ -55,16 +57,29 @@ export function SongList({
               onRemove={onRemoveLyrics}
             />
           </div>
-          <button
-            type="button"
-            // Whatever is holding this song's files holds them open.
-            disabled={(busy && song.status === 'separating') || lyricsJob?.songId === song.id}
-            onClick={() => {
-              onDelete(song);
-            }}
-          >
-            delete
-          </button>
+          <div className="song-actions">
+            {/* The kept picture plays on its own, whatever the stems are doing. */}
+            {song.sourcePath !== null && (
+              <button
+                type="button"
+                onClick={() => {
+                  onPlay(song);
+                }}
+              >
+                play
+              </button>
+            )}
+            <button
+              type="button"
+              // Whatever is holding this song's files holds them open.
+              disabled={(busy && song.status === 'separating') || lyricsJob?.songId === song.id}
+              onClick={() => {
+                onDelete(song);
+              }}
+            >
+              delete
+            </button>
+          </div>
         </li>
       ))}
     </ul>
