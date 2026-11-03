@@ -8,15 +8,58 @@
 //   node scripts/spike/run-pipeline.mjs --segments 6
 //   node scripts/spike/run-pipeline.mjs --segments 6 --kill-after 3
 //   node scripts/spike/run-pipeline.mjs --segments 6          # resumes
+//
+// A real song you own, separated end to end, with stems to listen to:
+//
+//   node scripts/spike/run-pipeline.mjs --input ~/Music/song.mp4
+//
+// Audio or video, whatever Chrome can decode the audio track of, including an
+// mp4 whose video is AV1. The file stays where it is: Playwright hands it to
+// the page's file input and the browser decodes it, exactly as a person
+// choosing it would, and nothing is copied into this repository. When Chrome
+// refuses the container the script converts it first, with
+//
+//   ffmpeg -i <input> -vn -ac 2 -ar 44100 -c:a pcm_s16le <temp>.wav
+//
+// into the system temp directory, not the repository, and deletes it after.
+//
+// Stems are written as 16-bit WAV under
+// fixtures/generated/pipeline-results/<name>/, which is gitignored. They are
+// derived from your own file, so treat them the way you treat the original.
+//
+// Separation runs on WASM. The WebGPU backend returns NaN for every value of
+// this model's chain, so `--backend` accepts nothing else.
+//
+// Flags: --input <path>, --fixture <name>, --segments N (0 means the whole
+// track), --stems all|pair, --no-wav, --kill-after N, --stall S, --clear,
+// --inspect, --headed true, --port N, --label NAME, --opt LEVEL.
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { freemem, loadavg, totalmem } from 'node:os';
+import { appendFileSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { freemem, loadavg, tmpdir, totalmem } from 'node:os';
+import { resolve } from 'node:path';
 
 import { chromium } from 'playwright';
+
+import { floatToPcm16, outputNameFor, wavHeader } from '../lib/stems.mjs';
 
 const RESULTS_DIR = 'fixtures/generated/pipeline-results';
 const PROFILE_DIR = 'fixtures/generated/chrome-profile';
 const DEFAULT_PORT = '5274';
+
+/** Matches FILE_INPUT_ID in apps/web/src/PipelineApp.tsx. */
+const FILE_INPUT = '#pipeline-file';
+
+/** Everything is decoded to this, so every stem has this shape. */
+const STEM_SAMPLE_RATE = 44100;
+const STEM_CHANNELS = 2;
+const STEM_FRAME_BYTES = STEM_CHANNELS * Float32Array.BYTES_PER_ELEMENT;
+
+/**
+ * Bytes pulled out of the browser at a time. Base64 inflates this by a third
+ * on the wire, and it has to be a whole number of frames so a sample never
+ * straddles two chunks.
+ */
+const CHUNK_BYTES = 4 * 1024 * 1024;
 
 const BROWSER_ARGS = [
   '--enable-unsafe-webgpu',
@@ -184,19 +227,160 @@ async function startDevServer(baseUrl, port) {
   }
 }
 
+/**
+ * Decodes a container Chrome will not take into a plain WAV it will.
+ *
+ * The result goes to the system temp directory on purpose. Decoded audio from
+ * somebody's own music must not land inside this repository, even somewhere
+ * gitignored, so it is written outside, used, and deleted by the caller.
+ *
+ * @param {string} inputPath
+ * @returns {string} path to the temporary WAV
+ */
+function ffmpegToWav(inputPath) {
+  const target = `${tmpdir()}/kara-decode-${String(process.pid)}-${String(Date.now())}.wav`;
+  const result = spawnSync(
+    'ffmpeg',
+    [
+      ...['-hide_banner', '-loglevel', 'error', '-y'],
+      ...['-i', inputPath],
+      '-vn',
+      ...['-ac', String(STEM_CHANNELS)],
+      ...['-ar', String(STEM_SAMPLE_RATE)],
+      ...['-c:a', 'pcm_s16le'],
+      target,
+    ],
+    { encoding: 'utf8' },
+  );
+  if (result.status !== 0) {
+    throw new Error(`ffmpeg could not decode ${inputPath}: ${(result.stderr ?? '').trim()}`);
+  }
+  return target;
+}
+
+/**
+ * Copies every finished stem out of OPFS as a 16-bit WAV.
+ *
+ * Pulled in chunks rather than whole: a four-minute stem is 80 MB of float32
+ * and this target has had as little as 100 MB free.
+ *
+ * @param {import('playwright').Page} page
+ * @param {{ name: string, path: string, bytes: number }[]} stems
+ * @param {string} directory
+ * @returns {Promise<string[]>}
+ */
+async function exportStemWavs(page, stems, directory) {
+  mkdirSync(directory, { recursive: true });
+  /** @type {string[]} */
+  const written = [];
+  // One output buffer for every chunk of every stem: 16-bit is half the size
+  // of the float32 that comes out of the browser.
+  const pcm = new Uint8Array(CHUNK_BYTES / 2);
+
+  for (const stem of stems) {
+    const bytes = Math.floor(Number(stem.bytes) / STEM_FRAME_BYTES) * STEM_FRAME_BYTES;
+    const target = `${directory}/${stem.name}.wav`;
+    if (bytes === 0) {
+      console.log(`stem wav         ${stem.name} is empty, skipped`);
+      continue;
+    }
+
+    writeFileSync(
+      target,
+      wavHeader({
+        frames: bytes / STEM_FRAME_BYTES,
+        channels: STEM_CHANNELS,
+        sampleRate: STEM_SAMPLE_RATE,
+      }),
+    );
+
+    for (let offset = 0; offset < bytes; offset += CHUNK_BYTES) {
+      const length = Math.min(CHUNK_BYTES, bytes - offset);
+      const base64 = await page.evaluate(
+        `window.karaPipeline.readStemChunk(${JSON.stringify(stem.path)}, ${String(offset)}, ${String(length)})`,
+      );
+      // Copy into a fresh array: Buffer.from hands back a view into a pooled
+      // buffer at an arbitrary offset, which Float32Array cannot read.
+      const aligned = new Uint8Array(Buffer.from(String(base64), 'base64'));
+      const floats = new Float32Array(
+        aligned.buffer,
+        0,
+        Math.floor(aligned.byteLength / Float32Array.BYTES_PER_ELEMENT),
+      );
+      appendFileSync(target, floatToPcm16(floats, pcm.subarray(0, floats.length * 2)));
+    }
+
+    written.push(target);
+    console.log(
+      `stem wav         ${target} (${(bytes / STEM_FRAME_BYTES / STEM_SAMPLE_RATE).toFixed(1)}s)`,
+    );
+  }
+  return written;
+}
+
+/**
+ * @param {number} value
+ * @returns {string}
+ */
+function percent(value) {
+  return `${(value * 100).toFixed(2)}%`;
+}
+
+/**
+ * Every segment's stem-sum error, not just a summary: one bad segment
+ * disappears into an average.
+ *
+ * @param {number[]} errors
+ * @param {number} firstSegment
+ */
+function printSumErrors(errors, firstSegment) {
+  if (errors.length === 0) {
+    console.log('stem sum error   not measured');
+    return;
+  }
+  const sorted = [...errors].sort((a, b) => a - b);
+  console.log(
+    `stem sum error   median ${percent(sorted[Math.floor(sorted.length / 2)] ?? 0)}, min ${percent(
+      sorted[0] ?? 0,
+    )}, max ${percent(sorted[sorted.length - 1] ?? 0)} over ${String(errors.length)} segment(s)`,
+  );
+  for (let i = 0; i < errors.length; i += 6) {
+    const row = errors
+      .slice(i, i + 6)
+      .map((value, column) => `${String(firstSegment + i + column + 1).padStart(3)}:${percent(value)}`);
+    console.log(`  ${row.join('  ')}`);
+  }
+}
+
 async function main() {
   mkdirSync(RESULTS_DIR, { recursive: true });
   mkdirSync(PROFILE_DIR, { recursive: true });
 
   const fixture = flag('fixture', 'tone-240s.wav');
-  const backend = flag('backend', 'webgpu');
+  const inputFlag = flags.get('input');
+  const inputPath = inputFlag === undefined ? null : resolve(inputFlag);
+  const backend = flag('backend', 'wasm');
+  const stems = flag('stems', 'all');
   const segments = Number(flag('segments', '0'));
   const killAfter = Number(flag('kill-after', '0'));
   const stallSeconds = Number(flag('stall', '150'));
   const headless = flag('headed', 'false') !== 'true';
   const port = flag('port', DEFAULT_PORT);
   const baseUrl = `http://localhost:${port}`;
-  const label = flag('label', killAfter > 0 ? 'killed' : 'run');
+  const outputName = outputNameFor(inputPath ?? fixture);
+  const label = flag('label', killAfter > 0 ? 'killed' : inputPath === null ? 'run' : outputName);
+
+  if (backend !== 'wasm') {
+    throw new Error(
+      `--backend ${backend} is not available: WebGPU returns NaN for every value of this model's chain`,
+    );
+  }
+  if (stems !== 'all' && stems !== 'pair') {
+    throw new Error(`--stems takes all or pair, got ${stems}`);
+  }
+  if (inputPath !== null && statSync(inputPath, { throwIfNoEntry: false })?.isFile() !== true) {
+    throw new Error(`--input ${inputPath} is not a file`);
+  }
 
   const server = await startDevServer(baseUrl, port);
   // A persistent profile is the point: OPFS has to outlive the browser for a
@@ -215,6 +399,7 @@ async function main() {
   let lastPhaseName = 'launch';
   let peak = /** @type {TreeMemory | null} */ (null);
   let killed = false;
+  let temporaryWav = /** @type {string | null} */ (null);
 
   try {
     const page = context.pages()[0] ?? (await context.newPage());
@@ -278,6 +463,8 @@ async function main() {
 
     const start = pressure();
     console.log(`backend          ${backend}`);
+    console.log(`stems            ${stems}`);
+    console.log(`source           ${inputPath ?? `fixtures/generated/${fixture} (synthesised)`}`);
     console.log(`profile          ${PROFILE_DIR}`);
     console.log(
       `memory pressure  ${(start.freeBytes / 1048576).toFixed(0)} MiB free, load ${String(start.load1)}`,
@@ -288,27 +475,64 @@ async function main() {
       backend,
       overlap: 0.25,
       maxSegments: Number.isFinite(segments) && segments > 0 ? segments : null,
+      stems,
       optimisation: flag('opt', 'all'),
     };
+
+    /**
+     * One attempt, with the stall watchdog running only for its duration so a
+     * retry starts with a clean one.
+     *
+     * @param {string} method
+     * @returns {Promise<unknown>}
+     */
+    const attempt = async (method) => {
+      /** @type {ReturnType<typeof setInterval> | undefined} */
+      let watchdog;
+      try {
+        return await Promise.race([
+          page.evaluate(`window.karaPipeline.${method}(${JSON.stringify(options)})`),
+          new Promise((_resolve, reject) => {
+            watchdog = setInterval(() => {
+              if (Date.now() - lastPhaseAt > stallSeconds * 1000) {
+                reject(new Error(`stalled in phase "${lastPhaseName}"`));
+              }
+            }, 1000);
+          }),
+        ]);
+      } finally {
+        clearInterval(watchdog);
+      }
+    };
+
+    if (inputPath !== null) {
+      // Playwright reads the file from where it sits. Nothing is copied into
+      // the repository, and the page decodes it as it would any chosen file.
+      await page.setInputFiles(FILE_INPUT, inputPath);
+    }
 
     /** @type {any} */
     let result = null;
     /** @type {string | null} */
     let failure = null;
     try {
-      result = await Promise.race([
-        page.evaluate(`window.karaPipeline.run(${JSON.stringify(options)})`),
-        new Promise((_resolve, reject) => {
-          const watchdog = setInterval(() => {
-            if (Date.now() - lastPhaseAt > stallSeconds * 1000) {
-              clearInterval(watchdog);
-              reject(new Error(`stalled in phase "${lastPhaseName}"`));
-            }
-          }, 1000);
-        }),
-      ]);
+      result = await attempt(inputPath === null ? 'run' : 'runFile');
     } catch (cause) {
       failure = String(cause);
+    }
+
+    // Chrome accepts containers it cannot actually decode. One retry, through
+    // ffmpeg, from a temporary file outside this repository.
+    if (inputPath !== null && result === null && failure?.includes('decode-failed') === true) {
+      console.log('decode           Chrome refused the container, converting with ffmpeg');
+      temporaryWav = ffmpegToWav(inputPath);
+      await page.setInputFiles(FILE_INPUT, temporaryWav);
+      failure = null;
+      try {
+        result = await attempt('runFile');
+      } catch (cause) {
+        failure = String(cause);
+      }
     }
 
     const wallMs = Date.now() - began;
@@ -330,8 +554,9 @@ async function main() {
       console.log(`inference        ${(Number(result.inferenceMs) / 1000).toFixed(1)}s`);
       console.log(`wall clock       ${(wallMs / 1000).toFixed(1)}s`);
       console.log(`audio written    ${Number(result.audioSeconds).toFixed(1)}s`);
-      console.log(
-        `stem sum error   ${result.stemSumError === null ? 'n/a' : `${(Number(result.stemSumError) * 100).toFixed(2)}%`}`,
+      printSumErrors(
+        (result.stemSumErrors ?? []).map((/** @type {unknown} */ value) => Number(value)),
+        Number(result.resumedFrom ?? 0),
       );
       console.log(`diagnostics      ${JSON.stringify(result.diagnostics ?? {})}`);
       const host = Object.entries(result.hostMs ?? {});
@@ -346,6 +571,11 @@ async function main() {
         console.log(
           `stem             ${String(stem.name)} ${(Number(stem.bytes) / 1048576).toFixed(1)} MiB at ${String(stem.path)}`,
         );
+      }
+      if (flags.has('no-wav')) {
+        console.log('stem wav         skipped (--no-wav)');
+      } else {
+        await exportStemWavs(page, result.stems ?? [], `${RESULTS_DIR}/${outputName}`);
       }
     }
     if (peak !== null) {
@@ -376,6 +606,9 @@ async function main() {
       await context.close();
     } catch {
       // already closed by the kill
+    }
+    if (temporaryWav !== null) {
+      rmSync(temporaryWav, { force: true });
     }
     server.stop();
   }

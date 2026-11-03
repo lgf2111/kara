@@ -23,6 +23,11 @@ export interface Store {
   writeJson(path: string, value: unknown): Promise<void>;
   readFloat32(path: string): Promise<Float32Array | null>;
   writeFloat32(path: string, data: Float32Array<ArrayBuffer>): Promise<void>;
+  /**
+   * One byte range, so a stem can be copied out in pieces. Reading a whole
+   * four-minute stem costs 80 MB, which this target cannot spare.
+   */
+  readBytes(path: string, offset: number, length: number): Promise<Uint8Array | null>;
   sizeOf(path: string): Promise<number | null>;
   remove(path: string): Promise<void>;
   list(prefix: string): Promise<string[]>;
@@ -84,6 +89,13 @@ export function createMemoryStore(initial: Readonly<Record<string, Uint8Array>> 
     writeFloat32(path, data) {
       files.set(path, new Uint8Array(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)));
       return Promise.resolve();
+    },
+    readBytes(path, offset, length) {
+      const bytes = files.get(path);
+      if (bytes === undefined) {
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(bytes.slice(offset, offset + length));
     },
     sizeOf(path) {
       return Promise.resolve(files.get(path)?.byteLength ?? null);
