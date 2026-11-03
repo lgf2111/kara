@@ -114,11 +114,22 @@ export const TRANSCRIPTION_MODELS: readonly TranscriptionModel[] = [
     id: 'whisper-base',
     label: 'whisper-base, int8 encoder and merged decoder (73 MiB)',
     repo: 'onnx-community/whisper-base',
-    licence: 'Apache-2.0 (ONNX repo); upstream Whisper weights MIT',
+    licence: 'Apache-2.0 (ONNX repo); upstream openai/whisper weights MIT',
     totalBytes: Math.round(73.3 * MIB),
     largestFileBytes: Math.round(51.2 * MIB),
   },
 ];
+
+export function transcriptionModel(id: string): TranscriptionModel {
+  const found = TRANSCRIPTION_MODELS.find((model) => model.id === id);
+  if (found === undefined) {
+    throw new Error(`unknown transcription model: ${id}`);
+  }
+  return found;
+}
+
+/** Whisper language codes the spike exercises beyond English. */
+export const SPIKE_LANGUAGES = ['en', 'zh', 'ja', 'ko'] as const;
 
 /** Dev-only route where the Vite plugin serves the gitignored models folder. */
 export const MODEL_BASE = '/spike-models';
