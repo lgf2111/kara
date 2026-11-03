@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { complexTransform, isPowerOfTwo, naiveDft, nextPowerOfTwo } from '../src/spike/dsp/fft.ts';
+import { complexTransform, isPowerOfTwo, naiveDft, nextPowerOfTwo } from '../src/dsp/fft.ts';
 import {
   createStftPlan,
   frameCount,
@@ -8,7 +8,7 @@ import {
   istft,
   samplesForFrames,
   stft,
-} from '../src/spike/dsp/stft.ts';
+} from '../src/dsp/stft.ts';
 import { referenceIstft, referenceStft } from './reference-stft.ts';
 
 /**

@@ -1,5 +1,5 @@
-import { complexTransform } from '../src/spike/dsp/fft.ts';
-import { frameCount, hannPeriodic, type Spectrum, type StftOptions } from '../src/spike/dsp/stft.ts';
+import { complexTransform } from '../src/dsp/fft.ts';
+import { frameCount, hannPeriodic, type Spectrum, type StftOptions } from '../src/dsp/stft.ts';
 
 /**
  * The transform as it was before the real-input fast path: a full complex FFT

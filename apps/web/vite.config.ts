@@ -79,15 +79,18 @@ function serveDirectory(prefix: string, root: string): Plugin {
   };
 }
 
-/** `/spike` is nicer to type than `/spike.html`, and only exists in dev. */
-function spikeRoute(): Plugin {
+/** Nicer to type than the .html, and these only exist in dev. */
+function devRoutes(): Plugin {
   return {
-    name: 'kara-spike-route',
+    name: 'kara-dev-routes',
     apply: 'serve',
     configureServer(server) {
       server.middlewares.use((request, _response, next) => {
         if (request.url === '/spike' || request.url === '/spike/') {
           request.url = '/spike.html';
+        }
+        if (request.url === '/pipeline' || request.url === '/pipeline/') {
+          request.url = '/pipeline.html';
         }
         next();
       });
@@ -107,8 +110,11 @@ const hfOrtDist = require
 export default defineConfig({
   plugins: [
     react(),
-    spikeRoute(),
-    serveDirectory('/spike-models', `${repoRoot}models`),
+    devRoutes(),
+    // Weights live at a same-origin path, which is the arrangement M1 chose:
+    // production will serve /weights/* from R2 behind the same host, so no CSP
+    // exception is ever needed. In dev it comes from the gitignored models/.
+    serveDirectory('/weights', `${repoRoot}models`),
     serveDirectory('/spike-ort', ortDist),
     serveDirectory('/spike-hf-ort', hfOrtDist),
     // Synthesised fixtures only, for the Playwright run. Gitignored, and the

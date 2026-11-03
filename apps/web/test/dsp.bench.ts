@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { createStftPlan, type StftOptions } from '../src/spike/dsp/stft.ts';
+import { createStftPlan, type StftOptions } from '../src/dsp/stft.ts';
 import { referenceIstft, referenceStft } from './reference-stft.ts';
 
 /**
