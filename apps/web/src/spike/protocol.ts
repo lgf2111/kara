@@ -37,6 +37,7 @@ export interface TranscriptionRequest {
   readonly kind: 'transcribe';
   readonly modelId: string;
   readonly backend: Backend;
+  readonly mode: RunMode;
   /** Whisper language code, or 'auto'. */
   readonly language: string;
   readonly audio: AudioPayload;

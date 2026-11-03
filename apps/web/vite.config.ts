@@ -98,6 +98,11 @@ function spikeRoute(): Plugin {
 const require = createRequire(import.meta.url);
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const ortDist = require.resolve('onnxruntime-web').replace(/\/[^/]+$/u, '');
+// transformers.js pins its own onnxruntime-web build, and its wasm must match
+// that version rather than ours.
+const hfOrtDist = require
+  .resolve('onnxruntime-web', { paths: [require.resolve('@huggingface/transformers')] })
+  .replace(/\/[^/]+$/u, '');
 
 export default defineConfig({
   plugins: [
@@ -105,6 +110,7 @@ export default defineConfig({
     spikeRoute(),
     serveDirectory('/spike-models', `${repoRoot}models`),
     serveDirectory('/spike-ort', ortDist),
+    serveDirectory('/spike-hf-ort', hfOrtDist),
     // Synthesised fixtures only, for the Playwright run. Gitignored, and the
     // route does not exist in a production build.
     serveDirectory('/spike-fixtures', `${repoRoot}fixtures/generated`),

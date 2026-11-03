@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { fullSample } from './spike/memory.ts';
-import { PAGES_FILE_LIMIT_BYTES, SEPARATION_MODELS } from './spike/models.ts';
+import {
+  PAGES_FILE_LIMIT_BYTES,
+  SEPARATION_MODELS,
+  SPIKE_LANGUAGES,
+  TRANSCRIPTION_MODELS,
+} from './spike/models.ts';
 import { clearStems, readStem } from './spike/opfs.ts';
 import type {
   AudioPayload,
@@ -22,10 +27,12 @@ interface Loaded {
 }
 
 interface RunOptions {
+  readonly task: 'separation' | 'transcription';
   readonly modelId: string;
   readonly backend: Backend;
   readonly mode: RunMode;
   readonly maxSegments: number | null;
+  readonly language: string;
 }
 
 /** Records how much the main thread stuttered while the worker was busy. */
@@ -102,7 +109,9 @@ async function describeWebGpu(): Promise<string | null> {
 
 export function SpikeApp() {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
+  const [task, setTask] = useState<'separation' | 'transcription'>('separation');
   const [modelId, setModelId] = useState<string>(SEPARATION_MODELS[0]?.id ?? '');
+  const [language, setLanguage] = useState<string>('zh');
   const [backend, setBackend] = useState<Backend>('webgpu');
   const [mode, setMode] = useState<RunMode>('audio');
   const [segmentCap, setSegmentCap] = useState<string>('4');
@@ -153,10 +162,11 @@ export function SpikeApp() {
       const stopHeartbeat = startHeartbeat();
       const startedAt = new Date().toISOString();
 
-      const worker = new Worker(new URL('./spike/separation.worker.ts', import.meta.url), {
-        type: 'module',
-      });
-      phase('worker-created');
+      const worker =
+        options.task === 'transcription'
+          ? new Worker(new URL('./spike/transcription.worker.ts', import.meta.url), { type: 'module' })
+          : new Worker(new URL('./spike/separation.worker.ts', import.meta.url), { type: 'module' });
+      phase('worker-created', { task: options.task });
 
       const payload: AudioPayload = {
         sampleRate: input.sampleRate,
@@ -185,14 +195,23 @@ export function SpikeApp() {
         });
         phase('worker-posting-request');
         worker.postMessage(
-          {
-            kind: 'separate',
-            modelId: options.modelId,
-            backend: options.backend,
-            mode: options.mode,
-            audio: payload,
-            maxSegments: options.maxSegments,
-          },
+          options.task === 'transcription'
+            ? {
+                kind: 'transcribe',
+                modelId: options.modelId,
+                backend: options.backend,
+                mode: options.mode,
+                language: options.language,
+                audio: payload,
+              }
+            : {
+                kind: 'separate',
+                modelId: options.modelId,
+                backend: options.backend,
+                mode: options.mode,
+                audio: payload,
+                maxSegments: options.maxSegments,
+              },
           payload.channels.map((channel) => channel.buffer),
         );
       });
@@ -248,6 +267,8 @@ export function SpikeApp() {
         return run(options, input);
       },
       models: SEPARATION_MODELS.map((model) => model.id),
+      transcriptionModels: TRANSCRIPTION_MODELS.map((model) => model.id),
+      languages: [...SPIKE_LANGUAGES],
     };
     (globalThis as unknown as Record<string, unknown>)['karaSpike'] = api;
     phase('page-ready', { crossOriginIsolated });
@@ -338,15 +359,43 @@ export function SpikeApp() {
       <section>
         <h2>Run</h2>
         <label>
+          Task{' '}
+          <select
+            value={task}
+            onChange={(event) => {
+              const next = event.target.value as 'separation' | 'transcription';
+              setTask(next);
+              setModelId(
+                (next === 'transcription' ? TRANSCRIPTION_MODELS[0]?.id : SEPARATION_MODELS[0]?.id) ?? '',
+              );
+            }}
+          >
+            <option value="separation">separation</option>
+            <option value="transcription">transcription</option>
+          </select>
+        </label>
+        <label>
           Model{' '}
           <select value={modelId} onChange={(event) => setModelId(event.target.value)}>
-            {SEPARATION_MODELS.map((candidate) => (
+            {(task === 'transcription' ? TRANSCRIPTION_MODELS : SEPARATION_MODELS).map((candidate) => (
               <option key={candidate.id} value={candidate.id}>
                 {candidate.label}
               </option>
             ))}
           </select>
         </label>
+        {task === 'transcription' && (
+          <label>
+            Language{' '}
+            <select value={language} onChange={(event) => setLanguage(event.target.value)}>
+              {SPIKE_LANGUAGES.map((code) => (
+                <option key={code} value={code}>
+                  {code}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label>
           Backend{' '}
           <select value={backend} onChange={(event) => setBackend(event.target.value as Backend)}>
@@ -381,10 +430,12 @@ export function SpikeApp() {
             const cap = Number(segmentCap);
             void run(
               {
+                task,
                 modelId,
                 backend,
                 mode,
                 maxSegments: Number.isFinite(cap) && cap > 0 ? cap : null,
+                language,
               },
               loaded,
             );

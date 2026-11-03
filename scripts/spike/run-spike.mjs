@@ -13,7 +13,7 @@
 //   node scripts/spike/run-spike.mjs --mode load --model mdx-inst-hq5 --backend webgpu
 //   node scripts/spike/run-spike.mjs --probe
 //   node scripts/spike/run-spike.mjs --headed true --channel chrome ...
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { freemem, loadavg, totalmem } from 'node:os';
 
@@ -81,6 +81,115 @@ function pressure() {
     freeFraction: Number((free / total).toFixed(4)),
     load1: Number((loadavg()[0] ?? 0).toFixed(2)),
   };
+}
+
+/**
+ * PID of the browser we launched. Playwright gives it a temporary profile
+ * directory whose name contains "playwright_chromium", which is what
+ * distinguishes it from the unrelated Chromium that also runs on this machine.
+ * Child processes carry --type=, so the one without it is the root.
+ *
+ * @returns {number | undefined}
+ */
+function findBrowserPid() {
+  const result = spawnSync('ps', ['-axo', 'pid,command'], {
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    return undefined;
+  }
+  for (const line of result.stdout.split('\n')) {
+    if (!line.includes('playwright_chromium') || line.includes('--type=')) {
+      continue;
+    }
+    const match = /^\s*(\d+)\s/u.exec(line);
+    if (match !== null) {
+      return Number(match[1]);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * @typedef {object} TreeMemory
+ * @property {number} rootPid
+ * @property {number} processes
+ * @property {number} totalKb
+ * @property {Record<string, number>} byType
+ */
+
+/**
+ * Resident memory of our browser's process tree, by Chromium process type.
+ *
+ * Restricted to descendants of the browser we launched: this machine runs
+ * another unrelated Chromium, and summing every process called "Chromium"
+ * would measure that too. This is the only figure here that sees the GPU
+ * process, so it is the only one that reflects WebGPU buffers.
+ *
+ * @param {number | undefined} rootPid
+ * @returns {TreeMemory | null}
+ */
+function processTreeMemory(rootPid) {
+  if (rootPid === undefined) {
+    return null;
+  }
+  const result = spawnSync('ps', ['-axo', 'pid,ppid,rss,command'], {
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  if (result.status !== 0) {
+    return null;
+  }
+
+  /** @type {{ pid: number, ppid: number, rssKb: number, command: string }[]} */
+  const rows = [];
+  for (const line of result.stdout.split('\n').slice(1)) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/u.exec(line);
+    if (match === null) {
+      continue;
+    }
+    rows.push({
+      pid: Number(match[1]),
+      ppid: Number(match[2]),
+      rssKb: Number(match[3]),
+      command: match[4] ?? '',
+    });
+  }
+
+  /** @type {Map<number, typeof rows>} */
+  const children = new Map();
+  for (const row of rows) {
+    const siblings = children.get(row.ppid) ?? [];
+    siblings.push(row);
+    children.set(row.ppid, siblings);
+  }
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
+
+  /** @type {Record<string, number>} */
+  const byType = {};
+  let totalKb = 0;
+  let processes = 0;
+  const stack = [rootPid];
+  const seen = new Set();
+  while (stack.length > 0) {
+    const pid = stack.pop();
+    if (pid === undefined || seen.has(pid)) {
+      continue;
+    }
+    seen.add(pid);
+    const row = byPid.get(pid);
+    if (row !== undefined) {
+      const type = /--type=([a-z-]+)/u.exec(row.command)?.[1] ?? 'browser';
+      byType[type] = (byType[type] ?? 0) + row.rssKb;
+      totalKb += row.rssKb;
+      processes += 1;
+    }
+    for (const child of children.get(pid) ?? []) {
+      stack.push(child.pid);
+    }
+  }
+  return { rootPid, processes, totalKb, byType };
 }
 
 /**
@@ -198,13 +307,15 @@ async function main() {
     ...(channel === '' ? {} : { channel }),
   });
 
-  /** @type {{ name: string, atMs: number, sinceMs: number, detail: unknown, pressure: ReturnType<typeof pressure> }[]} */
+  /** @type {{ name: string, atMs: number, sinceMs: number, detail: unknown, pressure: ReturnType<typeof pressure>, browserKb: number | null }[]} */
   const phases = [];
   /** @type {string[]} */
   const consoleLines = [];
   let lastPhaseAt = Date.now();
   let lastPhaseName = 'launch';
   const began = Date.now();
+  const browserPid = findBrowserPid();
+  let peakTree = /** @type {TreeMemory | null} */ (null);
 
   /**
    * @param {string} outcome
@@ -227,6 +338,7 @@ async function main() {
           wallMs: Date.now() - began,
           phases,
           pressureAtEnd: pressure(),
+          peakBrowserMemory: peakTree,
           minFreeBytes: Math.min(...phases.map((phase) => phase.pressure.freeBytes), freemem()),
           consoleLines,
           ...extra,
@@ -260,13 +372,24 @@ async function main() {
     await page.exposeFunction('karaPhase', (/** @type {string} */ name, /** @type {unknown} */ detail) => {
       const now = Date.now();
       const sinceMs = now - lastPhaseAt;
-      phases.push({ name, atMs: now - began, sinceMs, detail: detail ?? null, pressure: pressure() });
+      const tree = processTreeMemory(browserPid);
+      if (tree !== null && (peakTree === null || tree.totalKb > peakTree.totalKb)) {
+        peakTree = tree;
+      }
+      phases.push({
+        name,
+        atMs: now - began,
+        sinceMs,
+        detail: detail ?? null,
+        pressure: pressure(),
+        browserKb: tree?.totalKb ?? null,
+      });
       lastPhaseAt = now;
       lastPhaseName = name;
       console.log(
         `phase  +${String(Math.round((now - began) / 100) / 10).padStart(6)}s  ${name}${
           detail === undefined || detail === null ? '' : ` ${JSON.stringify(detail)}`
-        }`,
+        }${tree === null ? '' : `  [browser ${String(Math.round(tree.totalKb / 1024))} MiB]`}`,
       );
     });
 
@@ -397,12 +520,18 @@ async function main() {
     }
 
     const options = {
+      task: flag('task', 'separation'),
       modelId: model,
       backend,
       mode,
       maxSegments: Number.isFinite(segmentCap) && segmentCap > 0 ? segmentCap : null,
+      language: flag('language', 'zh'),
     };
-    console.log(`run              ${model} / ${backend} / ${mode}, cap ${String(options.maxSegments)}`);
+    console.log(
+      `run              ${String(options.task)} ${model} / ${backend} / ${mode}, cap ${String(options.maxSegments)}${
+        options.task === 'transcription' ? `, language ${String(options.language)}` : ''
+      }`,
+    );
 
     lastPhaseAt = Date.now();
     /** @type {any} */
@@ -427,9 +556,10 @@ async function main() {
         }),
       ]);
     } catch (cause) {
-      console.log(`outcome          STALLED or DIED after ${seconds(Date.now() - began)}`);
+      console.log(`outcome          STALLED after ${seconds(Date.now() - began)}`);
       console.log(`last phase       ${lastPhaseName}`);
       console.log(`reason           ${String(cause)}`);
+      console.log(`note             watchdog fired; this is a stall, not a renderer crash`);
       console.log('--- requests to the dev routes ---');
       for (const entry of requestTable()) {
         console.log(`  +${String(entry.startedMs)}ms ${entry.status.padEnd(22)} ${entry.url}`);
@@ -477,8 +607,31 @@ async function main() {
       );
       const end = pressure();
       console.log(`memory pressure  ${mib(end.freeBytes)} free at end, load ${String(end.load1)}`);
+      if (peakTree !== null) {
+        const parts = Object.entries(peakTree.byType)
+          .sort((a, b) => b[1] - a[1])
+          .map(([type, kb]) => `${type} ${String(Math.round(kb / 1024))}`)
+          .join(', ');
+        console.log(
+          `peak browser RSS ${String(Math.round(peakTree.totalKb / 1024))} MiB across ${String(peakTree.processes)} processes (MiB: ${parts})`,
+        );
+      }
       for (const stem of run.stems) {
         console.log(`stem             ${String(stem.name)} ${mib(stem.bytes)} at ${String(stem.opfsPath)}`);
+      }
+      if (run.transcription !== null) {
+        const transcription = run.transcription;
+        console.log(`language         ${String(transcription.language)}`);
+        console.log(`word timestamps  ${String(transcription.wordTimestampsAvailable)}`);
+        console.log(`words returned   ${String(transcription.words.length)}`);
+        console.log(`text (120 chars) ${JSON.stringify(String(transcription.text).slice(0, 120))}`);
+        const firstWords = transcription.words.slice(0, 5).map(
+          (/** @type {{ text: string, startMs: number, endMs: number }} */ word) =>
+            `${String(word.text)}@${String(word.startMs)}-${String(word.endMs)}ms`,
+        );
+        if (firstWords.length > 0) {
+          console.log(`first words      ${firstWords.join(' ')}`);
+        }
       }
       for (const caveat of run.caveats) {
         console.log(`caveat           ${String(caveat)}`);
