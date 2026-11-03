@@ -24,6 +24,12 @@ export interface Store {
   readFloat32(path: string): Promise<Float32Array | null>;
   writeFloat32(path: string, data: Float32Array<ArrayBuffer>): Promise<void>;
   /**
+   * Copies a picked file in as it stands, streamed rather than buffered. This
+   * is how a video's own bytes are kept for the room background; a long video
+   * never has to sit in memory.
+   */
+  writeBlob(path: string, blob: Blob): Promise<void>;
+  /**
    * One byte range, so a stem can be copied out in pieces. Reading a whole
    * four-minute stem costs 80 MB, which this target cannot spare.
    */
@@ -89,6 +95,9 @@ export function createMemoryStore(initial: Readonly<Record<string, Uint8Array>> 
     writeFloat32(path, data) {
       files.set(path, new Uint8Array(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)));
       return Promise.resolve();
+    },
+    async writeBlob(path, blob) {
+      files.set(path, new Uint8Array(await blob.arrayBuffer()));
     },
     readBytes(path, offset, length) {
       const bytes = files.get(path);

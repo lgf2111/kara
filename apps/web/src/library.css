@@ -1,0 +1,93 @@
+.library {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 3rem 1.25rem 5rem;
+}
+
+.library p {
+  margin: 0.25rem 0;
+}
+
+.library .note,
+.library .song-meta {
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+}
+
+.library .error {
+  color: #ff9f9f;
+}
+
+.library button {
+  margin: 0.75rem 0 0;
+  padding: 0.4rem 0.9rem;
+  background: #2c2e36;
+  color: inherit;
+  border: 1px solid #44464f;
+  border-radius: 0.3rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.library button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.library progress {
+  width: 100%;
+  margin-top: 0.75rem;
+}
+
+.drop {
+  margin-top: 2rem;
+  padding: 1.5rem;
+  border: 1px dashed #44464f;
+  border-radius: 0.6rem;
+}
+
+.drop.over {
+  border-color: var(--ink);
+  background: #1b1d23;
+}
+
+.drop .pick {
+  display: block;
+  margin-top: 0.75rem;
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+}
+
+.drop .note {
+  margin-top: 0.75rem;
+}
+
+.songs {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.songs li {
+  display: flex;
+  gap: 1rem;
+  align-items: start;
+  justify-content: space-between;
+  padding: 0.75rem 0;
+  border-top: 1px solid #2c2e36;
+}
+
+.songs button {
+  margin: 0;
+  flex: none;
+}
+
+.song-title {
+  font-weight: 600;
+}
+
+.library footer {
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px solid #2c2e36;
+}
