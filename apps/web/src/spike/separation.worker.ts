@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 import * as ort from 'onnxruntime-web/webgpu';
 
-import { stft, istft, type Spectrum, type StftOptions } from './dsp/stft.ts';
+import { createStftPlan, stft, type Spectrum, type StftOptions } from './dsp/stft.ts';
 import { cheapSample } from './memory.ts';
 import { MODEL_BASE, separationModel, type SeparationModel } from './models.ts';
 import { createStemWriter } from './opfs.ts';
@@ -117,27 +117,69 @@ function packMdxInput(left: Spectrum, right: Spectrum, dimF: number, dimT: numbe
   return new ort.Tensor('float32', data, [1, 4, dimF, dimT]);
 }
 
-/** Expands the model's [1, 4, dimF, dimT] output back to full-width spectra. */
-function unpackMdxOutput(
-  data: Float32Array,
+/** Copies one segment into a reused buffer, zero-padding past the end. */
+function copyChannel(channel: Float32Array, start: number, target: Float32Array): void {
+  const available = Math.max(0, Math.min(target.length, channel.length - start));
+  if (available > 0) {
+    target.set(channel.subarray(start, start + available));
+  }
+  if (available < target.length) {
+    target.fill(0, available);
+  }
+}
+
+/** Fills a reused `[1, 4, dimF, dimT]` buffer from four bin-major planes. */
+function packMdx(
+  target: Float32Array,
+  parts: readonly Float32Array[],
+  frames: number,
   dimF: number,
   dimT: number,
-  bins: number,
-): [Spectrum, Spectrum] {
+): void {
   const plane = dimF * dimT;
-  const make = (reIndex: number, imIndex: number): Spectrum => {
-    const re = new Float32Array(bins * dimT);
-    const im = new Float32Array(bins * dimT);
+  for (let p = 0; p < 4; p += 1) {
+    const source = parts[p];
+    if (source === undefined) {
+      continue;
+    }
+    const base = p * plane;
     for (let bin = 0; bin < dimF; bin += 1) {
-      const to = bin * dimT;
+      const from = bin * frames;
+      const to = base + bin * dimT;
       for (let frame = 0; frame < dimT; frame += 1) {
-        re[to + frame] = data[reIndex * plane + bin * dimT + frame] ?? 0;
-        im[to + frame] = data[imIndex * plane + bin * dimT + frame] ?? 0;
+        target[to + frame] = source[from + frame] ?? 0;
       }
     }
-    return { re, im, bins, frames: dimT };
-  };
-  return [make(0, 1), make(2, 3)];
+  }
+}
+
+/**
+ * Scatters the model's `[1, 4, dimF, dimT]` output back into four bin-major
+ * planes. Bins at or above dimF stay as allocated, which is zero: the model
+ * says nothing about them.
+ */
+function unpackMdx(
+  raw: Float32Array,
+  targets: readonly Float32Array[],
+  frames: number,
+  dimF: number,
+  dimT: number,
+): void {
+  const plane = dimF * dimT;
+  for (let p = 0; p < 4; p += 1) {
+    const target = targets[p];
+    if (target === undefined) {
+      continue;
+    }
+    const base = p * plane;
+    for (let bin = 0; bin < dimF; bin += 1) {
+      const from = base + bin * dimT;
+      const to = bin * frames;
+      for (let frame = 0; frame < dimT; frame += 1) {
+        target[to + frame] = raw[from + frame] ?? 0;
+      }
+    }
+  }
 }
 
 /* -------------------------------------------------------------- demucs ---- */
@@ -270,6 +312,15 @@ async function separate(request: SeparationRequest): Promise<RunResult> {
     }
   };
 
+  /**
+   * Host cost by stage, summed over segments. The M1 whole-track run showed
+   * 42% of wall time outside session.run; this says which part.
+   */
+  const stageMs: Record<string, number> = {};
+  const stage = (name: string, since: number): void => {
+    stageMs[name] = (stageMs[name] ?? 0) + (performance.now() - since);
+  };
+
   progress(`worker-received ${request.modelId}/${request.backend}/${request.mode}`, 0, 1, []);
   if (request.backend === 'webgpu') {
     progress(`worker-gpu ${await describeWorkerGpu()}`, 0, 1, []);
@@ -326,6 +377,7 @@ async function separate(request: SeparationRequest): Promise<RunResult> {
       segments: 0,
       segmentMs: [],
       inferenceMs: 0,
+      stageMs,
       totalMs: performance.now() - startedAt,
       audioSeconds: 0,
       realtimeFactor: 0,
@@ -450,7 +502,6 @@ async function separate(request: SeparationRequest): Promise<RunResult> {
     const options = mdxOptions(model);
     const dimF = graphContract?.dimF ?? contract.dimF;
     const dimT = graphContract?.dimT ?? contract.dimT;
-    const bins = contract.nFft / 2 + 1;
     const segment = contract.hop * (dimT - 1);
     const stride = Math.max(1, Math.round(segment * (1 - model.overlap)));
     const fade = segment - stride;
@@ -469,39 +520,74 @@ async function separate(request: SeparationRequest): Promise<RunResult> {
     const left = channels[0] ?? new Float32Array(segment);
     const right = channels[1] ?? left;
 
-    for (const [index, start] of starts.entries()) {
-      const leftSlice = sliceChannel(left, start, segment);
-      const rightSlice = sliceChannel(right, start, segment);
+    // Everything the segment loop needs, allocated once. The wrappers that
+    // allocate their own output cost about 31 MB of garbage per segment, which
+    // over a whole track is more than a gigabyte for the collector to chase.
+    const plan = createStftPlan(options);
+    const frames = plan.frames(segment);
+    const spectra = Array.from({ length: 4 }, () => new Float32Array(plan.bins * frames));
+    const [leftRe, leftIm, rightRe, rightIm] = spectra as [
+      Float32Array,
+      Float32Array,
+      Float32Array,
+      Float32Array,
+    ];
+    const outputs = Array.from({ length: 4 }, () => new Float32Array(plan.bins * frames));
+    const [outLeftRe, outLeftIm, outRightRe, outRightIm] = outputs as [
+      Float32Array,
+      Float32Array,
+      Float32Array,
+      Float32Array,
+    ];
+    const leftSlice = new Float32Array(segment);
+    const rightSlice = new Float32Array(segment);
+    const primaryLeft = new Float32Array(segment);
+    const primaryRight = new Float32Array(segment);
+    const inputData = new Float32Array(4 * dimF * dimT);
 
-      const input = packMdxInput(
-        stft(leftSlice, options),
-        stft(rightSlice, options),
-        dimF,
-        dimT,
-      );
+    for (const [index, start] of starts.entries()) {
+      const sliceAt = performance.now();
+      copyChannel(left, start, leftSlice);
+      copyChannel(right, start, rightSlice);
+      stage('slice', sliceAt);
+
+      const stftAt = performance.now();
+      plan.forward(leftSlice, frames, leftRe, leftIm);
+      plan.forward(rightSlice, frames, rightRe, rightIm);
+      stage('stft', stftAt);
+
+      const packAt = performance.now();
+      packMdx(inputData, [leftRe, leftIm, rightRe, rightIm], frames, dimF, dimT);
+      const input = new ort.Tensor('float32', inputData, [1, 4, dimF, dimT]);
+      stage('pack', packAt);
 
       const began = performance.now();
-      const outputs = await session.run({ input });
+      const result = await session.run({ input });
       const took = performance.now() - began;
       segmentMs.push(took);
       inferenceMs += took;
       input.dispose();
 
-      const first = Object.values(outputs)[0];
+      const first = Object.values(result)[0];
       if (first === undefined) {
         throw new Error('model returned no output');
       }
       const raw = first.data as Float32Array;
-      const [primaryLeftSpectrum, primaryRightSpectrum] = unpackMdxOutput(raw, dimF, dimT, bins);
-      for (const tensor of Object.values(outputs)) {
+      const unpackAt = performance.now();
+      unpackMdx(raw, [outLeftRe, outLeftIm, outRightRe, outRightIm], frames, dimF, dimT);
+      stage('unpack', unpackAt);
+      for (const tensor of Object.values(result)) {
         tensor.dispose();
       }
 
-      const primaryLeft = istft(primaryLeftSpectrum, options, segment);
-      const primaryRight = istft(primaryRightSpectrum, options, segment);
+      const istftAt = performance.now();
+      plan.inverse(outLeftRe, outLeftIm, frames, primaryLeft);
+      plan.inverse(outRightRe, outRightIm, frames, primaryRight);
+      stage('istft', istftAt);
 
       // Interleave, apply UVR's compensation, and take the residual as the
       // other stem.
+      const mixAt = performance.now();
       const primary = new Float32Array(segment * 2);
       const residual = new Float32Array(segment * 2);
       for (let i = 0; i < segment; i += 1) {
@@ -512,6 +598,7 @@ async function separate(request: SeparationRequest): Promise<RunResult> {
         residual[i * 2] = (leftSlice[i] ?? 0) - pl;
         residual[i * 2 + 1] = (rightSlice[i] ?? 0) - pr;
       }
+      stage('interleave', mixAt);
 
       const flush = async (): Promise<void> => {
         if (tailPrimary === null || tailResidual === null) {
@@ -588,6 +675,7 @@ async function separate(request: SeparationRequest): Promise<RunResult> {
     segments: starts.length,
     segmentMs,
     inferenceMs,
+    stageMs,
     totalMs,
     audioSeconds,
     realtimeFactor: inferenceMs > 0 ? audioSeconds / (inferenceMs / 1000) : 0,

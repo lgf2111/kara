@@ -17,7 +17,8 @@
     "check:attribution": "node scripts/check-attribution.mjs",
     "check:media": "node scripts/check-no-media.mjs",
     "hooks:install": "node scripts/install-hooks.mjs",
-    "verify": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run check:attribution && pnpm run check:media"
+    "verify": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run check:attribution && pnpm run check:media",
+    "bench": "vitest run --config vitest.bench.config.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

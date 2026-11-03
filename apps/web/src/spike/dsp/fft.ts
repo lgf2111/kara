@@ -198,6 +198,127 @@ export function complexTransform(size: number): ComplexTransform {
   return created;
 }
 
+/**
+ * Real-input transform for an even length, built on a complex transform of
+ * half the length.
+ *
+ * Audio is real, so running a full complex FFT over it computes a spectrum
+ * that is its own mirror image and throws half the result away. Packing even
+ * and odd samples into one complex sequence of length N/2 and untangling the
+ * result afterwards halves the transform, and for the lengths these models use
+ * it also halves the Bluestein padding: n_fft 7680 goes from a 16384-point
+ * inner transform to an 8192-point one.
+ *
+ * Buffers are supplied by the caller and nothing is allocated per call, so it
+ * is safe in an AudioWorklet.
+ */
+export interface RealTransform {
+  /** Length of the time-domain signal, always even. */
+  readonly size: number;
+  /** Length of the half spectrum, size / 2 + 1. */
+  readonly bins: number;
+  /** signal[size] to re[bins], im[bins]. */
+  forward(signal: Float64Array, re: Float64Array, im: Float64Array): void;
+  /** re[bins], im[bins] back to signal[size]. */
+  inverse(re: Float64Array, im: Float64Array, signal: Float64Array): void;
+}
+
+function makeRealTransform(size: number): RealTransform {
+  if (size % 2 !== 0) {
+    throw new Error(`real transform needs an even size, got ${String(size)}`);
+  }
+  const half = size / 2;
+  const inner = complexTransform(half);
+  const bins = half + 1;
+
+  // Twiddles for untangling the packed halves: exp(-2i*pi*k/size).
+  const cos = new Float64Array(half);
+  const sin = new Float64Array(half);
+  for (let k = 0; k < half; k += 1) {
+    const angle = (-2 * Math.PI * k) / size;
+    cos[k] = Math.cos(angle);
+    sin[k] = Math.sin(angle);
+  }
+
+  const workRe = new Float64Array(half);
+  const workIm = new Float64Array(half);
+
+  return {
+    size,
+    bins,
+    forward(signal, re, im) {
+      for (let k = 0; k < half; k += 1) {
+        workRe[k] = signal[2 * k] ?? 0;
+        workIm[k] = signal[2 * k + 1] ?? 0;
+      }
+      inner.forward(workRe, workIm);
+
+      for (let k = 0; k <= half; k += 1) {
+        const a = k % half;
+        const b = (half - k) % half;
+        const zar = workRe[a] ?? 0;
+        const zai = workIm[a] ?? 0;
+        const zbr = workRe[b] ?? 0;
+        const zbi = workIm[b] ?? 0;
+
+        // Even and odd sub-spectra.
+        const evenRe = 0.5 * (zar + zbr);
+        const evenIm = 0.5 * (zai - zbi);
+        const oddRe = 0.5 * (zai + zbi);
+        const oddIm = -0.5 * (zar - zbr);
+
+        const wr = k === half ? -1 : (cos[k] ?? 0);
+        const wi = k === half ? 0 : (sin[k] ?? 0);
+        re[k] = evenRe + (oddRe * wr - oddIm * wi);
+        im[k] = evenIm + (oddRe * wi + oddIm * wr);
+      }
+    },
+    inverse(re, im, signal) {
+      for (let k = 0; k < half; k += 1) {
+        // The half spectrum has half+1 entries, so the mirror of k is half-k
+        // directly. Reducing it modulo half would read bin 0 in place of the
+        // Nyquist bin and corrupt every frame.
+        const b = half - k;
+        const xar = re[k] ?? 0;
+        const xai = im[k] ?? 0;
+        const xbr = re[b] ?? 0;
+        const xbi = im[b] ?? 0;
+
+        const evenRe = 0.5 * (xar + xbr);
+        const evenIm = 0.5 * (xai - xbi);
+        const diffRe = 0.5 * (xar - xbr);
+        const diffIm = 0.5 * (xai + xbi);
+
+        // Undo the forward twiddle, which conjugates to exp(+2i*pi*k/size).
+        const wr = cos[k] ?? 0;
+        const wi = -(sin[k] ?? 0);
+        const oddRe = diffRe * wr - diffIm * wi;
+        const oddIm = diffRe * wi + diffIm * wr;
+
+        workRe[k] = evenRe - oddIm;
+        workIm[k] = evenIm + oddRe;
+      }
+      inner.inverse(workRe, workIm);
+      for (let k = 0; k < half; k += 1) {
+        signal[2 * k] = workRe[k] ?? 0;
+        signal[2 * k + 1] = workIm[k] ?? 0;
+      }
+    },
+  };
+}
+
+const realCache = new Map<number, RealTransform>();
+
+export function realTransform(size: number): RealTransform {
+  const existing = realCache.get(size);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const created = makeRealTransform(size);
+  realCache.set(size, created);
+  return created;
+}
+
 /** Naive transform, for tests to check the fast ones against. */
 export function naiveDft(re: readonly number[], im: readonly number[]): { re: number[]; im: number[] } {
   const size = re.length;
