@@ -3,9 +3,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SongRecord } from '../library/songs.ts';
 import { Controls } from './Controls.tsx';
 import { VocalsControl } from './VocalsControl.tsx';
-import { commandForKey, type PlayerCommand } from './keys.ts';
+import type { PlayerCommand } from './keys.ts';
 import type { VocalChoice } from './stem-mix.ts';
 import { clampVolume, seekTo } from './time.ts';
+import { useFullscreen } from './useFullscreen.ts';
+import { usePlayerKeys } from './usePlayerKeys.ts';
 import { useStemMix } from './useStemMix.ts';
 
 interface VideoStageProps {
@@ -37,7 +39,7 @@ export function VideoStage({ url, song, vocals, onVocals }: VideoStageProps) {
   const [durationSeconds, setDurationSeconds] = useState(Number.NaN);
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
-  const [fullscreen, setFullscreen] = useState(false);
+  const { on: fullscreen, toggle: toggleFullscreen } = useFullscreen(frame);
   const mix = useStemMix({ video, song, choice: vocals, volume, muted });
 
   const toggle = useCallback((): void => {
@@ -80,17 +82,6 @@ export function VideoStage({ url, song, vocals, onVocals }: VideoStageProps) {
     setMuted((on) => !on);
   }, []);
 
-  const toggleFullscreen = useCallback((): void => {
-    const container = frame.current;
-    if (container === null) {
-      return;
-    }
-    const request =
-      document.fullscreenElement === null ? container.requestFullscreen() : document.exitFullscreen();
-    // Refused by the browser, or not allowed on this device: nothing to do.
-    void request.catch(() => undefined);
-  }, []);
-
   const apply = useCallback(
     (command: PlayerCommand): void => {
       switch (command.kind) {
@@ -113,6 +104,8 @@ export function VideoStage({ url, song, vocals, onVocals }: VideoStageProps) {
     [changeVolume, skip, toggle, toggleFullscreen, toggleMute, volume],
   );
 
+  usePlayerKeys(apply);
+
   useEffect(() => {
     const element = video.current;
     if (element === null) {
@@ -123,40 +116,6 @@ export function VideoStage({ url, song, vocals, onVocals }: VideoStageProps) {
     // element's own track is the voice they asked to be rid of.
     element.muted = muted || mix.silenceVideo;
   }, [mix.silenceVideo, muted, volume]);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      const target = event.target;
-      const command = commandForKey({
-        key: event.key,
-        ctrl: event.ctrlKey,
-        meta: event.metaKey,
-        alt: event.altKey,
-        targetTag: target instanceof Element ? target.tagName : '',
-        editing: target instanceof HTMLElement && target.isContentEditable,
-      });
-      if (command === null) {
-        return;
-      }
-      // Space would otherwise scroll the page out from under the video.
-      event.preventDefault();
-      apply(command);
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [apply]);
-
-  useEffect(() => {
-    const onChange = (): void => {
-      setFullscreen(document.fullscreenElement !== null);
-    };
-    document.addEventListener('fullscreenchange', onChange);
-    return () => {
-      document.removeEventListener('fullscreenchange', onChange);
-    };
-  }, []);
 
   return (
     <div className="stage" ref={frame}>

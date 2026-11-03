@@ -1,12 +1,28 @@
 import type { SongStatus } from '../library/songs.ts';
-import { vocalsUnavailableNote, type VocalChoice } from './stem-mix.ts';
-import type { StemMix } from './useStemMix.ts';
+import { vocalsUnavailableNote, type StemReadiness, type VocalChoice } from './stem-mix.ts';
 
 interface VocalsControlProps {
   readonly songStatus: SongStatus;
-  readonly mix: StemMix;
+  readonly mix: StemReadiness;
   readonly choice: VocalChoice;
+  /** The stems are the only sound: this song kept no picture of its own. */
+  readonly stemsOnly?: boolean;
   readonly onChoice: (choice: VocalChoice) => void;
+}
+
+/** What the mix is doing, which is not the same thing for the two stages. */
+function describeMix(loading: boolean, instrumental: boolean, stemsOnly: boolean): string {
+  if (loading) {
+    return stemsOnly
+      ? 'Reading the stems off this device. They are the whole song here, so it starts once they are in.'
+      : 'Reading the stems off this device. The file plays as it is until they are in.';
+  }
+  if (instrumental) {
+    return 'The voice is out. The guide brings it back as quietly as you like.';
+  }
+  return stemsOnly
+    ? 'Both stems together, which is the song as it arrived, voice and all.'
+    : "Playing the file's own sound, voice and all.";
 }
 
 /**
@@ -16,7 +32,13 @@ interface VocalsControlProps {
  * the original for listening and the instrumental for singing, and the fader
  * is for the verse nobody is sure of.
  */
-export function VocalsControl({ songStatus, mix, choice, onChoice }: VocalsControlProps) {
+export function VocalsControl({
+  songStatus,
+  mix,
+  choice,
+  stemsOnly = false,
+  onChoice,
+}: VocalsControlProps) {
   const unavailable = vocalsUnavailableNote(songStatus);
   if (unavailable !== null) {
     return (
@@ -77,13 +99,7 @@ export function VocalsControl({ songStatus, mix, choice, onChoice }: VocalsContr
       {mix.state === 'failed' ? (
         <p className="error">{mix.error ?? 'the stems for this song could not be played'}</p>
       ) : (
-        <p className="note">
-          {loading
-            ? 'Reading the stems off this device. The file plays as it is until they are in.'
-            : instrumental
-              ? 'The voice is out. The guide brings it back as quietly as you like.'
-              : "Playing the file's own sound, voice and all."}
-        </p>
+        <p className="note">{describeMix(loading, instrumental, stemsOnly)}</p>
       )}
     </div>
   );

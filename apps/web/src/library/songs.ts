@@ -95,6 +95,18 @@ export function titleFromFileName(fileName: string): string {
 }
 
 /**
+ * Whether there is anything to play.
+ *
+ * A kept video plays whatever its stems are doing, picture, own sound and
+ * all. A song that came in as audio kept no file, so its stems are the only
+ * copy of it on this device and there is nothing to play until they are
+ * finished.
+ */
+export function canPlay(song: SongRecord): boolean {
+  return song.sourcePath !== null || song.status === 'ready';
+}
+
+/**
  * Whether there is anything to read lyrics from. Only the video's own picture
  * carries words, and only while the worker is not holding its files open.
  */
