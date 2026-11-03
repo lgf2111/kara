@@ -4,155 +4,175 @@ Target machine: Apple M1, 8 GB, Chrome. Date: 2026-11-03.
 
 ## Verdict
 
-**Separation: viable with limits.** A real browser on this machine separated a whole 4-minute
-stereo track, start to finish, in **123 s of wall clock**, holding 60 fps on the main thread
-throughout, and streamed two 81 MiB stems to OPFS. The limits are specific and listed below: it
-needs WebGPU, the host-side transform is now the bottleneck, and decoding a whole file costs
-~188 MB before separation starts.
+**Separation: viable with limits.** A whole 4-minute stereo track separated end to end in 123 s,
+holding 60 fps on the main thread, streaming two 81 MiB stems to OPFS. It needs WebGPU: WASM lands
+at or below realtime.
 
-**Transcription: still unmeasured.** Not built, not run. The defect that blocked separation would
-have blocked it too, and that is now fixed, so it is unblocked work rather than an open risk.
+**Transcription: runs, but not usable for M3 as exported.** `onnx-community/whisper-base` cannot
+produce word-level timestamps at all. Mandarin and Japanese both work and return text with
+segment timestamps, so the language coverage is fine; the timing granularity M3 needs is not there.
 
-**Hosting: answered**, with one extra requirement discovered the hard way: any origin serving the
-inference runtime must assert COEP, not just CORP.
+**Hosting: decided in principle** (R2 under the same host at `/weights/*`), not built, as briefed.
 
-## The hang, and its root cause
-
-Two independent defects, both in the harness rather than in any model, cost 69 minutes of wall
-clock across three runs. Both are fixed, and both are worth recording because they fail silently.
-
-**1. `decodeAudioData` on a plain `AudioContext` never returns in a headless browser.** There is no
-audio output device, the context never reaches a running state, and the promise simply never
-settles: no error, no timeout. This is what the renderer sitting at 1% CPU with 21 MB was doing.
-Fixed by decoding through an `OfflineAudioContext`, which needs no device, and by passing
-`--mute-audio` and `--autoplay-policy=no-user-gesture-required`. Decoding a 42 MiB WAV now takes
-about 150 ms.
-
-**2. `InferenceSession.create` never settled because Chrome blocked the runtime fetch.** The page is
-cross-origin isolated, and `onnxruntime-web` loads its emscripten glue as a nested worker script.
-Chrome then requires the response itself to carry COEP, and reported, via the Audits domain:
-
-```
-BlockedByResponseIssue  reason: CoepFrameResourceNeedsCoepHeader
-  url: /spike-ort/ort-wasm-simd-threaded.asyncify.mjs?import
-```
-
-The request appeared as `net::ERR_BLOCKED_BY_RESPONSE`, and ORT reacted by waiting forever instead
-of rejecting. Fixed by having the dev-only route send
-`Cross-Origin-Embedder-Policy: require-corp` and `Cross-Origin-Resource-Policy: cross-origin`.
-Session creation went from "hangs for 39 minutes" to **0.66 s on WASM and 1.89 s on WebGPU**.
-
-Three things were ruled out along the way, each with evidence: the host DSP (unit tested; a
-300-frame n_fft-7680 round trip is 552 ms), a missing runtime file (`--check` fetches all four URLs
-and gets 200s), and the GPU being a software fallback (`vendor apple`, `architecture metal-3`,
-`isFallbackAdapter: false`). One earlier probe was also measuring the wrong thing entirely: Vite
-found port 5173 busy and moved to 5174, and the harness happily measured another project's page.
-It now pins the port with `--strictPort` and rejects any page not titled `Kara M1 spike`.
-
-### The watchdog
-
-Every run now reports each phase it enters, and the harness fails the run if no phase arrives for
-`--stall` seconds, naming the phase it stalled in, writing a JSON report, closing the browser and
-exiting non-zero. No run can occupy this machine indefinitely again. Phases are: `page-ready`,
-`fixture-fetch-start`, `fixture-fetched`, `decode-start`, `decode-done`, `run-start`,
-`opfs-cleared`, `memory-sampled`, `worker-created`, `worker-posting-request`, `worker-received`,
-`worker-gpu`, `ort-init`, `creating session`, `graph input shape`, `session ready`, `stft`,
-`separating N/M`, `run-done`.
-
-## Environment, measured
+## Environment
 
 | Fact | Value |
 | --- | --- |
 | Browser | HeadlessChrome/156.0.8078.4, Playwright's bundled Chromium |
 | Cores | 8 |
 | Cross-origin isolated | true |
-| `AudioContext` state | running, with `--mute-audio` |
 | WebGPU adapter | vendor `apple`, architecture `metal-3`, `isFallbackAdapter: false` |
-| `maxBufferSize` | 4 GiB |
-| Free memory during runs | **81 MiB to 1031 MiB of 8192 MiB**, load average 4.4 to 13.8 |
+| Free memory during runs | **92 MiB to 1680 MiB of 8192**, load average **4.4 to 60.0** |
 
-That last row matters: another workload shared this machine throughout, so **every timing below is
-an upper bound** on what the hardware can do.
+Another workload shared this machine throughout. **Every timing below is an upper bound**, and the
+WASM transcription figure was taken at load average 60.
 
-## Question 1: separation
+## Separation
 
-### Results
+Fixture: synthesised stereo 44.1 kHz, 25% segment overlap. "Inference RTF" is audio seconds per
+second inside `session.run`. "Peak RSS" is the resident memory of our browser's whole process tree,
+measured with `ps` and restricted to descendants of the browser we launched, so the unrelated
+Chromium on this machine is excluded. It is the only figure here that includes the GPU process.
 
-Fixture: 240 s synthesised stereo 44.1 kHz. Segments overlap by 25%. "Inference RTF" is audio
-seconds per second spent inside `session.run`; "wall RTF" is audio seconds per second of total
-elapsed time, which is the number a user would feel.
+| Model | Backend | Mode | Load | Median segment | Inference RTF | Peak RSS (renderer / gpu) |
+| --- | --- | --- | --- | --- | --- | --- |
+| mdx-inst-hq5 | webgpu | load | 1.13 s | — | — | 309 MiB (143 / 42) |
+| mdx-inst-hq5 | wasm | load | 0.83 s | — | — | 835 MiB (594 / 65) |
+| htdemucs-web | webgpu | load | 1.80 s | — | — | 900 MiB (733 / 60) |
+| htdemucs-web | wasm | load | 2.00 s | — | — | 894 MiB (751 / 39) |
+| mdx-inst-hq5 | webgpu | bench 4 | 0.95 s | 1300 ms | **3.30x** | 982 MiB (724 / 84) |
+| mdx-inst-hq5 | wasm | bench 4 | 0.83 s | 4794 ms | 0.94x | 1207 MiB (991 / 56) |
+| htdemucs-web | webgpu | bench 4 | 1.86 s | 1619 ms | **3.37x** | 1096 MiB (879 / 81) |
+| htdemucs-web | wasm | bench 4 | 2.17 s | 6138 ms | 0.99x | 1111 MiB (893 / 57) |
+| **mdx-inst-hq5** | **webgpu** | **audio, whole track** | 0.79 s | **1306 ms** | **3.38x**, wall **1.95x** | not sampled |
+| mdx-inst-hq5 (repeat) | webgpu | audio, whole track | 0.79 s | 1318 ms | 3.30x, wall 1.82x | not sampled |
 
-| Model | Backend | Mode | Segments | Load | Median segment | Inference RTF | Wall RTF | Worst frame gap |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| mdx-inst-hq5 | webgpu | load | — | 1.89 s | — | — | — | 42 ms |
-| mdx-inst-hq5 | wasm | load | — | 0.66 s | — | — | — | 19 ms |
-| mdx-inst-hq5 | webgpu | bench | 4 | 0.82 s | 1297 ms | 3.04x | — | 23 ms |
-| mdx-inst-hq5 | wasm | bench | 4 | 0.62 s | 4802 ms | 0.92x | — | 19 ms |
-| htdemucs-web | webgpu | load | — | 1.80 s (21 pieces) | — | — | — | 19 ms |
-| htdemucs-web | webgpu | bench | 4 | 1.66 s | 1733 ms | 2.73x | — | 19 ms |
-| htdemucs-web | wasm | bench | 4 | 1.93 s | 5323 ms | 1.10x | — | 21 ms |
-| mdx-inst-hq5 | webgpu | audio | 4 | 0.79 s | 1330 ms | 3.23x | — | 21 ms |
-| **mdx-inst-hq5** | **webgpu** | **audio** | **54, whole track** | 0.79 s | **1306 ms** | **3.38x** | **1.95x** | **36 ms, 0 over 50 ms** |
-| mdx-inst-hq5 (repeat) | webgpu | audio | 54, whole track | 0.79 s | 1318 ms | 3.30x | 1.82x | 98 ms, 1 over 50 ms |
+The two whole-track runs predate the `ps` instrumentation, so they have no RSS figure.
 
-The headline run and its repeat differ by 1% on median segment time and by 7% on wall clock, which
-tracks the load average at the time (8.05 against 12.79). The spread across 54 segments is tight:
-min 1282 ms, max 1529 ms, so there is no drift or leak over a full track.
+Across the 54 segments of a whole-track run: min 1282 ms, max 1529 ms. No drift, no leak. Main
+thread over the same run: 7333 animation frames, worst gap 36 ms, **nothing over 50 ms**. The
+repeat differed by 1% on segment time and 7% on wall clock, tracking load average.
 
-### What this says
+### What it says
 
-- **WebGPU is the only viable backend here.** It is 3.7x faster than WASM on MDX (1297 ms against
-  4802 ms) and 3.1x on htdemucs. WASM lands at 0.92x and 1.10x of realtime, so a 4-minute track
-  would take about 4 minutes of compute. WASM is a correctness fallback, not a usable one.
-- **The tab survives comfortably.** Over 7333 animation frames of a full-track run the worst gap
-  was 36 ms and nothing exceeded 50 ms. Inference is in a worker and the main thread stays free,
-  which is what the player will need.
-- **The host transform is now the bottleneck, not the model.** 54 segments spent 70.5 s inside
-  `session.run` but 123 s of wall clock. The missing ~52 s is my JavaScript STFT and iSTFT, about
-  0.96 s per segment, or **42% of total time**. Moving the transform into WASM is the single
-  highest-value optimisation for M2 and would take the felt rate from 1.95x towards 3.3x.
-- **htdemucs costs only 34% more than MDX per second of audio** on WebGPU (1733 ms per 7.80 s
-  segment against 1297 ms per 5.92 s segment), while producing 4 stems instead of 2 and being the
-  better-regarded model. Its 21 pieces load in 1.80 s.
+- **WebGPU or nothing.** 3.5x faster than WASM on MDX, 3.8x on htdemucs. WASM at 0.94x and 0.99x
+  means a 4-minute track costs 4 minutes of compute. It is a correctness fallback, not a path to
+  offer a user. The fp16 htdemucs chain does run on WASM, so that risk is retired.
+- **WebGPU also costs less memory, by a lot, at load time.** 309 MiB against 835 MiB for MDX,
+  because the WASM provider holds the weights in renderer linear memory. Under inference the gap
+  narrows (982 against 1207 MiB).
+- **Peak RSS approaches 1.2 GiB.** On a machine that was repeatedly down to ~100 MiB free, that is
+  the number that will decide whether this ships. It is survivable but not comfortable, and it is
+  measured with a 42 MiB input already decoded in the page.
+- **The host transform is the bottleneck, not the model.** The whole-track run spent 70.5 s inside
+  `session.run` and 123 s of wall clock. The missing ~52 s is the JavaScript STFT and iSTFT, about
+  0.96 s per segment, **42% of total time**. Moving it to WASM takes the felt rate from 1.95x
+  towards 3.3x.
+- **htdemucs costs 34% more per second of audio than MDX** on WebGPU, for 4 stems instead of 2,
+  and every one of its 21 pieces is under the Pages 25 MiB asset limit.
 
-### Memory
+### Memory, page side
 
 | Measurement | Value |
 | --- | --- |
 | Page JS heap after decoding 240 s of stereo | **188 MB** |
 | Page JS heap before decoding | 20.5 MB |
-| Stems written per 240 s track | 2 × 81 MiB, streamed to OPFS |
-| Worker peak heap | **unavailable**: `performance.memory` does not exist in a worker |
-| Whole-agent memory | **unavailable**: `measureUserAgentSpecificMemory` returned null on every run |
+| Stems per 240 s track | 2 × 81 MiB, streamed to OPFS |
+| Worker heap | unavailable: `performance.memory` does not exist in a worker |
+| Whole-agent memory | unavailable: `measureUserAgentSpecificMemory` returned null on every run |
 
-188 MB to hold one decoded track is the number to worry about on an 8 GB machine that sometimes has
-100 MB free. 240 s × 44100 × 2 channels × 4 bytes is 84.7 MB of samples, and the undecoded
-ArrayBuffer and the copies account for the rest. M2 should decode in chunks rather than whole.
-Nothing here sees WebGPU buffer memory, so GPU-side usage is unmeasured by any figure above.
+Decoding a whole file costs 188 MB before separation starts. M2 should decode in chunks.
 
-## Question 2: transcription
+## Transcription
 
-**Not measured and not built.** No whisper run happened, so there is nothing to report about
-Mandarin, Japanese, word timestamps, or backend comparison. Weights were inventoried but not
-downloaded. The COEP defect above would have blocked `@huggingface/transformers` in exactly the
-same way, so fixing it is a prerequisite that is now done.
+`onnx-community/whisper-base`, int8 encoder and merged decoder, same weights on both backends,
+through `@huggingface/transformers`. Input is the 15 s fixture, resampled in the worker to 16 kHz
+mono.
 
-| Variant | Encoder | Merged decoder | Total |
-| --- | --- | --- | --- |
-| int8 | 22.1 MiB | 51.2 MiB | 73.3 MiB |
-| fp16 | 39.4 MiB | 99.9 MiB | 139.3 MiB |
-| fp32 | 78.6 MiB | 198.9 MiB | 277.5 MiB |
+| Backend | Language | Mode | Load | Inference | RTF | Word timestamps | Peak RSS |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| webgpu | — | load | 4.08 s | — | — | — | 652 MiB |
+| wasm | — | load | 1.92 s | — | — | — | 770 MiB |
+| webgpu | ja | audio | 2.76 s | 7.17 s | 2.09x | **no** | 709 MiB |
+| wasm | ja | audio | 1.93 s | 3.30 s | **4.54x** | **no** | 805 MiB |
+| webgpu | zh | audio | 2.13 s | 66.8 s wall | 0.22x | **no** | 1026 MiB |
 
-int8 is the variant to measure on both backends, since it is the only one that is sane on WASM and
-one set of weights is the only way the comparison means anything.
+### Word timestamps are not available, and that is the finding
 
-## Question 3: where weights can live
+Asking for `return_timestamps: 'word'` fails on every run:
 
-- **Cloudflare Pages caps a single asset at 25 MiB**, hard
+```
+Model outputs must contain cross attentions to extract timestamps. This is most likely because
+the model was not exported with `output_attentions=True`.
+```
+
+The spike falls back to segment timestamps, which work: the Japanese run returned
+`さて、この動画が終わりに来てもらったら、またね!` spanning 0–15000 ms. **M3 needs word or
+character timing for a KTV wipe, so this export cannot do the job.** Options, in order of
+preference:
+
+1. Find or produce a whisper ONNX export with cross-attentions, which is what transformers.js
+   needs for its DTW alignment.
+2. Do forced alignment separately against pasted or transcribed text. The product already needs
+   this path for Cantonese, so building it once serves both.
+3. Transcribe for text only and have the user tap timings in the editor, which M3 plans anyway.
+
+### Two more things worth knowing
+
+**WASM beat WebGPU, 4.54x against 2.09x.** Whisper's decoder is autoregressive: many small
+sequential operations, which suit SIMD on a CPU better than per-op GPU dispatch, and int8 weights
+run natively on WASM while WebGPU dequantises. Treat this as indicative rather than controlled: the
+two backends returned transcripts of different lengths (6 s against 15 s of span) from identical
+input, so they did different amounts of decoding work. The direction is still a real signal, and it
+inverts the assumption that WebGPU is the fast path for every model.
+
+**Non-speech input sends the decoder into a repetition loop.** The Mandarin run produced
+`因為我沒有想到` sixty-odd times and took 66.8 s for 15 s of audio, 0.22x realtime, against 2.09x
+for the run that terminated normally. The fixture is tones and noise, but **songs contain long
+instrumental passages**, so this is a product risk and not only a fixture artefact: transcription
+needs silence and instrumental detection, or a repetition penalty, before it meets a real song.
+
+Language coverage itself is fine: `zh` and `ja` were both accepted and both returned plausible
+text in the right script.
+
+## Corrections from review
+
+**The two long runs I previously recorded as a crash were not one.** The 39-minute run and the
+1771 s run were **stalled and killed by the operator**, observed idle at about 1% CPU with a small
+renderer. Nothing crashed. The result file is now
+`mdx-inst-hq5-webgpu-bench-stalled-killed-by-operator.json`, and the harness no longer prints
+"DIED" when its watchdog fires.
+
+**Their cause was never directly observed.** Those runs produced no phase data, because the
+instrumentation did not exist yet. What is known: the code they ran contained two independent
+silent-hang defects, both since fixed and both verified by before-and-after measurement.
+
+1. `decodeAudioData` on a plain `AudioContext` never settles in a headless browser: no output
+   device, no error, no timeout. Fixed with `OfflineAudioContext` and `--mute-audio`; decoding
+   42 MiB now takes about 150 ms.
+2. Chrome blocked the runtime fetch and `InferenceSession.create` waited forever. The Audits domain
+   named it: `BlockedByResponseIssue reason: CoepFrameResourceNeedsCoepHeader` on
+   `/spike-ort/ort-wasm-simd-threaded.asyncify.mjs?import`. A cross-origin isolated page loads ORT's
+   emscripten glue as a nested worker script, so the response must itself assert COEP. Fixed by
+   sending COEP and CORP on the dev routes; session creation went from hanging to 0.66 s on WASM
+   and 1.89 s on WebGPU.
+
+Either could have been the stall those runs hit. Decode came first in the code path, so it is the
+likelier of the two, but that is inference and not a measurement.
+
+**The attribution guard is narrowed to authorship phrasing.** It now matches co-authorship
+trailers, "generated/written/authored by or with <tool>", "assisted by <tool>", the hyphenated
+machine-authorship adjective, and the robot emoji. A tool or vendor name on its own no longer trips
+it, so `upstream openai/whisper weights MIT` is allowed and the original licence wording is
+restored. The exclusion list shrank from four paths to two: only the pattern module and its own
+test, which match by construction. `CLAUDE.md` and `pnpm-lock.yaml` are now scanned and pass.
+
+## Hosting
+
+- **Cloudflare Pages caps one asset at 25 MiB**, hard
   ([Pages limits](https://developers.cloudflare.com/pages/platform/limits)).
-- `connect-src 'self'` means the exact origin. A subdomain is not `'self'`.
-- The page is COEP `require-corp`, and, measured above, **the runtime's own script must also assert
-  COEP** or Chrome blocks it and the loader hangs.
+- `connect-src 'self'` means the exact origin; a subdomain is not `'self'`.
+- Measured above: the runtime's own script must also assert COEP, or the loader hangs silently.
 
 | Model | Largest file | Ships as a Pages asset? |
 | --- | --- | --- |
@@ -160,81 +180,81 @@ one set of weights is the only way the comparison means anything.
 | mdx-inst-hq5 | 56.3 MiB | no |
 | whisper-base int8 | 51.2 MiB | no |
 
-**Recommendation: R2 under the same host and path**, for example `/weights/*`. Same-origin means
-`connect-src 'self'` needs no change, CORP and COEP are satisfied by our own headers, no preflight
-happens, and the 25 MiB asset cap does not apply to R2 objects. The spike is direct evidence that
-the arrangement works: it served 176 MiB of weights and a 29 MB WASM runtime to a cross-origin
-isolated page from its own origin, and **needed no CSP exception at all**.
+Accepted in principle: **R2 under the same host at `/weights/*`**. Same-origin keeps
+`connect-src 'self'` intact, satisfies COEP and CORP from our own headers, and sidesteps the asset
+cap. The spike is evidence the shape works: it served 254 MiB of weights and a 29 MB WASM runtime
+to a cross-origin isolated page from its own origin and **needed no CSP exception**. Not built in
+M1, as instructed.
 
-**A named third-party origin is now clearly worse.** Besides a permanent `connect-src` entry
-widening the one rule that makes "your audio never leaves your device" checkable, the third party
-would have to serve its JavaScript glue with `Cross-Origin-Embedder-Policy: require-corp`. Most
-CDNs do not, and the failure mode is a silent hang rather than an error.
-
-The production CSP is unchanged by this spike and still pinned by a test.
-
-## Licences, recorded
+## Licences
 
 | Model | Declared | Upstream | Notes |
 | --- | --- | --- | --- |
-| `monteslu/htdemucs-web-onnx` | MIT | demucs (Meta AI), MIT | Export credits Défossez et al. Clean. |
-| `raydotac/AudioSeparatorONNX` | MIT (repo metadata) | UVR MDX-Net weights by Anjok07 and others | **The repo licence covers the conversion, not the weights' training data, which is undocumented upstream.** Resolve before shipping. |
-| `onnx-community/whisper-base` | Apache-2.0 | Whisper, MIT | Clean. |
+| `monteslu/htdemucs-web-onnx` | MIT | demucs (Meta AI), MIT | Credits Défossez et al. Clean. |
+| `raydotac/AudioSeparatorONNX` | MIT (repo metadata) | UVR MDX-Net weights by Anjok07 and others | **Repo licence covers the conversion, not the weights' training data, which is undocumented upstream.** Resolve before shipping. |
+| `onnx-community/whisper-base` | Apache-2.0 | `openai/whisper`, MIT | Clean. |
 
 No weights are committed; `models/` is gitignored and the media guard fails CI on any `.onnx`.
 
-## A correction worth keeping
+## Candidates rejected
 
-`raydotac`'s `metadata.json` gives `dim_f` 3072 for `UVR-MDX-NET-Inst_HQ_5`. The graph rejects that:
+| Candidate | Why rejected |
+| --- | --- |
+| `timcsy/demucs-web-onnx` | No model card, so no licence and no documented input contract. Not downloaded. |
+| `musetric/uvr-mdxnet-kara2-onnx` | Splits an isolated vocal into lead and backing. Needs a vocal stem, not a mix, so it is an M3 or later tool, not a separation candidate. |
+| `raydotac` VR and BSRoformer graphs | 213 MiB and 347 MiB, both far past anything an 8 GB target should load, and neither needed once MDX and htdemucs both ran. Not downloaded. |
+| whisper-base fp16 and fp32 | 139 MiB and 278 MiB against 73 MiB for int8, and int8 is the only variant sane on both backends. Not downloaded. |
 
-```
-Got invalid dimensions for input: index: 2 Got: 3072 Expected: 2560
-```
-
-Its real input is `[-1, 4, 2560, 256]`. The worker now reads the shape back from the session and
-uses that, so published metadata cannot silently break a run again.
+A published metadata file was also wrong: `raydotac`'s `metadata.json` gives `dim_f` 3072 for
+`UVR-MDX-NET-Inst_HQ_5`, but the graph wants 2560 (`[-1, 4, 2560, 256]`). The worker now reads the
+shape back from the session rather than trusting metadata.
 
 ## What I did not or could not measure
 
-- **Transcription, entirely.** See above.
-- **Separation quality, for anything.** The fixture is tones and pink noise; it exercises tensor
-  shapes and nothing else. The MDX stems are real audio produced by the real pipeline, so the ear
-  check is ready, but judging it needs a song. Play one through `/spike` by hand.
+- **Separation quality, for anything.** The fixture is tones and pink noise. The MDX stems are real
+  audio from the real pipeline, so the ear check is ready: `pnpm run dev`, open `/spike`, pick a
+  song you own, `audio` mode, play both stems.
 - **htdemucs audio.** Its host pipeline (demucs framing, `mag` layout, mask, iSTFT, overlap-add) is
-  not implemented, so its numbers are inference cost only and say nothing about its output.
-- **Worker and GPU memory.** `performance.memory` is absent in workers,
-  `measureUserAgentSpecificMemory` returned null throughout, and no web API reports WebGPU buffer
-  memory. Process-level measurement would need `ps` or `vm_stat`, which this shell does not allow.
-- **Full Chrome, and headed mode.** Everything ran in Playwright's bundled headless Chromium. The
-  adapter is the real Apple GPU, so the headless-shell suspicion is retired, but `--headed true
-  --channel chrome` is wired up and untried.
-- **A 4-minute run on an unloaded machine.** Free memory ranged from 81 MiB to 1031 MiB and load
-  average from 4.4 to 13.8 during these runs, so the true figures are better than those reported.
-- **Resumability.** Jobs are not checkpointed yet; a closed tab loses the run.
+  not implemented, so its numbers are inference cost only.
+- **Transcription accuracy.** Synthetic audio has no speech, and no speech fixture can be
+  synthesised here. Needs a real recording.
+- **Korean and Cantonese.** Only `zh` and `ja` were exercised beyond English.
+- **Worker and whole-agent memory.** `performance.memory` is absent in workers and
+  `measureUserAgentSpecificMemory` returned null throughout. Process-level RSS via `ps` covers the
+  gap at the process level but cannot attribute memory to the worker.
+- **A whole-track run with RSS sampling, and a whole-track transcription.** Both whole-track
+  separation runs predate the `ps` instrumentation.
+- **Full Chrome and headed mode.** Everything ran in bundled headless Chromium with a real Apple
+  GPU. `--headed true --channel chrome` is wired up and untried.
+- **An unloaded machine.** Load average ranged 4.4 to 60.0.
+- **Resumability.** Jobs are not checkpointed; a closed tab loses the run.
 
 ## Reproducing
 
 ```sh
 node scripts/spike/make-fixtures.mjs
-node scripts/spike/models.mjs fetch htdemucs-web mdx-inst-hq5
+node scripts/spike/models.mjs fetch
 
-node scripts/spike/run-spike.mjs --probe                      # environment only
-node scripts/spike/run-spike.mjs --check                      # runtime and model URLs
+node scripts/spike/run-spike.mjs --probe
+node scripts/spike/run-spike.mjs --check
 node scripts/spike/run-spike.mjs --mode load  --model mdx-inst-hq5 --backend webgpu
 node scripts/spike/run-spike.mjs --mode bench --model htdemucs-web --backend webgpu --segments 4
 node scripts/spike/run-spike.mjs --mode audio --model mdx-inst-hq5 --backend webgpu --segments 0
+node scripts/spike/run-spike.mjs --task transcription --mode audio --model whisper-base \
+  --backend wasm --language ja --fixture tone-15s.wav
 ```
 
-`--stall` bounds every run, default 90 s. `--segments 0` runs the whole input. Reports land in
-`fixtures/generated/spike-results/`, which is gitignored. For the ear check, `pnpm run dev`, open
-`/spike`, pick a file you own, run MDX in `audio` mode and play the two stems.
+`--stall` bounds every run (default 90 s): no phase for that long and the run is recorded as
+stalled, naming the phase, with a non-zero exit. `--segments 0` runs the whole input.
 
-## What M2 should take from this
+## What M2 and M3 should take from this
 
-1. Move the STFT and iSTFT into WASM. They are 42% of wall time.
-2. Decode in chunks. 188 MB for one decoded track is too much on this target.
-3. Build on WebGPU, and treat WASM as a correctness fallback with an honest warning, not a path a
-   4-minute track should take.
-4. Prefer htdemucs: 4 stems, better reputation, 34% more compute per second of audio, every piece
-   under the Pages limit. Its host pipeline is the work.
-5. Checkpoint per segment. A 123 s job needs to survive a closed tab.
+1. Move the STFT and iSTFT into WASM. They are 42% of separation wall time.
+2. Decode in chunks: 188 MB for one decoded track is too much here.
+3. Build separation on WebGPU; keep WASM as a labelled fallback, not a default.
+4. Prefer htdemucs: 4 stems, 34% more compute, every piece under the Pages limit.
+5. Do not assume WebGPU wins everywhere. For whisper it lost, and M3 should measure both.
+6. Settle word timing before M3 starts: find an export with cross-attentions, or build forced
+   alignment, which Cantonese needs anyway.
+7. Handle instrumental passages before transcribing songs, or the decoder will loop.
+8. Checkpoint per segment: a 123 s job must survive a closed tab.
