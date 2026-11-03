@@ -9,3 +9,4 @@ packages:
 allowBuilds:
   onnxruntime-node: false
   protobufjs: false
+  tesseract.js: set this to true or false
