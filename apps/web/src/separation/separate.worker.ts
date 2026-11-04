@@ -44,6 +44,34 @@ const WEIGHTS = `/weights/${MODEL_ID}`;
 ort.env.wasm.wasmPaths = '/spike-ort/';
 ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 1);
 
+/**
+ * The runtime's wasm is over the 25 MiB a Pages asset may be, so the deployed
+ * site serves it gzipped and the bytes are handed to the runtime here. In dev
+ * the plain file is served and the runtime fetches it itself.
+ */
+let runtimeReady: Promise<void> | null = null;
+function prepareRuntime(): Promise<void> {
+  runtimeReady ??= (async () => {
+    if (!import.meta.env.PROD) {
+      return;
+    }
+    const response = await fetch('/spike-ort/ort-wasm-simd-threaded.asyncify.wasm.gz');
+    if (!response.ok) {
+      throw new Error(`the runtime could not be loaded (${String(response.status)})`);
+    }
+    const fetched = await response.arrayBuffer();
+    // A host that labels the file as gzip has already unzipped it by now.
+    const zipped = new Uint8Array(fetched, 0, 2);
+    const isGzip = zipped[0] === 0x1f && zipped[1] === 0x8b;
+    ort.env.wasm.wasmBinary = isGzip
+      ? await new Response(
+          new Blob([fetched]).stream().pipeThrough(new DecompressionStream('gzip')),
+        ).arrayBuffer()
+      : fetched;
+  })();
+  return runtimeReady;
+}
+
 let cancelRequested = false;
 
 function post(message: ProgressMessage | DoneMessage | CancelledMessage | FailedMessage): void {
@@ -89,6 +117,7 @@ async function createSessions(
   level: Optimisation,
   onPiece: (index: number) => void,
 ): Promise<{ sessions: ort.InferenceSession[]; islands: number }> {
+  await prepareRuntime();
   const options = providers(backend, level);
   const sessions: ort.InferenceSession[] = [];
   let islands = 0;
