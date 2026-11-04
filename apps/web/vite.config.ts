@@ -93,6 +93,9 @@ function devRoutes(): Plugin {
         if (request.url === '/pipeline' || request.url === '/pipeline/') {
           request.url = '/pipeline.html';
         }
+        if (request.url === '/webgpu-bisect' || request.url === '/webgpu-bisect/') {
+          request.url = '/webgpu-bisect.html';
+        }
         next();
       });
     },
