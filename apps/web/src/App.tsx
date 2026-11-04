@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 
 import { Drawer } from './library/Drawer.tsx';
-import type { SongRecord } from './library/songs.ts';
+import { canReadLyrics, type SongRecord } from './library/songs.ts';
 import { useLibrary } from './library/useLibrary.ts';
 import { Stage } from './player/Stage.tsx';
 import { stageAnalysis } from './player/analysis.ts';
+import type { LyricsRead } from './player/lyrics-read.ts';
 import { ORIGINAL_CHOICE, type VocalChoice } from './player/stem-mix.ts';
 import { usePlayback } from './player/usePlayback.ts';
 import { useSongRoute } from './player/useSongRoute.ts';
@@ -90,6 +91,23 @@ export function App() {
     staged === null ? null : library.resumeKeyFor(staged.key, staged.songId);
   const resumable = analysis.phase === 'paused' || analysis.phase === 'failed';
 
+  const lyricsJob = library.lyricsJob;
+  // The same read the drawer starts, offered from the stage for the song that
+  // is on. One job at a time, so a read belonging to another song, or any
+  // separation at all, counts as the machine being busy.
+  const lyricsRead: LyricsRead = {
+    start:
+      stagedSong !== null && canReadLyrics(stagedSong)
+        ? () => {
+            library.readLyrics(stagedSong);
+          }
+        : null,
+    busy: library.active !== null || (lyricsJob !== null && lyricsJob.songId !== stagedId),
+    job: lyricsJob !== null && lyricsJob.songId === stagedId ? lyricsJob : null,
+    cancelling: library.cancellingLyrics,
+    cancel: library.cancelLyrics,
+  };
+
   return (
     <>
       <main className="fixed inset-0 overflow-hidden bg-black">
@@ -101,6 +119,7 @@ export function App() {
           analysis={analysis}
           vocals={vocals}
           onVocals={setVocals}
+          read={lyricsRead}
           onFiles={openFiles}
           onOpenDrawer={() => {
             setDrawer(true);

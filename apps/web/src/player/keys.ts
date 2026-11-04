@@ -26,21 +26,31 @@ export type PlayerCommand =
   /** Relative, in parts of full volume. */
   | { readonly kind: 'volume'; readonly delta: number }
   | { readonly kind: 'mute' }
-  | { readonly kind: 'fullscreen' };
+  | { readonly kind: 'fullscreen' }
+  /** Show or hide the words. Nothing happens for a song that has none. */
+  | { readonly kind: 'lyrics' };
 
 /**
  * Elements that answer to these keys themselves. A focused button takes
  * space, a focused slider takes the arrows, and taking the key off them would
  * leave the controls unusable by keyboard.
  */
-const OWN_KEYS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A', 'DETAILS', 'SUMMARY']);
+const OWN_KEYS = new Set(['INPUT', 'TEXTAREA', 'SELECT', 'DETAILS']);
+
+/** These only claim the keys that activate them, so the rest still reach the player. */
+const ACTIVATED_BY = new Set(['BUTTON', 'A', 'SUMMARY']);
+const ACTIVATING_KEYS = new Set([' ', 'Spacebar', 'Enter']);
 
 export function commandForKey(press: KeyPress): PlayerCommand | null {
   // A shortcut with a modifier belongs to the browser or the system.
   if (press.ctrl === true || press.meta === true || press.alt === true) {
     return null;
   }
-  if (press.editing === true || OWN_KEYS.has(press.targetTag ?? '')) {
+  const tag = press.targetTag ?? '';
+  if (press.editing === true || OWN_KEYS.has(tag)) {
+    return null;
+  }
+  if (ACTIVATED_BY.has(tag) && ACTIVATING_KEYS.has(press.key)) {
     return null;
   }
   switch (press.key) {
@@ -61,6 +71,8 @@ export function commandForKey(press: KeyPress): PlayerCommand | null {
       return { kind: 'mute' };
     case 'f':
       return { kind: 'fullscreen' };
+    case 'l':
+      return { kind: 'lyrics' };
     default:
       return null;
   }

@@ -5,8 +5,10 @@ import type { SongRecord } from '../library/songs.ts';
 import { StageOverlays } from './StageOverlays.tsx';
 import { Waveform } from './Waveform.tsx';
 import { vocalToggle, type AnalysisView } from './analysis.ts';
+import type { LyricsRead } from './lyrics-read.ts';
 import type { VocalChoice } from './stem-mix.ts';
 import { useIdleOverlays } from './useIdleOverlays.ts';
+import { useStageLyrics } from './useStageLyrics.ts';
 import { useStemPlayer } from './useStemPlayer.ts';
 import { useTransportControls } from './useTransportControls.ts';
 import { useVolume } from './useVolume.ts';
@@ -16,6 +18,12 @@ interface StemStageProps {
   readonly analysis: AnalysisView;
   readonly vocals: VocalChoice;
   readonly onVocals: (choice: VocalChoice) => void;
+  /**
+   * Reading words off a picture, which this song has none of: it kept no file
+   * of its own. Taken all the same so the bar is assembled the same way on
+   * both stages, and it offers nothing.
+   */
+  readonly read: LyricsRead;
   readonly onOpenDrawer: () => void;
   readonly shortcuts: boolean;
 }
@@ -38,11 +46,13 @@ export function StemStage({
   analysis,
   vocals,
   onVocals,
+  read,
   onOpenDrawer,
   shortcuts,
 }: StemStageProps) {
   const frame = useRef<HTMLDivElement | null>(null);
   const sound = useVolume();
+  const lyrics = useStageLyrics(song);
   const player = useStemPlayer({
     song,
     choice: vocals,
@@ -56,6 +66,7 @@ export function StemStage({
     frame,
     shortcuts,
     volume: sound,
+    toggleLyrics: lyrics.lines === null ? null : lyrics.toggle,
     toggle: player.toggle,
     skip: player.skip,
     seek: player.seek,
@@ -89,6 +100,8 @@ export function StemStage({
         onVocals={onVocals}
         toggle={vocalToggle(analysis, player.state)}
         analysis={analysis}
+        lyrics={lyrics}
+        read={read}
         onOpenDrawer={onOpenDrawer}
         onCancelAnalysis={null}
         onResumeAnalysis={null}

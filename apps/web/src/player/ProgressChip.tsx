@@ -1,13 +1,17 @@
-import { LoaderCircle, RotateCcw, Square, TriangleAlert } from 'lucide-react';
+import type { ReactNode } from 'react';
+import { LoaderCircle, RotateCcw, Square, TriangleAlert, X } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
 import { formatPercent } from '../library/format.ts';
-import { describeAnalysis, type AnalysisView } from './analysis.ts';
+import { describeAnalysis, type AnalysisPhase, type AnalysisView } from './analysis.ts';
+import { describeLyricsRead, lyricsReadShare, type LyricsRead } from './lyrics-read.ts';
 
 interface ProgressChipProps {
   readonly view: AnalysisView;
+  /** The read running on this song, which takes the chip while it lasts. */
+  readonly read: LyricsRead;
   /** The overlays have gone; the chip stays but gets out of the way. */
   readonly dim: boolean;
   readonly onCancel: (() => void) | null;
@@ -16,21 +20,20 @@ interface ProgressChipProps {
 }
 
 /**
- * What analysis is doing, in one corner, while the song plays over the top of
- * it.
+ * What the machine is doing for this song, in one corner, while the song
+ * plays over the top of it.
  *
  * It outlives the rest of the furniture. The bars go when the room settles,
  * but a separation runs for minutes and somebody will want to know whether it
  * is still going without waving at the screen, so this only dims.
+ *
+ * A lyric read takes the chip for as long as it lasts. The two cannot both be
+ * going — the library runs one job at a time — and the one in flight is the
+ * one worth a corner of somebody's video.
  */
-export function ProgressChip({ view, dim, onCancel, onResume }: ProgressChipProps) {
-  if (view.phase === 'none' || view.phase === 'ready') {
-    return null;
-  }
 
-  const share = view.share;
-  const failed = view.phase === 'failed';
-
+/** The pill itself, which both jobs are reported in. */
+function Chip({ dim, children }: { readonly dim: boolean; readonly children: ReactNode }) {
   return (
     <div
       className={cn(
@@ -39,30 +42,74 @@ export function ProgressChip({ view, dim, onCancel, onResume }: ProgressChipProp
       )}
       aria-live="polite"
     >
-      {failed ? (
-        <TriangleAlert className="size-3.5 flex-none text-destructive" aria-hidden="true" />
-      ) : (
-        <LoaderCircle
-          className={cn(
-            'size-3.5 flex-none',
-            view.phase === 'running' && 'animate-spin motion-reduce:animate-none',
-          )}
-          aria-hidden="true"
-        />
-      )}
+      {children}
+    </div>
+  );
+}
+
+function Spinner({ turning = true }: { readonly turning?: boolean }) {
+  return (
+    <LoaderCircle
+      className={cn('size-3.5 flex-none', turning && 'animate-spin motion-reduce:animate-none')}
+      aria-hidden="true"
+    />
+  );
+}
+
+function Share({ share, label }: { readonly share: number; readonly label: string }) {
+  return (
+    <>
+      <Progress className="w-16 flex-none" value={Math.round(share * 100)} aria-label={label} />
+      <span className="flex-none tabular-nums">{formatPercent(share)}</span>
+    </>
+  );
+}
+
+/** Still rather than spinning for a job that is only waiting its turn. */
+function AnalysisIcon({ phase }: { readonly phase: AnalysisPhase }) {
+  if (phase === 'failed') {
+    return <TriangleAlert className="size-3.5 flex-none text-destructive" aria-hidden="true" />;
+  }
+  return <Spinner turning={phase === 'running'} />;
+}
+
+export function ProgressChip({ view, read, dim, onCancel, onResume }: ProgressChipProps) {
+  const job = read.job;
+
+  if (job !== null) {
+    const share = lyricsReadShare(job);
+    return (
+      <Chip dim={dim}>
+        <Spinner />
+        <span className="truncate">{describeLyricsRead(job)}</span>
+        {share !== null && <Share share={share} label="lyric reading progress" />}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={read.cancelling ? 'stopping' : 'stop reading the lyrics'}
+          className="flex-none rounded-full text-white/70 hover:bg-white/10 hover:text-white"
+          disabled={read.cancelling}
+          onClick={read.cancel}
+        >
+          <X aria-hidden="true" />
+        </Button>
+      </Chip>
+    );
+  }
+
+  if (view.phase === 'none' || view.phase === 'ready') {
+    return null;
+  }
+
+  const share = view.share;
+
+  return (
+    <Chip dim={dim}>
+      <AnalysisIcon phase={view.phase} />
 
       <span className="truncate">{describeAnalysis(view)}</span>
 
-      {share !== null && (
-        <>
-          <Progress
-            className="w-16 flex-none"
-            value={Math.round(share * 100)}
-            aria-label="analysis progress"
-          />
-          <span className="flex-none tabular-nums">{formatPercent(share)}</span>
-        </>
-      )}
+      {share !== null && <Share share={share} label="analysis progress" />}
 
       {onCancel !== null && (
         <Button
@@ -87,6 +134,6 @@ export function ProgressChip({ view, dim, onCancel, onResume }: ProgressChipProp
           <RotateCcw aria-hidden="true" />
         </Button>
       )}
-    </div>
+    </Chip>
   );
 }

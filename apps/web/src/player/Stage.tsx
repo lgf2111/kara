@@ -6,6 +6,7 @@ import { MediaStage } from './MediaStage.tsx';
 import { SongsButton } from './SongsButton.tsx';
 import { StemStage } from './StemStage.tsx';
 import type { AnalysisView } from './analysis.ts';
+import type { LyricsRead } from './lyrics-read.ts';
 import type { VocalChoice } from './stem-mix.ts';
 import type { Staged } from './usePlayback.ts';
 
@@ -18,6 +19,8 @@ interface StageProps {
   readonly analysis: AnalysisView;
   readonly vocals: VocalChoice;
   readonly onVocals: (choice: VocalChoice) => void;
+  /** Reading the words off the staged song's own picture. */
+  readonly read: LyricsRead;
   readonly onFiles: (files: readonly File[]) => void;
   readonly onOpenDrawer: () => void;
   readonly shortcuts: boolean;
@@ -46,6 +49,7 @@ export function Stage({
   analysis,
   vocals,
   onVocals,
+  read,
   onFiles,
   onOpenDrawer,
   shortcuts,
@@ -71,6 +75,7 @@ export function Stage({
         analysis={analysis}
         vocals={vocals}
         onVocals={onVocals}
+        read={read}
         onOpenDrawer={onOpenDrawer}
         shortcuts={shortcuts}
         onCancelAnalysis={onCancelAnalysis}
@@ -86,6 +91,7 @@ export function Stage({
         analysis={analysis}
         vocals={vocals}
         onVocals={onVocals}
+        read={read}
         onOpenDrawer={onOpenDrawer}
         shortcuts={shortcuts}
       />

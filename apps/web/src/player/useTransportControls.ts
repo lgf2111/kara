@@ -25,6 +25,12 @@ interface Moves {
   /** The keys are off while something else has the room, such as the drawer. */
   readonly shortcuts: boolean;
   readonly volume: Volume;
+  /**
+   * Shows or hides the words, or null for a song with none. Here rather than
+   * on the transport because the lines belong to the song, not to whatever is
+   * playing it, and the bar at the bottom reads them straight from the stage.
+   */
+  readonly toggleLyrics: (() => void) | null;
   toggle(): void;
   skip(seconds: number): void;
   seek(seconds: number): void;
@@ -37,6 +43,7 @@ export function useTransportControls({
   frame,
   shortcuts,
   volume,
+  toggleLyrics,
   toggle,
   skip,
   seek,
@@ -63,9 +70,12 @@ export function useTransportControls({
           return;
         case 'fullscreen':
           toggleFullscreen();
+          return;
+        case 'lyrics':
+          toggleLyrics?.();
       }
     },
-    [shortcuts, skip, toggle, toggleFullscreen, volume],
+    [shortcuts, skip, toggle, toggleFullscreen, toggleLyrics, volume],
   );
 
   usePlayerKeys(apply);
