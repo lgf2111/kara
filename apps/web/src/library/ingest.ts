@@ -1,5 +1,6 @@
 import { chooseBackend } from '../separation/backend-choice.ts';
 import type { BackendRequest } from '../separation/backend-policy.ts';
+import { TroubleError } from '../notices/notices.ts';
 import type { JobSource } from '../separation/job.ts';
 import type {
   ProgressMessage,
@@ -40,7 +41,11 @@ export async function decodeFile(file: File): Promise<Decoded> {
   try {
     buffer = await context.decodeAudioData(bytes);
   } catch (cause) {
-    throw new Error(
+    // Named here rather than by whoever catches it: the file is what could
+    // not be opened, which is a different thing to say than a separation
+    // that went wrong halfway.
+    throw new TroubleError(
+      'ingest',
       `this browser could not decode the audio in ${file.name}: ${
         cause instanceof Error ? cause.message : String(cause)
       }`,
@@ -109,13 +114,18 @@ export async function startSeparation(
         return;
       }
       if (message.kind === 'failed') {
-        reject(new Error(`${message.stage}: ${message.error}`));
+        reject(new TroubleError('analysis', `${message.stage}: ${message.error}`));
         return;
       }
       resolve({ result: message.result, cancelled: message.kind === 'cancelled' });
     });
     worker.addEventListener('error', (event) => {
-      reject(new Error(event.message === '' ? 'the separation worker stopped' : event.message));
+      reject(
+        new TroubleError(
+          'analysis',
+          event.message === '' ? 'the separation worker stopped' : event.message,
+        ),
+      );
     });
   }).finally(() => {
     worker.terminate();

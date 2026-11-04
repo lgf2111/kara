@@ -65,6 +65,7 @@ workers/relay     Cloudflare Worker: WebRTC signalling and room codes only
 scripts           repo guards, run locally and in CI
 docs/DESIGN.md    architecture, data model, recipe format, legal rationale
 docs/lyrics-ocr.md  reading lyrics off a video you own
+docs/browser-support.md  what runs in which browser, and the Safari workarounds
 .githooks         tracked git hooks
 ```
 

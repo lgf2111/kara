@@ -1,3 +1,7 @@
+import { ChevronRight, FileText, LoaderCircle, Trash2, X } from 'lucide-react';
+
+import { Button } from '@/components/ui/button';
+import { Progress } from '@/components/ui/progress';
 import { formatDuration, formatEta } from './format.ts';
 import { describeLyrics } from './lyrics-summary.ts';
 import { canReadLyrics, type SongRecord } from './songs.ts';
@@ -31,17 +35,32 @@ export function LyricsActions({
 }: LyricsActionsProps) {
   if (job !== null) {
     return (
-      <div className="lyrics">
-        <p className="note">
-          {job.stage}
-          {job.framesTotal > 0 &&
-            `: frame ${String(job.framesDone)} of ${String(job.framesTotal)}`}
-          {job.etaMs !== null && `, about ${formatEta(job.etaMs)} left`}
-        </p>
-        <progress value={job.framesDone} max={Math.max(1, job.framesTotal)} />
-        <button type="button" disabled={cancelling} onClick={onCancel}>
-          {cancelling ? 'cancelling' : 'cancel'}
-        </button>
+      <div className="space-y-1.5 border-t border-border/60 pt-2">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <LoaderCircle
+            className="size-3.5 flex-none animate-spin motion-reduce:animate-none"
+            aria-hidden="true"
+          />
+          <span className="min-w-0 flex-1 truncate">
+            {job.stage}
+            {job.framesTotal > 0 &&
+              `: frame ${String(job.framesDone)} of ${String(job.framesTotal)}`}
+            {job.etaMs !== null && `, about ${formatEta(job.etaMs)} left`}
+          </span>
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label={cancelling ? 'cancelling' : 'cancel reading the lyrics'}
+            disabled={cancelling}
+            onClick={onCancel}
+          >
+            <X aria-hidden="true" />
+          </Button>
+        </div>
+        <Progress
+          value={Math.round((job.framesDone / Math.max(1, job.framesTotal)) * 100)}
+          aria-label="lyric reading progress"
+        />
       </div>
     );
   }
@@ -49,32 +68,53 @@ export function LyricsActions({
   const lyrics = song.lyrics;
   if (lyrics !== undefined) {
     return (
-      <div className="lyrics">
+      <div className="border-t border-border/60 pt-2">
         {/*
           Shut until it is opened: the lines are the person's own reading of
           their own video, and a library of songs would be a wall of words.
           They are shown in this app and nowhere else.
         */}
-        <details className="lyric-lines">
-          <summary>{describeLyrics(lyrics)}</summary>
-          <ol>
+        <details className="group/lyrics">
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-md text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50">
+            <ChevronRight
+              className="size-3.5 flex-none transition-transform group-open/lyrics:rotate-90 motion-reduce:transition-none"
+              aria-hidden="true"
+            />
+            <FileText className="size-3.5 flex-none" aria-hidden="true" />
+            <span className="min-w-0 flex-1 truncate">{describeLyrics(lyrics)}</span>
+          </summary>
+
+          <ol className="mt-2 max-h-72 space-y-0.5 overflow-y-auto border-l-2 border-border py-1 pl-3 text-xs">
             {lyrics.lines.map((line, index) => (
-              <li key={`${String(line.startMs)}-${String(index)}`}>
-                <span className="at">{formatDuration(line.startMs)}</span>
-                <span className="said">{line.text}</span>
+              <li
+                key={`${String(line.startMs)}-${String(index)}`}
+                className="flex gap-2.5 leading-relaxed"
+              >
+                <span className="flex-none text-muted-foreground tabular-nums">
+                  {formatDuration(line.startMs)}
+                </span>
+                <span className="min-w-0">{line.text}</span>
               </li>
             ))}
           </ol>
-          <p className="note">Read from the video's own picture, kept on this device.</p>
+
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground">
+              Read from the video&rsquo;s own picture, kept on this device.
+            </p>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="flex-none text-muted-foreground hover:text-destructive"
+              onClick={() => {
+                onRemove(song);
+              }}
+            >
+              <Trash2 aria-hidden="true" />
+              remove lyrics
+            </Button>
+          </div>
         </details>
-        <button
-          type="button"
-          onClick={() => {
-            onRemove(song);
-          }}
-        >
-          remove lyrics
-        </button>
       </div>
     );
   }
@@ -82,17 +122,21 @@ export function LyricsActions({
   if (!canReadLyrics(song)) {
     return null;
   }
+
   return (
-    <div className="lyrics">
-      <button
-        type="button"
+    <div className="border-t border-border/60 pt-2">
+      <Button
+        variant="ghost"
+        size="sm"
+        className="text-muted-foreground hover:text-foreground"
         disabled={busy}
         onClick={() => {
           onRead(song);
         }}
       >
+        <FileText aria-hidden="true" />
         read lyrics from the video
-      </button>
+      </Button>
     </div>
   );
 }

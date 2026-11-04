@@ -92,7 +92,7 @@ export function App() {
 
   return (
     <>
-      <main className="room">
+      <main className="fixed inset-0 overflow-hidden bg-black">
         <Stage
           staged={staged}
           song={stagedSong}

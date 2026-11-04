@@ -7,6 +7,8 @@ import {
   type SourceKind,
 } from '../library/songs.ts';
 import { playableSource } from '../library/storage.ts';
+import { useNotices } from '../notices/Notices.tsx';
+import { troubleFrom } from '../notices/notices.ts';
 import { analysisKeyFor } from '../separation/queue.ts';
 import { createOpfsStore } from '../storage/opfs-store.ts';
 
@@ -52,7 +54,14 @@ export interface Playback {
   clear(): void;
 }
 
+/**
+ * What the stage says when the copy kept with a song will not open. Short,
+ * because the notice beside it carries the reason the filesystem gave.
+ */
+const OPEN_FAILED = 'The file kept for this song could not be opened.';
+
 export function usePlayback(): Playback {
+  const notices = useNotices();
   const store = useMemo(() => createOpfsStore(), []);
   const [staged, setStaged] = useState<Staged | null>(null);
   const [opening, setOpening] = useState(false);
@@ -127,13 +136,17 @@ export function usePlayback(): Playback {
           url.current = made;
           put({ ...current, url: made });
         } catch (cause) {
-          setError(cause instanceof Error ? cause.message : String(cause));
+          // Twice over on purpose: the stage has to stop saying it is
+          // opening the file, and the reason belongs in the notice rather
+          // than across somebody's video.
+          setError(OPEN_FAILED);
+          notices.report(troubleFrom('playback', cause));
         } finally {
           setOpening(false);
         }
       })();
     },
-    [put, release, store],
+    [notices, put, release, store],
   );
 
   const identify = useCallback(
