@@ -2,6 +2,7 @@ import {
   bisect,
   compare,
   environment,
+  island,
   nodes,
   report,
   sweep,
@@ -18,7 +19,7 @@ import {
  * driver and the buttons below take the same path.
  */
 
-const api = { environment, nodes, compare, bisect, sweep, report };
+const api = { environment, nodes, compare, island, bisect, sweep, report };
 
 (globalThis as unknown as Record<string, unknown>)['karaBisect'] = api;
 
@@ -69,11 +70,22 @@ if (root !== null) {
     button('environment', () => environment()),
     button('nodes', () => nodes(DEFAULTS)),
     button('compare', () => compare(DEFAULTS)),
+    button('island', () => island(DEFAULTS)),
     button('bisect', () => bisect(DEFAULTS)),
     button('options', () => sweep(DEFAULTS)),
     button('full report', () => report(DEFAULTS)),
   );
-  root.append(heading, blurb, controls, log);
+
+  // The same buttons with the float32 rewrite on, so the before and the after
+  // are one click apart without a reload.
+  const patched: BisectOptions & SweepOptions = { ...DEFAULTS, patch: true };
+  const patchedControls = document.createElement('p');
+  patchedControls.append(
+    button('compare, fp32 island', () => compare(patched)),
+    button('island, fp32 island', () => island(patched)),
+    button('full report, fp32 island', () => report(patched)),
+  );
+  root.append(heading, blurb, controls, patchedControls, log);
 }
 
 const hook = (globalThis as unknown as Record<string, unknown>)['karaPhase'];

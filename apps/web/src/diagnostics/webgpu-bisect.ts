@@ -1,7 +1,14 @@
 import * as ort from 'onnxruntime-web/webgpu';
 
 import {
+  patchNormalisationIslands,
+  type IslandPatch,
+  type PatchedIsland,
+  type SkippedIsland,
+} from './onnx-fp32-island.ts';
+import {
   ELEM_TYPES,
+  attributeText,
   exposableOutput,
   exposeOutputs,
   opTypeHistogram,
@@ -309,6 +316,53 @@ async function pieceBytes(file: string): Promise<Uint8Array> {
   return bytes;
 }
 
+const patchCache = new Map<string, IslandPatch>();
+
+/** The piece with its float16 normalisation islands rebuilt in float32. */
+async function patchedPiece(file: string): Promise<IslandPatch> {
+  const cached = patchCache.get(file);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const patch = patchNormalisationIslands(await pieceBytes(file));
+  patchCache.set(file, patch);
+  phase('patch', {
+    piece: file,
+    islands: patch.islands.length,
+    skipped: patch.skipped.length,
+    bytes: patch.bytes.length,
+  });
+  return patch;
+}
+
+/**
+ * The two models a run compares.
+ *
+ * WASM always gets the piece as it ships: the point of `--patch` is to ask
+ * whether the rewrite makes WebGPU agree with the reference, not to move the
+ * reference. `renames` maps an island tensor to the name the candidate
+ * produces it under, so a probe can be paired back up by its original name.
+ */
+interface Models {
+  readonly reference: Uint8Array;
+  readonly candidate: Uint8Array;
+  readonly patch: IslandPatch | null;
+  readonly renames: Readonly<Record<string, string>>;
+}
+
+async function modelsFor(file: string, patch: boolean): Promise<Models> {
+  const reference = await pieceBytes(file);
+  if (!patch) {
+    return { reference, candidate: reference, patch: null, renames: {} };
+  }
+  const patched = await patchedPiece(file);
+  const renames: Record<string, string> = {};
+  for (const island of patched.islands) {
+    Object.assign(renames, island.renames);
+  }
+  return { reference, candidate: patched.bytes, patch: patched, renames };
+}
+
 // --- feeds ---
 
 export interface PrefixStep {
@@ -399,12 +453,17 @@ function trim(stats: TensorStats): TensorStats {
   };
 }
 
-function compareTensors(reference: Captured, candidate: Captured, tolerance: number): TensorComparison {
+function compareTensors(
+  reference: Captured,
+  candidate: Captured,
+  tolerance: number,
+  name = candidate.name,
+): TensorComparison {
   const referenceStats = tensorStats(reference.values);
   const candidateStats = tensorStats(candidate.values);
   const drift = divergence(reference.values, candidate.values, tolerance);
   return {
-    name: candidate.name,
+    name,
     type: candidate.type,
     dims: candidate.dims,
     location: candidate.location,
@@ -418,17 +477,24 @@ function compareTensors(reference: Captured, candidate: Captured, tolerance: num
   };
 }
 
+/**
+ * Reference and candidate tensors side by side, reported under the reference's
+ * names. `renames` is for a patched candidate, whose rebuilt island tensors
+ * carry a suffix: the pair is still the same quantity, so it is still worth
+ * comparing, and the original name is the one worth printing.
+ */
 function pairUp(
   reference: readonly Captured[],
   candidate: readonly Captured[],
   tolerance: number,
+  renames: Readonly<Record<string, string>> = {},
 ): readonly TensorComparison[] {
-  const byName = new Map(reference.map((item) => [item.name, item]));
+  const byName = new Map(candidate.map((item) => [item.name, item]));
   const out: TensorComparison[] = [];
-  for (const item of candidate) {
-    const found = byName.get(item.name);
+  for (const item of reference) {
+    const found = byName.get(renames[item.name] ?? item.name) ?? byName.get(item.name);
     if (found !== undefined) {
-      out.push(compareTensors(found, item, tolerance));
+      out.push(compareTensors(item, found, tolerance, item.name));
     }
   }
   return out;
@@ -456,6 +522,8 @@ export interface BisectOptions {
   readonly shape?: SegmentShape;
   readonly tolerance?: number;
   readonly optimisation?: Optimisation;
+  /** Give WebGPU the piece with its normalisation islands rebuilt in float32. */
+  readonly patch?: boolean;
 }
 
 export interface Settled {
@@ -465,6 +533,7 @@ export interface Settled {
   readonly shape: SegmentShape;
   readonly tolerance: number;
   readonly optimisation: Optimisation;
+  readonly patch: boolean;
 }
 
 function settle(input: BisectOptions): Settled {
@@ -474,6 +543,7 @@ function settle(input: BisectOptions): Settled {
     gain: input.gain ?? 1,
     shape: input.shape ?? 'mixed',
     tolerance: input.tolerance ?? 1e-2,
+    patch: input.patch ?? false,
     // Off by default: a tensor that is a graph output cannot be fused away, so
     // the only honest regime for a bisection is one where there was nothing to
     // fuse. WebGPU returns NaN with optimisation disabled too, so nothing is
@@ -503,6 +573,8 @@ export interface NodeRow {
   readonly output: string | null;
   /** Cast's target type, so a precision boundary reads off the table. */
   readonly castTo: string | null;
+  /** Every attribute as text: a reduction's axes, a norm's epsilon. */
+  readonly attributes: string;
 }
 
 function tableOf(summary: GraphSummary): readonly NodeRow[] {
@@ -512,7 +584,32 @@ function tableOf(summary: GraphSummary): readonly NodeRow[] {
     opType: node.opType,
     output: exposableOutput(node),
     castTo: node.castTo === null ? null : (ELEM_TYPES[node.castTo] ?? String(node.castTo)),
+    attributes: node.attributes.map(attributeText).join(' '),
   }));
+}
+
+/** A small initializer with its value: an epsilon, an exponent, a clip bound. */
+export interface ConstantRow {
+  readonly name: string;
+  readonly type: string;
+  readonly dims: readonly number[];
+  readonly values: readonly number[];
+}
+
+function constantsOf(summary: GraphSummary): readonly ConstantRow[] {
+  const out: ConstantRow[] = [];
+  for (const initializer of summary.initializers) {
+    if (initializer.values === null || initializer.values.length === 0) {
+      continue;
+    }
+    out.push({
+      name: initializer.name,
+      type: ELEM_TYPES[initializer.elemType] ?? String(initializer.elemType),
+      dims: initializer.dims,
+      values: initializer.values,
+    });
+  }
+  return out;
 }
 
 export interface GraphReport {
@@ -523,20 +620,23 @@ export interface GraphReport {
   readonly opTypes: Readonly<Record<string, number>>;
   readonly initializerTypes: Readonly<Record<string, number>>;
   readonly initializerBytes: number;
+  readonly constants: readonly ConstantRow[];
   readonly rows: readonly NodeRow[];
 }
 
 export async function nodes(input: BisectOptions = {}): Promise<GraphReport> {
-  const { piece } = settle(input);
-  const summary = summariseGraph(await pieceBytes(piece));
+  const settled = settle(input);
+  const models = await modelsFor(settled.piece, settled.patch);
+  const summary = summariseGraph(models.candidate);
   return {
-    piece,
+    piece: settled.piece,
     count: summary.nodes.length,
     inputs: summary.inputs,
     outputs: summary.outputs,
     opTypes: opTypeHistogram(summary.nodes),
     initializerTypes: summary.initializerTypes,
     initializerBytes: summary.initializerBytes,
+    constants: constantsOf(summary),
     rows: tableOf(summary),
   };
 }
@@ -549,31 +649,60 @@ export interface CompareReport {
   readonly webgpuMs: number;
   readonly outputs: readonly TensorComparison[];
   readonly reproduced: boolean;
+  /** Whether WebGPU ran the float32 rewrite. WASM never does. */
+  readonly patched: boolean;
+  /** Worst relative difference over every declared output, patched or not. */
+  readonly worstRelative: number;
+  readonly worstRelativeAt: string | null;
+  readonly nonFiniteOutputs: readonly string[];
+}
+
+/** The two headline numbers, over every output rather than one node. */
+function roundUp(outputs: readonly TensorComparison[]): {
+  worstRelative: number;
+  worstRelativeAt: string | null;
+  nonFiniteOutputs: readonly string[];
+} {
+  let worstRelative = 0;
+  let worstRelativeAt: string | null = null;
+  const nonFiniteOutputs: string[] = [];
+  for (const output of outputs) {
+    if (output.candidate.nonFinite > 0) {
+      nonFiniteOutputs.push(output.name);
+    }
+    if (output.drift.maxRel > worstRelative) {
+      worstRelative = output.drift.maxRel;
+      worstRelativeAt = output.name;
+    }
+  }
+  return { worstRelative, worstRelativeAt, nonFiniteOutputs };
 }
 
 /** Step one: the piece's declared outputs on both backends, same input. */
 export async function compare(input: BisectOptions = {}): Promise<CompareReport> {
   const settled = settle(input);
   const segment = syntheticSegment(settled.seed, settled.gain, settled.shape);
-  const bytes = await pieceBytes(settled.piece);
+  const models = await modelsFor(settled.piece, settled.patch);
   const feeds = await feedsFor(settled.piece, segment);
 
   phase('compare-wasm', { piece: settled.piece });
   const wasm = await runPiece(
-    bytes,
+    models.reference,
     { name: 'wasm', backend: 'wasm', optimisation: settled.optimisation },
     feeds.tensors,
     null,
   );
-  phase('compare-webgpu', { piece: settled.piece });
+  phase('compare-webgpu', { piece: settled.piece, patched: settled.patch });
   const webgpu = await runPiece(
-    bytes,
+    models.candidate,
     { name: 'webgpu', backend: 'webgpu', optimisation: settled.optimisation },
     feeds.tensors,
     null,
   );
 
-  const outputs = pairUp(wasm.captured, webgpu.captured, settled.tolerance);
+  // The piece's declared outputs keep their names through the rewrite, so this
+  // is every output of the piece and not only the node that broke.
+  const outputs = pairUp(wasm.captured, webgpu.captured, settled.tolerance, models.renames);
   return {
     piece: settled.piece,
     input: {
@@ -590,6 +719,155 @@ export async function compare(input: BisectOptions = {}): Promise<CompareReport>
     webgpuMs: Math.round(webgpu.runMs),
     outputs,
     reproduced: outputs.some((output) => output.verdict !== 'clean'),
+    patched: settled.patch,
+    ...roundUp(outputs),
+  };
+}
+
+// --- the normalisation island ---
+
+export interface IslandRow {
+  readonly role: string;
+  readonly nodeIndex: number;
+  readonly nodeName: string;
+  readonly opType: string;
+  readonly output: string;
+}
+
+export interface IslandSummary {
+  readonly input: string;
+  readonly inputType: string;
+  readonly axes: readonly number[];
+  readonly keepDims: number | null;
+  readonly steps: readonly IslandRow[];
+  /** Elements each reduction sums, which is the headroom question in fp16. */
+  readonly reduced: number | null;
+  readonly boundary: readonly string[];
+  readonly internal: readonly string[];
+  readonly reason: string | null;
+}
+
+export interface IslandReport {
+  readonly piece: string;
+  readonly patched: boolean;
+  readonly suffix: string;
+  readonly islands: readonly IslandSummary[];
+  readonly tensors: readonly TensorComparison[];
+  readonly note: string;
+}
+
+function islandRows(island: PatchedIsland | SkippedIsland, reduced: number | null): IslandSummary {
+  const patchedIsland = 'boundary' in island ? island : null;
+  return {
+    input: island.input,
+    inputType:
+      island.inputElemType === null
+        ? 'undeclared'
+        : (ELEM_TYPES[island.inputElemType] ?? String(island.inputElemType)),
+    axes: island.axes,
+    keepDims: island.keepDims,
+    steps: island.steps.map((step) => ({
+      role: step.role,
+      nodeIndex: step.nodeIndex,
+      nodeName: step.nodeName,
+      opType: step.opType,
+      output: step.output,
+    })),
+    reduced,
+    boundary: patchedIsland?.boundary.map((item) => item.tensor) ?? [],
+    internal: patchedIsland?.internal ?? [],
+    reason: 'reason' in island ? island.reason : null,
+  };
+}
+
+/**
+ * Every tensor of every normalisation island, on both backends.
+ *
+ * This is the step that names the op rather than the chain. A bisection stops
+ * at the first node whose output is non-finite, and in this graph that is the
+ * Div: the reduction that fed it returned a finite wrong number, and a
+ * standard deviation is a tensor of one element, which no sampling verdict can
+ * speak for. Asking for all eight at once leaves nothing to infer.
+ *
+ * With `patch`, WebGPU runs the float32 rewrite and WASM still runs the piece
+ * as it ships, so the two columns are the rewrite against the reference.
+ */
+export async function island(input: BisectOptions = {}): Promise<IslandReport> {
+  const settled = settle(input);
+  const segment = syntheticSegment(settled.seed, settled.gain, settled.shape);
+  const models = await modelsFor(settled.piece, settled.patch);
+  const patch = await patchedPiece(settled.piece);
+  const feeds = await feedsFor(settled.piece, segment);
+
+  const all = [...patch.islands, ...patch.skipped];
+  const wanted: string[] = [];
+  for (const found of all) {
+    for (const step of found.steps) {
+      if (step.output !== '') {
+        wanted.push(step.output);
+      }
+    }
+  }
+  if (wanted.length === 0) {
+    return {
+      piece: settled.piece,
+      patched: settled.patch,
+      suffix: patch.suffix,
+      islands: [],
+      tensors: [],
+      note: 'no normalisation island in this piece',
+    };
+  }
+
+  /** Already an output of this graph, so adding it again would declare it twice. */
+  const toExpose = (bytes: Uint8Array, names: readonly string[]): readonly string[] => {
+    const declared = new Set(summariseGraph(bytes).outputs);
+    return names.filter((name) => !declared.has(name));
+  };
+
+  phase('island-wasm', { piece: settled.piece, tensors: wanted.length });
+  const wasm = await runPiece(
+    exposeOutputs(models.reference, toExpose(models.reference, wanted)),
+    { name: 'wasm', backend: 'wasm', optimisation: settled.optimisation },
+    feeds.tensors,
+    wanted,
+  );
+  // On the patched model the island tensors carry the rewrite's suffix, so the
+  // names asked for are the renamed ones and the pairing maps them back.
+  const candidateNames = wanted.map((name) => models.renames[name] ?? name);
+  phase('island-webgpu', { piece: settled.piece, patched: settled.patch });
+  const webgpu = await runPiece(
+    exposeOutputs(models.candidate, toExpose(models.candidate, candidateNames)),
+    { name: 'webgpu', backend: 'webgpu', optimisation: settled.optimisation },
+    feeds.tensors,
+    candidateNames,
+  );
+
+  // How many elements each reduction sums, measured rather than assumed: the
+  // Sub has the island input's shape, and it came back from the run.
+  const measured = new Map(wasm.captured.map((item) => [item.name, item.dims]));
+  const islands = all.map((found) => {
+    const diff = found.steps.find((step) => step.role === 'diff')?.output ?? '';
+    const dims = measured.get(diff);
+    let reduced: number | null = null;
+    if (dims !== undefined && found.axes.length > 0) {
+      reduced = 1;
+      for (const axis of found.axes) {
+        reduced *= dims[axis] ?? 1;
+      }
+    }
+    return islandRows(found, reduced);
+  });
+
+  return {
+    piece: settled.piece,
+    patched: settled.patch,
+    suffix: patch.suffix,
+    islands,
+    tensors: pairUp(wasm.captured, webgpu.captured, settled.tolerance, models.renames),
+    note:
+      'every island tensor is a graph output here, so nothing on this path was fused; the ' +
+      'statistics are tensors of one element and are reported as such',
   };
 }
 
@@ -709,7 +987,9 @@ const NOT_RUN: BisectReport = {
  */
 export async function bisect(input: BisectOptions = {}, known?: CompareReport): Promise<BisectReport> {
   const settled = settle(input);
-  const bytes = await pieceBytes(settled.piece);
+  // Both backends probe the same bytes, so with `patch` this is the rewritten
+  // graph on each side and the node names are the rewritten ones.
+  const bytes = (await modelsFor(settled.piece, settled.patch)).candidate;
   const summary = summariseGraph(bytes);
   const table = tableOf(summary);
   const segment = syntheticSegment(settled.seed, settled.gain, settled.shape);
@@ -822,7 +1102,7 @@ export interface SweepOptions extends BisectOptions {
 /** Step three: which session option, if any, changes the answer. */
 export async function sweep(input: SweepOptions = {}): Promise<readonly OptionOutcome[]> {
   const settled = settle(input);
-  const bytes = await pieceBytes(settled.piece);
+  const models = await modelsFor(settled.piece, settled.patch);
   const force = input.forceCpuNodeNames ?? [];
 
   const matrix: readonly Hypothesis[] = [
@@ -873,7 +1153,7 @@ export async function sweep(input: SweepOptions = {}): Promise<readonly OptionOu
     const segment = syntheticSegment(settled.seed, gain, shape);
     const feeds = await feedsFor(settled.piece, segment);
     const outcome = await runPiece(
-      bytes,
+      models.reference,
       { name: 'wasm', backend: 'wasm', optimisation: settled.optimisation },
       feeds.tensors,
       null,
@@ -891,12 +1171,12 @@ export async function sweep(input: SweepOptions = {}): Promise<readonly OptionOu
     try {
       const { feeds, reference, emptyBins } = await referenceFor(gain, shape);
       const candidate = await runPiece(
-        bytes,
+        models.candidate,
         { ...hypothesis, optimisation: hypothesis.optimisation ?? settled.optimisation },
         feeds.tensors,
         null,
       );
-      const outputs = pairUp(reference, candidate.captured, settled.tolerance);
+      const outputs = pairUp(reference, candidate.captured, settled.tolerance, models.renames);
       outcomes.push({
         name: hypothesis.name,
         ok: true,
@@ -932,7 +1212,11 @@ export interface Report {
   readonly settings: Settled;
   readonly environment: Record<string, unknown>;
   readonly graph: Omit<GraphReport, 'rows'>;
+  /** Every normalisation island, on both backends, before anything is inferred. */
+  readonly island: IslandReport;
   readonly compare: CompareReport;
+  /** With `patch`, the same comparison without the rewrite, for the before. */
+  readonly baseline: CompareReport | null;
   readonly bisect: BisectReport;
   readonly options: readonly OptionOutcome[];
   /** Op types around the break, for the next person to look at. */
@@ -956,7 +1240,13 @@ export async function report(input: BisectOptions = {}): Promise<Report> {
     opTypes: full.opTypes,
     initializerTypes: full.initializerTypes,
     initializerBytes: full.initializerBytes,
+    constants: full.constants,
   };
+  phase('island', { piece: settled.piece, patched: settled.patch });
+  const islands = await island(input);
+  // With the rewrite on, the unpatched comparison is run too: one file then
+  // holds both the before and the after for the same input and machine.
+  const baseline = settled.patch ? await compare({ ...input, patch: false }) : null;
   const first = await compare(input);
   const found = first.reproduced
     ? await bisect(input, first)
@@ -972,7 +1262,9 @@ export async function report(input: BisectOptions = {}): Promise<Report> {
     settings: settled,
     environment: where,
     graph,
+    island: islands,
     compare: first,
+    baseline,
     bisect: found,
     options: matrix,
     suspects: [...new Set(found.window.map((row) => row.opType))],

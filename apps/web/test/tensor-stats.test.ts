@@ -205,4 +205,34 @@ describe('verdictFor', () => {
       'diverged',
     );
   });
+
+  it('is diverged for a scalar that came back as the wrong number', () => {
+    // A mean or a standard deviation is a tensor of one, so there is no
+    // sampling floor for it to hide under.
+    const reference = Float32Array.from([0.263916]);
+    const candidate = Float32Array.from([0]);
+
+    expect(verdictFor(tensorStats(candidate), divergence(reference, candidate, 1e-2), 1e-2)).toBe(
+      'diverged',
+    );
+  });
+
+  it('is still clean for a scalar that only moved by rounding', () => {
+    const reference = Float32Array.from([0.263916]);
+    const candidate = Float32Array.from([0.263918]);
+
+    expect(verdictFor(tensorStats(candidate), divergence(reference, candidate, 1e-2), 1e-2)).toBe(
+      'clean',
+    );
+  });
+
+  it('needs more than one stray element in a tensor big enough to sample', () => {
+    const reference = new Float32Array(10_000).fill(1);
+    const candidate = new Float32Array(10_000).fill(1);
+    candidate[42] = 9;
+
+    expect(verdictFor(tensorStats(candidate), divergence(reference, candidate, 1e-2), 1e-2)).toBe(
+      'clean',
+    );
+  });
 });

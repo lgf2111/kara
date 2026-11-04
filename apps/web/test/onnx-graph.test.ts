@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  attributeText,
   concat,
+  encodeCast,
+  encodeNode,
   exposableOutput,
   exposeOutputs,
   opTypeHistogram,
   protoFields,
   readVarint,
+  rewriteGraph,
   summariseGraph,
+  usedNames,
   writeVarint,
   type GraphNode,
   type GraphSummary,
@@ -261,5 +266,226 @@ describe('opTypeHistogram', () => {
       Loop: 1,
       Add: 1,
     });
+  });
+});
+
+describe('node attributes', () => {
+  /** AttributeProto with ints packed into one field, as this exporter writes them. */
+  function packedInts(name: string, values: readonly number[]): Uint8Array {
+    return bytesField(
+      5,
+      concat([stringField(1, name), bytesField(8, concat(values.map((v) => writeVarint(v))))]),
+    );
+  }
+
+  /** The same list as one field per element, which protobuf also allows. */
+  function looseInts(name: string, values: readonly number[]): Uint8Array {
+    return bytesField(5, concat([stringField(1, name), ...values.map((v) => varintField(8, v))]));
+  }
+
+  function floatAttribute(name: string, value: number): Uint8Array {
+    const payload = new Uint8Array(4);
+    new DataView(payload.buffer).setFloat32(0, value, true);
+    return bytesField(
+      5,
+      concat([stringField(1, name), concat([writeVarint(2 * 8 + 5), payload])]),
+    );
+  }
+
+  function modelWith(attributes: readonly Uint8Array[]): Uint8Array {
+    const node = bytesField(
+      1,
+      concat([
+        stringField(1, 'in'),
+        stringField(2, 'out'),
+        stringField(3, '/node'),
+        stringField(4, 'ReduceMean'),
+        ...attributes,
+      ]),
+    );
+    return concat([varintField(1, 8), bytesField(7, node)]);
+  }
+
+  it('reads a packed ints attribute', () => {
+    const summary = summariseGraph(modelWith([packedInts('axes', [1, 2, 3])]));
+
+    expect(summary.nodes[0]?.attributes[0]?.name).toBe('axes');
+    expect(summary.nodes[0]?.attributes[0]?.ints).toEqual([1, 2, 3]);
+  });
+
+  it('reads an unpacked ints attribute the same way', () => {
+    const summary = summariseGraph(modelWith([looseInts('axes', [1, 2, 3])]));
+
+    expect(summary.nodes[0]?.attributes[0]?.ints).toEqual([1, 2, 3]);
+  });
+
+  it('reads an int and a float, which is where an epsilon lives', () => {
+    const summary = summariseGraph(
+      modelWith([varintAttribute('keepdims', 1), floatAttribute('epsilon', 1e-5)]),
+    );
+    const attributes = summary.nodes[0]?.attributes ?? [];
+
+    expect(attributes[0]?.int).toBe(1);
+    // Read as the float32 it is stored as, which is the number the model
+    // actually holds: 1e-5 is not representable and this is what it rounds to.
+    expect(attributes[1]?.float).toBe(0.000009999999747378752);
+    expect(attributes.map(attributeText)).toEqual([
+      'keepdims=1',
+      'epsilon=0.000009999999747378752',
+    ]);
+  });
+
+  it('keeps each attribute as the bytes it was read from', () => {
+    const encoded = packedInts('axes', [1, 2]);
+    const summary = summariseGraph(modelWith([encoded]));
+
+    expect([...(summary.nodes[0]?.attributes[0]?.raw ?? [])]).toEqual([...encoded]);
+  });
+
+  /** AttributeProto.i, which the fixture above writes for `to` as well. */
+  function varintAttribute(name: string, value: number): Uint8Array {
+    return bytesField(5, concat([stringField(1, name), varintField(3, value)]));
+  }
+});
+
+describe('initializers and declared types', () => {
+  function tensor(name: string, elemType: number, dims: readonly number[], raw: Uint8Array): Uint8Array {
+    return bytesField(
+      5,
+      concat([
+        ...dims.map((dim) => varintField(1, dim)),
+        varintField(2, elemType),
+        stringField(8, name),
+        bytesField(9, raw),
+      ]),
+    );
+  }
+
+  function typedValueInfo(field: number, name: string, elemType: number): Uint8Array {
+    return bytesField(
+      field,
+      concat([stringField(1, name), bytesField(2, bytesField(1, varintField(1, elemType)))]),
+    );
+  }
+
+  const halfOne = Uint8Array.of(0x00, 0x3c);
+  const model = concat([
+    varintField(1, 8),
+    bytesField(
+      7,
+      concat([
+        tensor('eps', 10, [], halfOne),
+        tensor('weight', 1, [4096], new Uint8Array(16_384)),
+        typedValueInfo(11, 'mag', 1),
+        typedValueInfo(12, 'y', 1),
+        typedValueInfo(13, 'mid', 10),
+      ]),
+    ),
+  ]);
+
+  it('decodes a scalar constant and leaves a weight as a byte count', () => {
+    const summary = summariseGraph(model);
+
+    expect(summary.initializers[0]).toEqual({
+      name: 'eps',
+      elemType: 10,
+      dims: [],
+      byteLength: 2,
+      values: [1],
+    });
+    expect(summary.initializers[1]?.values).toBeNull();
+    expect(summary.initializers[1]?.byteLength).toBe(16_384);
+  });
+
+  it('collects the elem_type of inputs, outputs and value_info alike', () => {
+    const summary = summariseGraph(model);
+
+    expect([...summary.declaredTypes.entries()].sort()).toEqual([
+      ['mag', 1],
+      ['mid', 10],
+      ['y', 1],
+    ]);
+    expect(summary.inputs).toEqual(['mag']);
+    expect(summary.outputs).toEqual(['y']);
+  });
+
+  it('lists every name the graph already uses', () => {
+    expect([...usedNames(summariseGraph(model))].sort()).toEqual([
+      'eps',
+      'mag',
+      'mid',
+      'weight',
+      'y',
+    ]);
+  });
+});
+
+describe('encodeCast and rewriteGraph', () => {
+  it('writes a Cast the reader reads back', () => {
+    const model = concat([varintField(1, 8), bytesField(7, encodeCast('/c', 'a', 'b', 1))]);
+    const node = summariseGraph(model).nodes[0];
+
+    expect(node?.opType).toBe('Cast');
+    expect(node?.name).toBe('/c');
+    expect(node?.inputs).toEqual(['a']);
+    expect(node?.outputs).toEqual(['b']);
+    expect(node?.castTo).toBe(1);
+  });
+
+  it('writes a node that carries somebody else attribute bytes', () => {
+    const original = summariseGraph(fakeModel(NODES)).nodes[0];
+    const rebuilt = concat([
+      varintField(1, 8),
+      bytesField(
+        7,
+        encodeNode({
+          name: '/copy',
+          opType: 'Cast',
+          inputs: ['x'],
+          outputs: ['y'],
+          attributes: (original?.attributes ?? []).map((attribute) => attribute.raw),
+        }),
+      ),
+    ]);
+
+    expect(summariseGraph(rebuilt).nodes[0]?.castTo).toBe(10);
+  });
+
+  it('copies every field it is not asked about', () => {
+    const model = fakeModel(NODES);
+    const same = rewriteGraph(model, () => undefined);
+
+    expect([...same]).toEqual([...model]);
+  });
+
+  it('replaces one node with several, in place', () => {
+    const model = fakeModel(NODES);
+    const edited = rewriteGraph(model, (field, ordinal) =>
+      field.field === 1 && ordinal === 2
+        ? concat([
+            encodeCast('/pre', 'conv0', 'conv0f', 1),
+            encodeNode({ name: '/norm', opType: 'InstanceNormalization', inputs: ['conv0f', 'w1'], outputs: ['norm0'] }),
+          ])
+        : undefined,
+    );
+    const summary = summariseGraph(edited);
+
+    expect(summary.nodes.map((node) => node.name)).toEqual([
+      '/Cast',
+      '/encoder.0/Conv',
+      '/pre',
+      '/norm',
+      '/loop',
+      '/add',
+    ]);
+    expect(topLevelString(edited, 2)).toBe('kara-test');
+  });
+
+  it('drops a field by returning null', () => {
+    const model = fakeModel(NODES);
+    const edited = rewriteGraph(model, (field) => (field.field === 5 ? null : undefined));
+
+    expect(summariseGraph(edited).initializerTypes).toEqual({});
+    expect(summariseGraph(edited).nodes).toHaveLength(NODES.length);
   });
 });

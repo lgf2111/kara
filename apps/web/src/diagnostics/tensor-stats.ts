@@ -269,6 +269,13 @@ export type Verdict = 'clean' | 'diverged' | 'non-finite' | 'failed';
 /**
  * One word for a tensor pair. Non-finite beats divergence: a NaN is the thing
  * being hunted, and a NaN also makes the divergence figure meaningless.
+ *
+ * A stray element in a large tensor is noise, so divergence needs
+ * `beyondFraction` of the elements, and at least two of them. It cannot be
+ * noise when it is every element there is, though, and that exception is what
+ * makes the verdict usable on the scalars of a normalisation: a mean or a
+ * standard deviation is a tensor of one, and without it a statistic that came
+ * back as the wrong number entirely still read `clean`.
  */
 export function verdictFor(
   candidate: TensorStats,
@@ -279,7 +286,9 @@ export function verdictFor(
   if (candidate.nonFinite > 0) {
     return 'non-finite';
   }
-  if (drift.maxRel > tolerance && drift.beyond > Math.max(1, drift.compared * beyondFraction)) {
+  const needed = Math.max(2, Math.ceil(drift.compared * beyondFraction));
+  const everything = drift.compared > 0 && drift.beyond === drift.compared;
+  if (drift.maxRel > tolerance && (drift.beyond >= needed || everything)) {
     return 'diverged';
   }
   return 'clean';

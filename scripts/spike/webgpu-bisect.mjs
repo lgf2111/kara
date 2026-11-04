@@ -5,6 +5,8 @@
 //   node scripts/spike/webgpu-bisect.mjs                     # the whole report
 //   node scripts/spike/webgpu-bisect.mjs --only compare      # just both sides
 //   node scripts/spike/webgpu-bisect.mjs --only nodes        # the node table
+//   node scripts/spike/webgpu-bisect.mjs --only island       # the normalisation
+//   node scripts/spike/webgpu-bisect.mjs --patch             # fp32 island on
 //   node scripts/spike/webgpu-bisect.mjs --piece htdemucs_p04.onnx
 //   node scripts/spike/webgpu-bisect.mjs --gain 0.01         # a quiet input
 //   node scripts/spike/webgpu-bisect.mjs --shape silent      # every bin empty
@@ -17,7 +19,8 @@
 // is gitignored, and prints a summary of it.
 //
 // Flags: --piece FILE, --seed N, --gain F, --shape mixed|tonal|silent,
-// --tolerance F, --opt LEVEL, --only env|nodes|compare|bisect|options|report,
+// --tolerance F, --opt LEVEL, --patch,
+// --only env|nodes|compare|island|bisect|options|report,
 // --port N, --headed true, --stall SECONDS, --label NAME.
 import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -182,6 +185,82 @@ function printAxes(tensor) {
 }
 
 /**
+ * One comparison block: the input, the timings, then every declared output.
+ *
+ * The two headline numbers come first, because the question a patched run asks
+ * is about all the outputs and not about the node that used to break.
+ *
+ * @param {any} comparison
+ */
+function printCompare(comparison) {
+  console.log(`input            ${JSON.stringify(comparison.input)}`);
+  if ((comparison.prefix ?? []).length > 0) {
+    console.log(`prefix on wasm   ${JSON.stringify(comparison.prefix)}`);
+  }
+  console.log(
+    `run              wasm ${String(comparison.wasmMs)} ms, webgpu ${String(comparison.webgpuMs)} ms`,
+  );
+  if (comparison.patched !== undefined) {
+    console.log(`fp32 island      ${comparison.patched === true ? 'on for webgpu' : 'off'}`);
+  }
+  const outputs = comparison.outputs ?? [];
+  const bad = comparison.nonFiniteOutputs ?? [];
+  console.log(
+    `worst rel err    ${short(comparison.worstRelative)} over ${String(outputs.length)} outputs` +
+      `${comparison.worstRelativeAt === null || comparison.worstRelativeAt === undefined ? '' : ` at ${String(comparison.worstRelativeAt)}`}`,
+  );
+  console.log(
+    `non-finite       ${bad.length === 0 ? 'none of the outputs' : `${String(bad.length)}: ${bad.join(', ')}`}`,
+  );
+  console.log(`reproduced       ${String(comparison.reproduced)}`);
+  for (const tensor of outputs) {
+    console.log(tensorLine(tensor));
+    printAxes(tensor);
+  }
+}
+
+/**
+ * The normalisation islands: what they are, then every tensor on both sides.
+ *
+ * @param {any} report
+ */
+function printIslands(report) {
+  if (report === null || report === undefined || (report.islands ?? []).length === 0) {
+    return;
+  }
+  console.log(
+    `\nnormalisation    ${String((report.islands ?? []).length)} island(s)` +
+      `${report.patched === true ? ', fp32 rewrite on for webgpu' : ''}`,
+  );
+  for (const found of report.islands) {
+    console.log(
+      `  island on ${cell(found.input, 24)} ${cell(found.inputType, 9)} ` +
+        `axes [${(found.axes ?? []).join(',')}] keepdims ${String(found.keepDims)} ` +
+        `reduces ${cell(found.reduced, 10)}` +
+        `${found.reason === null || found.reason === undefined ? '' : ` SKIPPED: ${String(found.reason)}`}`,
+    );
+    for (const step of found.steps ?? []) {
+      console.log(
+        `    ${cell(step.role, 9)} ${String(step.nodeIndex).padStart(4)}  ` +
+          `${cell(step.opType, 12)} ${cell(step.nodeName, 24)} ${cell(step.output, 32)}`,
+      );
+    }
+    if ((found.internal ?? []).length > 0) {
+      console.log(`    rebuilt in fp32, not cast back: ${(found.internal ?? []).join(', ')}`);
+    }
+    if ((found.boundary ?? []).length > 0) {
+      console.log(`    cast back for the rest of the graph: ${(found.boundary ?? []).join(', ')}`);
+    }
+  }
+  if ((report.tensors ?? []).length > 0) {
+    console.log('  every island tensor, wasm against webgpu');
+    for (const tensor of report.tensors) {
+      console.log(tensorLine(tensor));
+    }
+  }
+}
+
+/**
  * @param {any} value
  */
 function printSummary(value) {
@@ -210,25 +289,31 @@ function printSummary(value) {
     for (const row of value.rows) {
       console.log(
         `  ${String(row.index).padStart(4)}  ${cell(row.opType, 22)} ${cell(row.name, 56)} ` +
-          `${cell(row.output, 48)} ${row.castTo === null ? '' : `cast to ${String(row.castTo)}`}`,
+          `${cell(row.output, 48)} ${row.castTo === null ? '' : `cast to ${String(row.castTo)} `}` +
+          `${row.attributes === '' ? '' : String(row.attributes)}`,
       );
     }
   }
+  for (const constant of value.constants ?? value.graph?.constants ?? []) {
+    console.log(
+      `  const ${cell(constant.name, 56)} ${cell(constant.type, 8)} ` +
+        `[${(constant.dims ?? []).join(',')}] = [${(constant.values ?? []).map(short).join(', ')}]`,
+    );
+  }
 
+  printIslands(value.island ?? (value.islands !== undefined ? value : null));
+
+  const baseline = value.baseline ?? null;
+  if (baseline !== null) {
+    console.log('\nbefore the patch');
+    printCompare(baseline);
+  }
   const comparison = value.compare ?? (value.outputs !== undefined ? value : null);
   if (comparison !== null) {
-    console.log(`input            ${JSON.stringify(comparison.input)}`);
-    if ((comparison.prefix ?? []).length > 0) {
-      console.log(`prefix on wasm   ${JSON.stringify(comparison.prefix)}`);
+    if (baseline !== null) {
+      console.log('\nafter the patch');
     }
-    console.log(
-      `run              wasm ${String(comparison.wasmMs)} ms, webgpu ${String(comparison.webgpuMs)} ms`,
-    );
-    console.log(`reproduced       ${String(comparison.reproduced)}`);
-    for (const tensor of comparison.outputs ?? []) {
-      console.log(tensorLine(tensor));
-      printAxes(tensor);
-    }
+    printCompare(comparison);
   }
 
   const found = value.bisect ?? (value.probes !== undefined ? value : null);
@@ -299,14 +384,17 @@ async function main() {
 
   const only = flag('only', 'report');
   const method = only === 'env' ? 'environment' : only === 'options' ? 'sweep' : only;
-  if (!['environment', 'nodes', 'compare', 'bisect', 'sweep', 'report'].includes(method)) {
-    throw new Error(`--only takes env, nodes, compare, bisect, options or report, got ${only}`);
+  if (!['environment', 'nodes', 'compare', 'island', 'bisect', 'sweep', 'report'].includes(method)) {
+    throw new Error(
+      `--only takes env, nodes, compare, island, bisect, options or report, got ${only}`,
+    );
   }
   const headless = flag('headed', 'false') !== 'true';
   const port = flag('port', DEFAULT_PORT);
   const baseUrl = `http://localhost:${port}`;
   const stallSeconds = Number(flag('stall', '240'));
-  const label = flag('label', only);
+  const patch = flag('patch', 'false') === 'true';
+  const label = flag('label', patch ? `${only}-patched` : only);
   const shape = flag('shape', 'mixed');
   if (!['mixed', 'tonal', 'silent'].includes(shape)) {
     throw new Error(`--shape takes mixed, tonal or silent, got ${shape}`);
@@ -318,6 +406,7 @@ async function main() {
     shape,
     tolerance: Number(flag('tolerance', '0.01')),
     optimisation: flag('opt', 'disabled'),
+    patch,
   };
 
   const server = await startDevServer(baseUrl, port);
@@ -368,6 +457,9 @@ async function main() {
       `input            seed ${String(options.seed)}, gain ${String(options.gain)}, ${options.shape}`,
     );
     console.log(`optimisation     ${options.optimisation}`);
+    console.log(
+      `fp32 island      ${patch ? 'on: webgpu runs the rewrite, wasm runs the piece as it ships' : 'off'}`,
+    );
 
     /** @type {ReturnType<typeof setInterval> | undefined} */
     let watchdog;
