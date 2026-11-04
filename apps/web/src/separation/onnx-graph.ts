@@ -3,6 +3,10 @@
  * graph's nodes in their stored order, and add intermediate tensors to the
  * graph's outputs so a backend can be asked what it computed partway through.
  *
+ * It lives next to the separation worker rather than in `diagnostics/` because
+ * the worker itself rewrites every htdemucs piece before handing it to WebGPU;
+ * see onnx-fp32-island.ts.
+ *
  * Only the top level is re-encoded. The graph's own bytes, every initializer
  * included, are copied through untouched, so editing a 21 MiB piece costs one
  * copy and no parsing of its weights.

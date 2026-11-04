@@ -16,7 +16,7 @@ import {
   writeVarint,
   type GraphNode,
   type GraphSummary,
-} from '../src/diagnostics/onnx-graph.ts';
+} from '../src/separation/onnx-graph.ts';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

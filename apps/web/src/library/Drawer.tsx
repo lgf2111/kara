@@ -56,6 +56,16 @@ export function Drawer({
           }}
         />
 
+        {library.notice !== null && (
+          <section>
+            <h2>Worth knowing</h2>
+            <p className="note">{library.notice}</p>
+            <button type="button" onClick={library.dismissNotice}>
+              dismiss
+            </button>
+          </section>
+        )}
+
         {library.error !== null && (
           <section>
             <h2>That did not work</h2>

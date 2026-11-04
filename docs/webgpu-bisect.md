@@ -1,8 +1,10 @@
 # WebGPU bisect: why htdemucs returns NaN
 
 WebGPU runs this model about 3.4x realtime on an M1 against about 1.2x on WASM, so separation wants
-it. It cannot have it yet: the WebGPU provider returns non-finite values and the worker refuses to
-write those stems. What is known from `fixtures/generated/pipeline-results/htdemucs-webgpu-run.json`:
+it. For a long time it could not have it: the WebGPU provider returned non-finite values and the
+worker refused to write those stems. This file is how that was tracked down, and the fix it names is
+now what ships — see "What the product does with this" at the end. What was known at the start, from
+`fixtures/generated/pipeline-results/htdemucs-webgpu-run.json`:
 
 - the first piece to go bad is `htdemucs_p00.onnx`, at `/encoder.0/dconv/Add_output_0`
 - **129024 of 8257536 values**, one part in 64. Not everything, which rules out a graph that was
@@ -52,7 +54,7 @@ fail. Both are fixed — `verdictFor` now fails a tensor whose every element dri
 
 ## The float32 island patch
 
-`apps/web/src/diagnostics/onnx-fp32-island.ts` rewrites each island to compute in float32:
+`apps/web/src/separation/onnx-fp32-island.ts` rewrites each island to compute in float32:
 
 - one `Cast(to=float32)` on the island input, shared between islands that normalise the same tensor
 - `ReduceMean`, `Sub`, `Pow`, `ReduceMean`, `Clip`, `Sqrt`, `Add` and `Div` rebuilt on float32
@@ -129,7 +131,7 @@ non-finite count, its range over the finite values, and its worst relative diffe
 have, and `--shape` and `--gain` are the next things to vary.
 
 **2. Which node breaks first?** Intermediate tensors are added to `GraphProto.output` by a protobuf
-edit in the page (`apps/web/src/diagnostics/onnx-graph.ts`), which is enough to ask
+edit in the page (`apps/web/src/separation/onnx-graph.ts`), which is enough to ask
 `session.run` for them. The stored node order is then binary-searched for the first output that is
 non-finite on WebGPU or has drifted past the tolerance. The report names the node, its op type and
 the six around it, then re-runs that one node with its own inputs exposed as well.
@@ -239,8 +241,12 @@ Conv1d, GroupNorm, GLU, LayerScale, applied to the frequency-encoder output resh
 
 | Path | What it holds |
 | --- | --- |
-| `apps/web/src/diagnostics/onnx-graph.ts` | Minimal ONNX protobuf: list nodes with their attributes, read small initializers, collect declared types, add graph outputs, rebuild a graph field by field. No dependency. |
-| `apps/web/src/diagnostics/onnx-fp32-island.ts` | Finds the normalisation islands and rewrites them in float32. Pure, on the model bytes. |
+| `apps/web/src/separation/onnx-graph.ts` | Minimal ONNX protobuf: list nodes with their attributes, read small initializers, collect declared types, add graph outputs, rebuild a graph field by field. No dependency. |
+| `apps/web/src/separation/onnx-fp32-island.ts` | Finds the normalisation islands and rewrites them in float32. Pure, on the model bytes. The worker applies it; this harness measures it. |
+| `apps/web/src/separation/backend-policy.ts` | Which backend a job starts on. Pure, and unit tested without a GPU. |
+| `apps/web/src/separation/backend-choice.ts` | The adapter probe, and the policy applied to it. |
+| `apps/web/src/separation/backend-guard.ts` | Whether to believe the first segment a backend returned. |
+| `apps/web/src/separation/webgpu-memo.ts` | The session-long note that WebGPU failed here. |
 | `apps/web/src/diagnostics/tensor-stats.ts` | Finiteness, ranges, where the bad elements sit, divergence. |
 | `apps/web/src/diagnostics/synthetic-segment.ts` | The deterministic input. |
 | `apps/web/src/diagnostics/webgpu-bisect.ts` | Sessions, probes, the island step, the search, the option matrix. |
@@ -248,7 +254,23 @@ Conv1d, GroupNorm, GLU, LayerScale, applied to the frequency-encoder output resh
 | `scripts/spike/webgpu-bisect.mjs` | The Playwright driver. |
 | `apps/web/test/onnx-fp32-island.test.ts` | The rewrite on a synthetic eight-node graph. |
 
-The production worker is untouched and still refuses WebGPU. Lifting that is a separate change: it
-needs a patched run that is clean on every output of every piece, and then a decision about where
-the rewrite belongs, because loading a rewritten model in the worker is not the same risk as
-loading one in a diagnostic page.
+## What the product does with this
+
+`--only compare --patch` came back clean on `htdemucs_p00.onnx`: no non-finite output anywhere and a
+worst relative difference against WASM of 0.0011 at `/Div_1`, which is fp16 rounding. So the
+refusal is gone and WebGPU is the default, with three things holding it up:
+
+- **The same rewrite.** `separate.worker.ts` calls `patchNormalisationIslands` on every piece before
+  it creates a WebGPU session, which is why the patch moved from `diagnostics/` to `separation/`.
+  WASM still loads the pieces by URL, unpatched, so the reference is still the reference.
+- **A policy, not a guess.** `backend-policy.ts` takes WebGPU only when the probe in
+  `backend-choice.ts` finds an adapter with `shader-f16`, and `?backend=wasm` or `?backend=webgpu`
+  overrules it for a measurement. The driver's `--backend` passes straight through.
+- **A guard that runs before anything is written.** `backend-guard.ts` reads the first segment's
+  non-finite count and its stem-sum error. If either says the backend computed something else
+  entirely, the WebGPU attempt is dropped, the same job restarts on WASM from the same place, the
+  person is told once in plain words, and `webgpu-memo.ts` keeps the rest of the session on WASM. A
+  failure on WASM has nowhere to go, so there the job stops and names what it measured.
+
+The guard is deliberately not a substitute for this harness. It says "do not trust this backend on
+this machine"; the harness is what says why.

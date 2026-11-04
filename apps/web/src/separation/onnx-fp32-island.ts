@@ -30,6 +30,10 @@
  * Attributes are copied as bytes, so `axes` keeps whatever encoding the
  * exporter chose and an opset that passes axes as an input is carried through
  * untouched: only the inputs a float32 rebuild must convert are rewritten.
+ *
+ * This is what lets separation run on WebGPU: separate.worker.ts applies it to
+ * every piece before creating a WebGPU session. The diagnostics page imports
+ * the same function, so the measured patch and the shipped patch are one.
  */
 
 import {

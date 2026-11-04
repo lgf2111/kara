@@ -4,14 +4,14 @@ import {
   findNormalisationIslands,
   patchNormalisationIslands,
   type Island,
-} from '../src/diagnostics/onnx-fp32-island.ts';
+} from '../src/separation/onnx-fp32-island.ts';
 import {
   concat,
   summariseGraph,
   writeVarint,
   type GraphNode,
   type GraphSummary,
-} from '../src/diagnostics/onnx-graph.ts';
+} from '../src/separation/onnx-graph.ts';
 
 /**
  * A tiny model built from the same protobuf primitives the reader uses, so the

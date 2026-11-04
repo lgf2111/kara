@@ -5,7 +5,7 @@ import {
   type IslandPatch,
   type PatchedIsland,
   type SkippedIsland,
-} from './onnx-fp32-island.ts';
+} from '../separation/onnx-fp32-island.ts';
 import {
   ELEM_TYPES,
   attributeText,
@@ -14,7 +14,7 @@ import {
   opTypeHistogram,
   summariseGraph,
   type GraphSummary,
-} from './onnx-graph.ts';
+} from '../separation/onnx-graph.ts';
 import { syntheticSegment, type SegmentShape, type SyntheticSegment } from './synthetic-segment.ts';
 import {
   FP16_MAX,
@@ -37,15 +37,17 @@ import {
  * 1. Does a fixed synthetic segment reproduce it? The same bytes go to both
  *    backends and every output is reported for finiteness and range.
  * 2. Which node breaks first? Intermediate tensors are added to the graph's
- *    outputs by a protobuf edit (onnx-graph.ts) and the stored node order is
- *    binary-searched for the first output that is non-finite on WebGPU, or has
- *    drifted from WASM past the tolerance.
+ *    outputs by a protobuf edit (separation/onnx-graph.ts) and the stored node
+ *    order is binary-searched for the first output that is non-finite on
+ *    WebGPU, or has drifted from WASM past the tolerance.
  * 3. Which session option changes the answer? Optimisation level, output
  *    location, layout, buffer cache, a device with no `shader-f16`, the
  *    suspect node forced to CPU, and the input level.
  *
- * Nothing here runs in the product. The production worker still refuses
- * WebGPU; this is the evidence for whether that refusal can be lifted.
+ * None of this harness runs in the product, but its answer does: the float32
+ * island rewrite it measures is the same `patchNormalisationIslands` the
+ * separation worker applies before every WebGPU session, so a run here speaks
+ * for what ships.
  */
 
 const WEIGHTS = '/weights/htdemucs-web';
