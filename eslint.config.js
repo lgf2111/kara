@@ -23,6 +23,24 @@ export default tseslint.config(
     },
   },
   {
+    // The extension runs in four scopes: a page, a service worker, a dedicated
+    // worker and two audio worklets. The worklet globals are declared for
+    // TypeScript in src/worklets/audio-worklet.d.ts.
+    files: ['apps/extension/**/*.ts'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.worker,
+        chrome: 'readonly',
+        AudioWorkletProcessor: 'readonly',
+        registerProcessor: 'readonly',
+        currentFrame: 'readonly',
+        currentTime: 'readonly',
+        sampleRate: 'readonly',
+      },
+    },
+  },
+  {
     files: ['scripts/**/*.mjs', '**/*.config.{js,ts}', '**/*.test.{ts,tsx,mjs}'],
     languageOptions: {
       globals: globals.nodeBuiltin,
