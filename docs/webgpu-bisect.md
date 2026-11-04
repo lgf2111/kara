@@ -260,9 +260,10 @@ Conv1d, GroupNorm, GLU, LayerScale, applied to the frequency-encoder output resh
 worst relative difference against WASM of 0.0011 at `/Div_1`, which is fp16 rounding. So the
 refusal is gone and WebGPU is the default, with three things holding it up:
 
-- **The same rewrite.** `separate.worker.ts` calls `patchNormalisationIslands` on every piece before
+- **The same rewrite.** `segment-runner.ts` calls `patchNormalisationIslands` on every piece before
   it creates a WebGPU session, which is why the patch moved from `diagnostics/` to `separation/`.
-  WASM still loads the pieces by URL, unpatched, so the reference is still the reference.
+  Both `separate.worker.ts` and the live path in `streaming.ts` get their sessions from there. WASM
+  still loads the pieces by URL, unpatched, so the reference is still the reference.
 - **A policy, not a guess.** `backend-policy.ts` takes WebGPU only when the probe in
   `backend-choice.ts` finds an adapter with `shader-f16`, and `?backend=wasm` or `?backend=webgpu`
   overrules it for a measurement. The driver's `--backend` passes straight through.
