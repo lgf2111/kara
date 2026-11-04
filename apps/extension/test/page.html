@@ -39,7 +39,9 @@
       this machine. The fixture's audio plays undelayed, so the separated output arrives on top
       of it about eighteen seconds later — and the picture on screen is the overlay's, delayed
       to match, with the real video underneath it at opacity zero. Every fixture frame has its
-      own timestamp burnt into it, so the delay can be read off the screen.
+      own timestamp burnt into it, so the delay can be read off the screen. While it gets
+      ready the overlay holds one still frame with a progress bar on it, which is the same
+      bar the panel and the popup draw, from the same report.
     </p>
     <div id="stage">
       <video id="video" controls playsinline></video>
@@ -48,9 +50,16 @@
       <button id="start" type="button">Start</button>
       <button id="mode" type="button">Switch mode</button>
       <button id="picture" type="button">Picture on/off</button>
+      <button id="hold" type="button">Pause/play</button>
       <button id="seek" type="button">Seek +30s</button>
       <button id="reset" type="button">Reset</button>
       <button id="stop" type="button">Stop</button>
+    </p>
+    <p>
+      Pause and play go through the same table the content script reads, so they hold and
+      resume rather than priming again: the delay stays put and
+      <code>__karaDebug.primes()</code> does not move. A seek does move it. Add
+      <code>?onReady=continue</code> to watch the original play undelayed and then cross over.
     </p>
     <p id="status">idle</p>
     <pre id="metrics"></pre>

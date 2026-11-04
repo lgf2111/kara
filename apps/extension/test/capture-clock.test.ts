@@ -110,3 +110,47 @@ describe('chooseDelaySeconds', () => {
     expect(chooseDelaySeconds(-100)).toBe(1.5);
   });
 });
+
+describe('rejoin', () => {
+  /**
+   * What a pause is. The capture is fed by the page, so a paused page feeds it
+   * nothing: the samples either side are the same song with nothing missing
+   * between them, and the stretch of context time that went by with no samples
+   * in it is not the audio thread skipping.
+   */
+  it('keeps the samples counted and meets the next chunk where it lands', () => {
+    const clock = createCaptureClock(RATE);
+    clock.stamp(1, CHUNK);
+    clock.stamp(1.1, CHUNK);
+
+    clock.rejoin();
+    // Ten seconds of pause, and the next chunk is sample 200 all the same.
+    expect(clock.stamp(11.2, CHUNK)).toBe(200);
+    expect(clock.samples).toBe(300);
+    expect(clock.driftSeconds).toBe(0);
+    expect(clock.captureTimeOf(200)).toBeCloseTo(11.2, 9);
+    // Everything after it is one period on from there, as it always was.
+    expect(clock.captureTimeOf(300)).toBeCloseTo(11.3, 9);
+  });
+
+  it('carries on measuring drift once it has rejoined', () => {
+    const clock = createCaptureClock(RATE);
+    clock.stamp(0, CHUNK);
+    clock.rejoin();
+    clock.stamp(5, CHUNK);
+    // One chunk of audio, two chunks of time: the thread really did skip.
+    clock.stamp(5.2, CHUNK);
+
+    expect(clock.driftSeconds).toBeCloseTo(0.1, 9);
+  });
+
+  it('is forgotten by a reset, which starts the timeline over', () => {
+    const clock = createCaptureClock(RATE);
+    clock.stamp(0, CHUNK);
+    clock.rejoin();
+    clock.reset();
+
+    expect(clock.stamp(9, CHUNK)).toBe(0);
+    expect(clock.captureTimeOf(0)).toBeCloseTo(9, 9);
+  });
+});

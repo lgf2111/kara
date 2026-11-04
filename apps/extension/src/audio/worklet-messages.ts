@@ -8,6 +8,8 @@
  * rely on.
  */
 
+import type { FadeShape } from './mix-gain.ts';
+
 export const CAPTURE_PROCESSOR = 'kara-capture';
 export const PLAYBACK_PROCESSOR = 'kara-playback';
 
@@ -54,7 +56,32 @@ export type PlaybackCommand =
       readonly startFrame: number;
       readonly channels: readonly Float32Array[];
     }
+  /** The vocal's gain: the mode switch and the guide level. */
   | { readonly type: 'gain'; readonly target: number; readonly seconds: number }
+  /**
+   * The gain everything leaves through: the mute of a pause, the fade in on
+   * going live, and the arriving half of a crossfade. `at` is a context time
+   * the ramp is armed for, which is how a fade is lined up with the epoch.
+   */
+  | {
+      readonly type: 'master';
+      readonly target: number;
+      readonly seconds: number;
+      readonly shape: FadeShape;
+      readonly at?: number;
+    }
+  /**
+   * The page paused. Output fades out and then stops moving: nothing is read,
+   * so no frame is counted late, missing or early for the time nobody was
+   * listening.
+   */
+  | { readonly type: 'hold'; readonly seconds: number }
+  /**
+   * The page played. The epoch moves forward by however long the hold lasted,
+   * which is what makes the resume carry on from the same sample rather than
+   * from wherever the clock has got to.
+   */
+  | { readonly type: 'resume'; readonly seconds: number }
   | { readonly type: 'flush' };
 
 export interface PlaybackReport {
@@ -65,6 +92,13 @@ export interface PlaybackReport {
   readonly aheadFrames: number;
   readonly gapFrames: number;
   readonly queuedFrames: number;
+  /**
+   * Seconds the output has spent frozen since the last flush, summed. The
+   * player measures it because the player is the one holding the clock the
+   * epoch is on, and the picture has to be shifted by exactly the same amount
+   * or the words stop matching the mouth.
+   */
+  readonly heldSeconds: number;
 }
 
 export type PlaybackEvent = PlaybackReport;

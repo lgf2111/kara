@@ -1,7 +1,15 @@
 import { startPipeline, type Pipeline } from './offscreen/pipeline.ts';
-import { isCommand, packet, packetFor, type Command, type Report } from './protocol.ts';
+import {
+  IDLE_REPORT,
+  isCommand,
+  packet,
+  packetFor,
+  type Command,
+  type Report,
+} from './protocol.ts';
 import { reasonText } from './reason.ts';
 import { RUNTIME_PATH, WEIGHTS_PATH } from './separation/model.ts';
+import { readSettings, watchSettings } from './settings-store.ts';
 
 /**
  * The offscreen document: where the audio lives.
@@ -9,8 +17,15 @@ import { RUNTIME_PATH, WEIGHTS_PATH } from './separation/model.ts';
  * It exists because of what a Manifest V3 service worker cannot do. It has no
  * `getUserMedia`, no `AudioContext` and no guarantee of being alive in a
  * second's time, and this extension needs all three for about as long as a
- * song lasts. So the service worker owns the user's click and the tab, and
- * hands a capture over to this page, which owns the audio and nothing else.
+ * song lasts. So the service worker owns the tab and the popup owns the user's
+ * click, and a capture is handed over to this page, which owns the audio and
+ * nothing else.
+ *
+ * It is also where the one setting is read, because the setting is about what
+ * the audio does at the moment it is ready and this is the half that knows
+ * when that is. A change made in the popup while a capture is running arrives
+ * through `chrome.storage.onChanged`, so there is no command for it: the page
+ * and the panel are told what it is through the status report instead.
  *
  * Everything it loads — the graph's pieces, the ONNX runtime's wasm, both
  * worklets, the separation worker — comes from `chrome.runtime.getURL`, which
@@ -30,15 +45,7 @@ function tell(report: Report): void {
 }
 
 function tellFailure(cause: unknown): void {
-  tell({
-    type: 'status',
-    status: 'error',
-    reason: reasonText(cause),
-    secondsLeft: null,
-    delaySeconds: null,
-    mode: 'instrumental',
-    guide: 0,
-  });
+  tell({ ...IDLE_REPORT, status: 'error', reason: reasonText(cause) });
 }
 
 /**
@@ -46,8 +53,8 @@ function tellFailure(cause: unknown): void {
  *
  * `chromeMediaSource: 'tab'` is not in the standard constraints, hence the
  * cast. It is also the only audio source in this extension: nothing here
- * fetches a stream, a file or a URL, and the id is one the service worker was
- * handed for a tab the person clicked on.
+ * fetches a stream, a file or a URL, and the id is one the popup was handed
+ * for the tab the person clicked in.
  */
 async function tabAudio(streamId: string): Promise<MediaStream> {
   return navigator.mediaDevices.getUserMedia({
@@ -59,6 +66,7 @@ async function tabAudio(streamId: string): Promise<MediaStream> {
 async function start(command: Extract<Command, { type: 'start' }>): Promise<void> {
   await stop();
   tabId = command.tabId;
+  const settings = await readSettings();
   const stream = await tabAudio(command.streamId);
   pipeline = await startPipeline({
     stream,
@@ -66,6 +74,7 @@ async function start(command: Extract<Command, { type: 'start' }>): Promise<void
     runtimePath: chrome.runtime.getURL(RUNTIME_PATH),
     captureWorkletUrl: chrome.runtime.getURL('capture-worklet.js'),
     playbackWorkletUrl: chrome.runtime.getURL('playback-worklet.js'),
+    onReady: settings.onReady,
     onStatus: (report) => {
       tell(report);
     },
@@ -92,7 +101,13 @@ function accept(command: Command): void {
       turn = turn.then(stop).catch(tellFailure);
       return;
     case 'reset':
-      pipeline?.reset();
+      pipeline?.reset(command.reason);
+      return;
+    case 'hold':
+      pipeline?.hold();
+      return;
+    case 'resume':
+      pipeline?.resume();
       return;
     case 'mode':
       pipeline?.setMode(command.mode);
@@ -102,6 +117,9 @@ function accept(command: Command): void {
       return;
     case 'passthrough':
       pipeline?.setPassthrough(command.enabled);
+      return;
+    case 'on-ready':
+      pipeline?.setOnReady(command.onReady);
       return;
   }
 }
@@ -118,4 +136,8 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
   }
   accept(body);
   return false;
+});
+
+watchSettings((settings) => {
+  pipeline?.setOnReady(settings.onReady);
 });

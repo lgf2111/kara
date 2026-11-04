@@ -1,3 +1,4 @@
+import { progressPercent } from '../audio/progress.ts';
 import type { PlayMode } from '../protocol.ts';
 import { guideFromPercent, type PanelView } from './panel-view.ts';
 
@@ -45,6 +46,7 @@ const ICONS: Readonly<Record<string, readonly string[]>> = {
     'M12 18v3',
   ],
   clock: ['M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18', 'M12 7.5V12l3 2'],
+  pause: ['M9.5 5v14', 'M14.5 5v14'],
   warn: ['M12 4 2.5 20h19Z', 'M12 10v4', 'M12 17h.01'],
 };
 
@@ -52,6 +54,7 @@ const ICON_FOR: Readonly<Record<PanelView['state'], string>> = {
   off: 'mic',
   preparing: 'clock',
   live: 'mic',
+  paused: 'pause',
   unsupported: 'warn',
   error: 'warn',
 };
@@ -101,9 +104,30 @@ button:focus-visible {
   border-color: rgba(120, 220, 160, 0.5);
   background: rgba(120, 220, 160, 0.18);
 }
-.toggle[data-state='preparing'] {
+.toggle[data-state='preparing'],
+.toggle[data-state='paused'] {
   border-color: rgba(255, 214, 130, 0.5);
   background: rgba(255, 214, 130, 0.14);
+}
+/* A bar rather than a countdown: there are four waits in getting ready and
+   none of them is the length of the delay. audio/progress.ts says why. */
+.bar {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.18);
+  overflow: hidden;
+}
+.bar .fill {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: #ffd682;
+  transition: width 240ms linear;
+}
+.note {
+  max-width: 220px;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 11px;
 }
 .toggle[data-state='unsupported'],
 .toggle[data-state='error'] {
@@ -226,6 +250,21 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   label.textContent = 'Karaoke';
   toggle.append(glyph, label);
 
+  const note = document.createElement('div');
+  note.className = 'note';
+  note.hidden = true;
+
+  const bar = document.createElement('div');
+  bar.className = 'bar';
+  bar.hidden = true;
+  bar.setAttribute('role', 'progressbar');
+  bar.setAttribute('aria-label', 'Getting ready');
+  bar.setAttribute('aria-valuemin', '0');
+  bar.setAttribute('aria-valuemax', '100');
+  const fill = document.createElement('div');
+  fill.className = 'fill';
+  bar.append(fill);
+
   const detail = document.createElement('div');
   detail.className = 'detail';
   detail.hidden = true;
@@ -258,7 +297,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   guide.append(guideName, slider, guideValue);
 
   controls.append(segmented, guide);
-  panel.append(toggle, detail, controls);
+  panel.append(toggle, note, bar, detail, controls);
   root.append(style, panel);
 
   let autohidden = false;
@@ -329,6 +368,15 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
       );
       label.textContent = view.label;
       glyph.replaceChildren(icon(ICON_FOR[view.state]));
+      note.textContent = view.note;
+      note.hidden = view.note === null;
+      bar.hidden = view.progress === null;
+      if (view.progress !== null) {
+        const percent = progressPercent(view.progress);
+        fill.style.width = `${String(percent)}%`;
+        bar.setAttribute('aria-valuenow', String(percent));
+        bar.setAttribute('aria-valuetext', view.detail ?? `${String(percent)}%`);
+      }
       detail.textContent = view.detail;
       detail.hidden = view.detail === null;
       controls.hidden = !view.controls;

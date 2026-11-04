@@ -10,9 +10,9 @@ import { buildManifest } from './src/manifest.ts';
  * Four builds into one `dist/`, because the pieces of an extension are not all
  * the same kind of file.
  *
- * - `pages` is the ordinary one: the offscreen document, the service worker,
- *   the debug page and the separation worker, as ES modules with shared
- *   chunks, plus the manifest.
+ * - `pages` is the ordinary one: the offscreen document, the toolbar popup,
+ *   the service worker, the debug page and the separation worker, as ES
+ *   modules with shared chunks, plus the manifest.
  * - `capture-worklet` and `playback-worklet` are one file each, on purpose. A
  *   worklet is handed to `addModule` as a module script, and static imports
  *   inside one are not something to rely on, so each is built from a single
@@ -159,6 +159,7 @@ export default defineConfig(() => {
         rollupOptions: {
           input: {
             offscreen: here('offscreen.html'),
+            popup: here('popup.html'),
             background: here('src/background.ts'),
             page: here('test/page.html'),
           },

@@ -42,6 +42,20 @@ export interface CaptureClock {
   playTimeOf(sample: number, delaySeconds: number): number | null;
   /** Throws the timeline away and starts again at sample zero, for a seek. */
   reset(): void;
+  /**
+   * Keeps every sample counted so far and moves the line to meet the next
+   * chunk wherever it lands. This is what a pause is.
+   *
+   * A pause does not break the timeline: the samples either side of it are
+   * the same song with nothing missing between them, because the capture
+   * simply stopped being fed. What it does break is the assumption that the
+   * sample count and the context clock advance together, and a stretch of
+   * context time with no samples in it is not the audio thread skipping — the
+   * one thing {@link CaptureClock.driftSeconds} exists to catch. So the line
+   * is re-anchored on the first chunk after the pause, and the drift it would
+   * otherwise have read is not counted.
+   */
+  rejoin(): void;
 }
 
 export function createCaptureClock(sampleRate: number): CaptureClock {
@@ -52,6 +66,8 @@ export function createCaptureClock(sampleRate: number): CaptureClock {
   let samples = 0;
   let anchorTime: number | null = null;
   let driftSeconds = 0;
+  /** A pause is waiting to be stitched out of the line. */
+  let rejoining = false;
 
   return {
     sampleRate,
@@ -73,8 +89,9 @@ export function createCaptureClock(sampleRate: number): CaptureClock {
         throw new Error(`a chunk stamped ${String(contextTime)} has no time on it`);
       }
       const start = samples;
-      if (anchorTime === null) {
+      if (anchorTime === null || rejoining) {
         anchorTime = contextTime - start / sampleRate;
+        rejoining = false;
       } else {
         driftSeconds = contextTime - (anchorTime + start / sampleRate);
       }
@@ -94,6 +111,11 @@ export function createCaptureClock(sampleRate: number): CaptureClock {
       samples = 0;
       anchorTime = null;
       driftSeconds = 0;
+      rejoining = false;
+    },
+
+    rejoin() {
+      rejoining = true;
     },
   };
 }

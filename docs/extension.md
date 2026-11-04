@@ -7,17 +7,22 @@ the mouth is still saying them.
 
 ## What it does
 
-Press the toolbar button on a YouTube tab. The extension captures that tab's audio output with
-`chrome.tabCapture`, separates it into vocal and instrumental with the same htdemucs model the web
-app uses, and plays `instrumental + guide × vocals` back through its own output, delayed. Switching
-to the original is a thirty millisecond crossfade on one gain. Seeking, pausing or changing the
-playback rate throws the buffer away and primes again.
+Press the toolbar button on a YouTube tab and press Start in the popup. The extension captures
+that tab's audio output with `chrome.tabCapture`, separates it into vocal and instrumental with
+the same htdemucs model the web app uses, and plays `instrumental + guide × vocals` back through
+its own output, delayed. Switching to the original is a thirty millisecond crossfade on one gain.
+
+Seeking, changing the playback rate, reaching the end, crossing an ad boundary or loading another
+video throws the buffer away and primes again. **Pausing does not.** A pause holds: the capture
+stops being fed, the output and the picture freeze where they are, and a resume carries on from
+the same sample with the same delay.
 
 Tab capture mutes the tab for the person, so the extension's output is the only thing they hear.
-During the first sixteen seconds there is nothing to play, so there is silence — or the tab's own
-audio, undelayed, if the passthrough option is turned on. It is off by default, because sixteen
-seconds of undelayed audio followed by a jump into the delayed stream is worse than quiet. The
-one case where it is turned on by itself is an advertisement, which is below.
+During the first sixteen seconds there is nothing to play, and the `When ready` setting is what
+happens then: quiet, with a still frame and a progress bar, and the song starting from where the
+button was pressed; or the tab's own audio and the real video, undelayed, crossfading over to the
+delayed pair when they arrive. Quiet is the default. The one case where the tab's own audio is
+let through whatever the setting says is an advertisement, which is below.
 
 ## What the person sees
 
@@ -28,23 +33,112 @@ and takes none away: every key the page handled before, it still handles. Pointe
 on the panel itself are stopped there, so nudging the guide slider does not also pause the video
 or seek it.
 
-The panel is one button and, once there is audio, two controls.
+The panel is one button, a progress bar, and once there is audio, two controls.
 
-- **Karaoke** — off, `Preparing 12 s`, on, unavailable or failed. Pressed while off it asks the
+- **Karaoke** — off, preparing, on, paused, unavailable or failed. Pressed while off it asks the
   service worker to start, and the service worker will almost always answer that it cannot: a
   click inside a page is a gesture for the page, not for the extension, and Chrome grants
-  `chrome.tabCapture` off the back of a click on the extension's own toolbar button and nowhere
+  `chrome.tabCapture` off the back of a click in one of the extension's own contexts and nowhere
   else. So the panel says *click the Kara icon in the toolbar to start*. Pressed while running it
   stops, which needs no gesture and so always works. `unavailable` and `failed` carry the reason
   from the status report — a missing WebGPU adapter, usually.
+- **A bar, while it is getting ready**, with one line under it saying which of the four stages is
+  being waited for and — only once this machine has been timed doing them — about how long is
+  left. *Getting ready* below is what the stages are and why there is no longer a countdown.
+- **Paused**, saying *nothing lost; it carries on from here*, because the behaviour it replaced
+  was to throw everything away and that is what people will expect.
 - **Original | Instrumental**, which is the one gain in `mix-gain.ts` crossfading over thirty
   milliseconds.
 - **Guide**, 0 to 100, which is how much of the vocal is left in the instrumental to sing against.
 - And a line saying *picture is 18 s behind YouTube*, because without it the delay reads as a
-  broken page rather than as the thing that was asked for.
+  broken page rather than as the thing that was asked for. It counts the pauses in: a pause moves
+  the picture further behind the page by exactly as long as it lasted.
+- And a sentence when something made it start getting ready again — *You jumped; preparing
+  again* — because a bar that restarts on its own reads as a crash.
 
 The icons are inline SVG assembled with `createElementNS`: the repository holds no binaries, and
 building elements rather than assigning markup keeps the extension clear of the page's HTML sinks.
+
+## The popup
+
+The action has a popup, and it is not decoration. `chrome.tabCapture.getMediaStreamId` is granted
+off the back of a click in one of the extension's own contexts, and the moment an action has a
+popup, `chrome.action.onClicked` stops firing altogether — so the popup is the only place left
+where that click can land. It fetches the stream id itself and hands it to the service worker,
+which starts the offscreen pipeline exactly as before. There is no `onClicked` path any more
+because there cannot be one.
+
+It is plain DOM in one small file, with the decisions in `src/popup/popup-view.ts` where they are
+tested. It shows the state of the tab it was opened over — idle, getting ready with the same bar
+the panel draws, live, paused, or unsupported with the reason — a Start or Stop button, and the
+one setting.
+
+The state comes out of `chrome.storage.session`, where the service worker leaves the last status
+report as it routes it. A popup cannot have been listening when a report went past, because it
+did not exist; so it reads the last one and then follows `chrome.storage.onChanged`, which is a
+push. The bar moves four times a second with nobody polling anything.
+
+## When ready
+
+The one setting, in `chrome.storage.sync` under one key, with `src/settings.ts` holding the shape,
+the default and the parse, and `src/settings-store.ts` holding the three calls that touch Chrome.
+
+There is no way to make the first eighteen seconds free. Something has to give at the moment the
+delayed audio arrives, and which thing gives is a matter of taste:
+
+- **Restart from where I started, with a fade** — the default. Nothing is audible while it gets
+  ready, and the overlay holds the one frame that was on screen at the instant the audio capture
+  began, dimmed, with the bar on it. When the audio arrives the dim fades off over about seven
+  tenths of a second and the picture carries on from that same frame, so nothing jumps.
+- **Keep playing the original, then switch** — the tab's own audio plays undelayed through the
+  passthrough gain and the real video stays visible, with frames being collected invisibly behind
+  it. When the audio arrives the two cross over in about eight tenths of a second, and the
+  picture jumps back by the delay. The panel says *jumped back 18 s*, because a video that leaps
+  backwards looks like a fault.
+
+Restart is the default because the jump surprises people and the quiet does not.
+
+Both fades are gain curves in `audio/mix-gain.ts`, pure and tested, read on the `AudioContext`
+clock by the playback worklet and on the wall clock by the overlay. The crossfade is equal power
+— `sin` up against `cos` down — rather than two linear ramps, because two uncorrelated signals
+passing each other linearly are both at a half in the middle, which is three decibels down and
+audible as a hole. The fades in and out of silence are raised cosines, flat at both ends, because
+the corner a short linear ramp leaves is what a speaker ticks at.
+
+## Getting ready
+
+Four things happen between pressing Start and hearing anything, and on a first prime the first of
+them is the longest.
+
+| Stage | What it is waiting for | The bar |
+| --- | --- | --- |
+| Loading the model | twenty-one graph pieces fetched and compiled for the GPU | 0% to 45% |
+| Listening | the 7.8 s of audio one window needs | 45% to 70% |
+| Separating | the first window, and the hop that finalises it | 70% to 85% |
+| Filling the delay | the moment that first block is due | 85% to 100% |
+
+What this replaced was a countdown from the delay the separator asked for, and it was wrong in
+both directions: it froze at 15.5 s through ten seconds of model loading and then sat at nought
+for the twelve seconds that were actually left, while live began about twenty-eight seconds after
+the start. The mistake was assuming the only thing being waited for was the delay.
+
+So `src/audio/progress.ts` maps what has measurably happened onto a fraction instead. Three of
+the four stages know exactly what they are waiting for — pieces compiled, seconds of audio heard,
+seconds until the epoch — so their part of the bar is a ratio. Separating does not: what a window
+costs is a fact about this GPU that is not known until it has done one. That stage therefore
+approaches its top edge rather than reaching it, so a machine slower than the guess keeps seeing
+movement rather than a bar that has apparently stopped. The fraction is also kept at its
+high-water mark, because every input is a measurement and a bar that retreats reads as a fault.
+
+A prime that is not the first starts at the listening stage, and so at 45%: the model is loaded,
+and that is honestly less work left.
+
+**There is no estimate until there is one.** A seconds figure is offered only when every stage it
+covers has been timed on this machine, which on a first prime means not at all until the last
+stage, whose remaining time is exact. When there is one it says *about*, and it is allowed to go
+up. The pipeline reports `{stage, fraction, aboutSeconds, pieces}` in its status report, four
+times a second while priming, so the panel, the popup and the overlay all draw the same bar from
+the same number and none of them extrapolates anything.
 
 ## The picture
 
@@ -66,8 +160,8 @@ document; the frames are captured in a content script, which is a different real
 process. `performance.now()` is measured from each context's own creation, so the two sides read
 different numbers at the same instant. What they both read is `performance.timeOrigin +
 performance.now()`, and that is what a frame is stamped with. The agreement between the two halves
-is one sentence — *a moment of the tab captured at instant T is heard at T + delay* — and
-`delaySeconds` in the status report is the only number that has to cross between them. Neither
+is one sentence — *a moment of the tab captured at instant T is heard at T + delay + held* — and
+those two numbers in the status report are the only ones that have to cross between them. Neither
 side needs the other's epoch. It is not exact to the millisecond: capture adds a little latency
 before a sample reaches the worklet and `outputLatency` adds a little after the player writes one,
 so the sound is some tens of milliseconds later than the frame drawn for the same instant. That is
@@ -75,12 +169,23 @@ within a frame or two at fifteen a second, it does not accumulate, and the debug
 what it actually comes to rather than assuming.
 
 **The priming wait.** For the first eighteen seconds there is no frame old enough to paint and
-nothing to be done about it. The overlay shows the newest frame instead, dimmed, with the seconds
-counting down on it, so the person can see the video is running and how long the wait is. When the
-countdown reaches zero the picture steps back by the delay — at the same moment the audio starts
-playing from that same instant, which is the point of the whole arrangement. The panel counts the
-same wait down, from the status report's `secondsLeft`, ticking between reports rather than
-waiting for the next one.
+nothing to be done about it. What there is a choice about is what to show instead, and that is the
+`When ready` setting above: a still frame with the progress bar on it, or the real video with the
+canvas not even in the document. The still frame is not the newest one — it is the frame that was
+on screen at the instant the audio capture began, which the content script pins the moment the
+status report's stage stops being `loading`. Holding that one rather than a live one is what makes
+the arrival seamless: when the audio starts playing from that instant, the picture is already
+there.
+
+**The pause shift.** A pause does not reset the picture and does not invalidate a single frame
+held. The page stops producing frames, the audio stops being fed, and all that has changed when
+both start again is that the wall clock moved on while neither did. So the frame to paint is the
+one from `now - delay - held`, where `held` is how long the *audio* was frozen. That number is
+reported by the playback worklet, which is the half holding the clock the epoch is on; its freeze
+is a fraction shorter than the page's, by the twenty milliseconds the output spends fading out,
+and matching the audio rather than the page is the point. The content script makes its own guess
+at the resume so the picture does not lurch in the millisecond before the next report, and the
+report then corrects it.
 
 **Memory.** Eighteen seconds of picture has to be held, and the only question is what it costs.
 At 640 × 360 a frame is 640 × 360 × 4 bytes, and at fifteen a second eighteen seconds is about
@@ -98,25 +203,52 @@ letting the collector find them is how an overlay becomes a leak.
 What each event means is one table, in `src/content/page-events.ts`, because every row is a
 judgement worth arguing with.
 
-The audio half of each row is forced: a separated block belongs to the timeline it was captured
-on, so a seek, a pause, a resume or a rate change makes every block in flight worthless, and the
-answer is to throw them away and prime again. The picture half is a choice. A frame is stamped
-with a wall instant, so strictly the picture needs no resetting at all — eighteen seconds after a
-seek it would still be showing exactly what the audio was playing. What makes that wrong is that
-it would be eighteen seconds of pre-seek video over silence, which reads as a frozen tab. So the
-picture comes down when the audio does, the person gets the real video back while there is nothing
-to sing to, and both go delayed again together.
-
 | On | The audio | The picture |
 | --- | --- | --- |
-| `seeking` | reset | overlay down, real video back |
+| a real `seeking` | reset | overlay down, real video back |
 | `seeked` | nothing; the seek already reset it | overlay up again, keeping frames from here |
-| `pause` | reset | frozen where it is |
-| `play` | reset | overlay up again |
+| `pause` | **hold**: freeze the output, keep everything | frozen where it is |
+| `play` | **resume**: carry on from the same sample | carries on, with the pause taken out |
 | `ratechange` | reset | overlay down, real video back |
 | `ended` | reset | overlay down, real video back |
 | an ad starting | reset, and passthrough on | overlay down, real video back |
 | an ad ending | reset, and passthrough off | overlay up again |
+
+**Why a pause is not a reset.** The reasoning for resetting is that a separated block belongs to
+the timeline it was captured on, and a seek or a rate change really does put the person on another
+timeline. A pause does not. The capture is fed by the page, so a paused page feeds it nothing: the
+samples either side of a pause are the same song with nothing missing between them. Resetting
+meant that clicking the video — which is how YouTube pauses — cost the entire delay again,
+eighteen seconds of silence for a click somebody probably made by accident. That was the single
+worst thing about using this.
+
+So a pause holds, and holding is three things in step. The playback worklet fades its output out
+over twenty milliseconds, freezes, and reads nothing at all until the resume — which is also what
+stops the ring counting frames late, missing or early for a stretch nobody was listening to. The
+capture stops being handed to the separator, and the capture clock is told to rejoin the timeline
+on the next chunk after the pause rather than reading the gap as the audio thread skipping. And on
+the resume the worklet pushes the epoch forward by exactly how long it was frozen, so every sample
+after the pause plays at the same place in the delay it would have.
+
+The cost is under a tenth of a second of audio at each boundary: the part-gathered chunk is
+dropped at the pause and again at the resume, so that paused silence cannot be stapled into the
+stream. The splice is at the moment the person paused, which is where they will expect one.
+
+**Why a `seeking` event is not a seek.** The page fires `seeking` while buffering, when it adopts
+a new source, when a quality change reloads the stream and at the start of playback, none of which
+move the person anywhere. Obeying all of them means paying the whole delay for nothing, so
+`src/content/timeline.ts` judges it by arithmetic on the video's own clock instead: a playing
+video's `currentTime` advances by the wall time that went by times the rate, a paused one does not
+advance at all, and a jump is being somewhere else by more than three quarters of a second.
+`currentTime` is sampled on `timeupdate` and on the panel's own tick, so there is always a recent
+point to compare against. `seeked` follows whatever its `seeking` was judged to be.
+
+The picture half of each row is a choice. A frame is stamped with a wall instant, so strictly the
+picture needs no resetting after a seek either — eighteen seconds later it would still be showing
+exactly what the audio was playing. What makes that wrong is that it would be eighteen seconds of
+pre-seek video over silence, which reads as a frozen tab. So the picture comes down when the audio
+does, the person gets the real video back while there is nothing to sing to, and both go delayed
+again together.
 
 A seek is two rows on purpose: the first throws everything away and the second starts again, so a
 long scrub that fires `seeking` a hundred times primes once, at the end.
@@ -152,17 +284,24 @@ worklets and the separation worker — is read from the packed extension through
 
 ## How it is put together
 
-Four scopes, because Manifest V3 gives each of them different powers.
+Five scopes, because Manifest V3 gives each of them different powers.
 
 | Where | File | What it owns |
 | --- | --- | --- |
-| Service worker | `src/background.ts` | The click, the tab, the offscreen document's existence, and routing |
+| Popup | `popup.html`, `src/popup.ts` | The click that a tab capture is granted off the back of, and the setting |
+| Service worker | `src/background.ts` | The tab, the offscreen document's existence, the last report, and routing |
 | Offscreen document | `src/offscreen.ts`, `src/offscreen/pipeline.ts` | The `AudioContext`, the capture, the delay, the playback |
 | Dedicated worker | `src/separation/separator.worker.ts` | The model, on WebGPU |
 | Audio worklets | `src/worklets/*.worklet.ts` | Stamping captured chunks, and playing blocks at their moment |
 | Content script | `src/content.ts` | The wiring: what is mounted, what each event does, what the panel is told |
 
-The content script is four files and one of them is load-bearing in a way the others are not.
+The pure files either side of them are where the arguing happens, and they are the ones with
+tests: `audio/progress.ts` for the bar, `audio/status.ts` for the six states and what moves
+between them, `audio/mix-gain.ts` for every gain curve, `content/page-events.ts` for the table
+above, `content/timeline.ts` for whether a seek happened, `content/panel-view.ts` and
+`popup/popup-view.ts` for the words, and `settings.ts` for the shape of the one setting.
+
+The content script is five files and one of them is load-bearing in a way the others are not.
 `src/content/youtube.ts` is the only place in the extension that knows what YouTube's DOM looks
 like — the player, the main video, the class the player wears while an ad is on screen, the class
 it wears when it has hidden its controls — and every one of them fails to null or false, logged
@@ -170,23 +309,25 @@ once, rather than throwing. When the page changes, that file changes and nothing
 audio half reads none of it at all, because media events are a web platform contract rather than a
 YouTube one, so a broken selector costs the picture and the panel and never the sound.
 
-The other three are deliberately dull: `src/content/panel.ts` draws, `src/content/panel-view.ts`
-works out what it should say, `src/content/page-events.ts` is the table above. The last two are
-pure and tested; the two that touch the DOM have no decisions left in them.
+The other four are deliberately dull: `src/content/panel.ts` draws, `src/content/panel-view.ts`
+works out what it should say, `src/content/page-events.ts` is the table above, and
+`src/content/timeline.ts` is the one question that table cannot answer. The last three are pure
+and tested; the two that touch the DOM have no decisions left in them.
 
-One message was added to the protocol for the panel. Starting is a `request-start` to the service
-worker rather than a command, because the page cannot grant a tab capture and can only ask: the
-service worker tries it anyway and, when Chrome refuses, sends back the hint that points at the
+Starting is a `request-start` to the service worker rather than a command, because neither the
+page nor the popup can start a capture by itself: the popup has the gesture and the service worker
+has the tab and the offscreen document. The popup sends the stream id it was granted along with
+the request. The panel sends none, because a click inside a page is a gesture for the page; the
+service worker tries anyway and, when Chrome refuses, sends back the hint that points at the
 toolbar. Trying rather than assuming means the panel's button starts working by itself on the day
 Chrome allows it, and the refusal costs one rejected promise. `request-stop` needs no gesture and
 always works.
 
-The service worker exists where it does because `chrome.tabCapture.getMediaStreamId` is only
-granted off the back of a user gesture and `chrome.action.onClicked` is where one arrives. It has no
-`AudioContext`, no `getUserMedia` and no promise of being alive in a second's time, so the audio
-lives in an offscreen document instead, created with the `USER_MEDIA` and `AUDIO_PLAYBACK` reasons.
-Which tab is captured is kept in `chrome.storage.session` rather than in a variable, because the
-service worker is killed whenever Chrome feels like it, including while the audio is still playing.
+The service worker has no `AudioContext`, no `getUserMedia` and no promise of being alive in a
+second's time, so the audio lives in an offscreen document instead, created with the `USER_MEDIA`
+and `AUDIO_PLAYBACK` reasons. Which tab is captured, and the last report about it, are kept in
+`chrome.storage.session` rather than in variables, because the service worker is killed whenever
+Chrome feels like it, including while the audio is still playing.
 
 Routing is asymmetric and worth knowing before looking for the other half. A `chrome.runtime`
 message from a content script already reaches every extension context, the offscreen document
@@ -225,7 +366,14 @@ a capture time, which gives every sample a play time: capture time plus the dela
 out which frame it owes from `(currentTime - epoch) × sampleRate`, so it cannot drift away from the
 ring's contents — both are counted in the same frames by the same clock. The picture is in another
 process and cannot read that clock at all, which is what *The picture* above is about: it keeps
-the same delay on a clock both contexts share, and `delaySeconds` is all that crosses between.
+the same delay on a clock both contexts share, and `delaySeconds` and `heldSeconds` are all that
+cross between.
+
+The delay stays put across a pause, which is the one case where the epoch moves. Holding freezes
+the player and the resume pushes the epoch forward by however long it was frozen for, so the
+distance between a sample being captured and being heard is unchanged and nothing has to be
+primed again. What grows is how far the picture is behind the *page*, by exactly the same amount,
+which is why the panel's line adds the two together.
 
 ## Build and load it
 
@@ -241,8 +389,9 @@ Then build an unpacked extension that carries its own weights and runtime:
 pnpm --filter @kara/extension run build:unpacked
 ```
 
-Load `apps/extension/dist` at `chrome://extensions` with developer mode on, and press the toolbar
-button on a YouTube tab. The badge says `...` while priming and `on` when it is live.
+Load `apps/extension/dist` at `chrome://extensions` with developer mode on, open the popup from
+the toolbar on a YouTube tab, and press Start. The badge says `...` while priming, `on` when it
+is live and `||` while the page is paused.
 
 `pnpm --filter @kara/extension run build` is the same thing with the weights optional, which is
 what CI runs: it has no `models/` directory and no business failing over it. A dist built that way
@@ -250,10 +399,11 @@ bundles and loads but cannot separate anything. Add `--localhost` to either to m
 match `http://localhost/*` as well, which is only useful for pointing it at the debug page.
 
 The build is four vite builds into one `dist/`, because an extension's pieces are not all the same
-kind of file: pages and the service worker as ES modules, each audio worklet as a single
-self-contained file, and the content script as an IIFE because Chrome runs content scripts as
-classic scripts. `apps/extension/vite.config.ts` has the detail, and
-`scripts/build-extension.mjs` runs them and then copies in the weights and the runtime.
+kind of file: pages — the offscreen document, the popup and the debug page — and the service worker
+as ES modules, each audio worklet as a single self-contained file, and the content script as an
+IIFE because Chrome runs content scripts as classic scripts. `apps/extension/vite.config.ts` has
+the detail, and `scripts/build-extension.mjs` runs them and then copies in the weights and the
+runtime.
 
 ## The debug harness
 
@@ -267,7 +417,9 @@ So `apps/extension/test/page.html` plays a local fixture in a `<video>`, hands
 `video.captureStream()` to the same `startPipeline` the offscreen document calls and the video to
 the same `createDelayedPicture` the content script calls, with the same worklets and the same
 worker, and puts the status, the metrics, every block and the overlay's own state on
-`window.__karaDebug`.
+`window.__karaDebug`. The fixture's own `pause`, `play` and `seeking` events go through the same
+`page-events.ts` table and the same `timeline.ts` judgement the content script uses, which is what
+makes the two promises this page exists to prove testable without a browser profile.
 
 ```sh
 node scripts/spike/make-fixtures.mjs                        # fixtures/generated, gitignored
@@ -287,7 +439,36 @@ Then open `http://localhost:5276/test/page.html` and press Start, or drive
   audio plays undelayed, so the separated audio is `delaySeconds` behind it and the painted frame
   is however far behind it the overlay managed; the difference between the two is this, and it
   should sit near zero once both halves are live.
-- `__karaDebug.seek()` moves the fixture, for testing what a seek does to both halves at once.
+- `__karaDebug.seek()` moves the fixture, and `.pause()` and `.play()` drive it, for testing what
+  each of them does to both halves at once.
+- `__karaDebug.progress()` gives every fraction the bar has been at, whether it ever went
+  backwards, the highest it reached and whether it got all the way to audible. The assertion is
+  `monotonic`, a `max` near one, and `live`.
+- `__karaDebug.primes()` counts the times it has started getting ready again after having been
+  audible, and `.delays()` every delay it has settled on. **A pause and a play must leave both
+  alone**: same delay, no new prime. A seek must add to both.
+
+Which is three Playwright assertions for the three things this step changed:
+
+```js
+// The bar only ever goes forwards, and it gets there.
+const run = await page.evaluate(() => window.__karaDebug.progress());
+expect(run.monotonic).toBe(true);
+expect(run.max).toBeGreaterThan(0.9);
+expect(run.live).toBe(true);
+
+// A pause and a play keep the same delay and do not prime again.
+const before = await page.evaluate(() => window.__karaDebug.primes());
+await page.evaluate(() => window.__karaDebug.pause());
+await page.waitForTimeout(3000);
+await page.evaluate(() => window.__karaDebug.play());
+expect(await page.evaluate(() => window.__karaDebug.primes())).toBe(before);
+expect(await page.evaluate(() => window.__karaDebug.delays())).toHaveLength(1);
+
+// A seek does.
+await page.evaluate(() => window.__karaDebug.seek(90));
+expect(await page.evaluate(() => window.__karaDebug.primes())).toBe(before + 1);
+```
 
 The fixtures are synthesised: tones and pink noise for the audio, and an ffmpeg test pattern with
 its own timestamp burnt into every frame for the picture, so a test that would rather read the
@@ -304,7 +485,12 @@ repository ever sees, and they are gitignored.
   which costs separation quality near a window's edges and leaves very little headroom;
   `streaming.ts` has the trade in full.
 - **The first prime is slower than later ones**, because twenty-one graph pieces have to be loaded
-  and compiled before the first window can run.
+  and compiled before the first window can run. It is about twenty-eight seconds against about
+  eighteen, which is why the bar is weighted the way it is and why a later prime starts at 45%.
+- **No estimate on a first prime.** How long the model takes to compile and what a window costs
+  are facts about the machine, and this one refuses to guess at them: there is a bar and a stage,
+  and a seconds figure only once the stages have been timed here. A countdown that is wrong is
+  worse than no countdown, which is what the one this replaced proved.
 - **YouTube's DOM is not a contract.** Media events are found by listening on the document in the
   capture phase, which survives the video element being replaced, but the player, the ad class and
   the autohide class are somebody else's markup and will change. They are in one file, they fail
@@ -312,8 +498,17 @@ repository ever sees, and they are gitignored.
 - **A quarter of a gigabyte of frames.** That is what eighteen seconds of 640 px picture costs, and
   it is the price of the delay rather than an implementation detail to be optimised away. A
   smaller cap would show a softer picture; a shorter delay would cost separation quality.
-- **The panel cannot start a capture.** Chrome grants `chrome.tabCapture` from a click on the
-  extension's toolbar button and nowhere else, so the panel's own button can only point at it.
+- **The panel cannot start a capture.** Chrome grants `chrome.tabCapture` from a click in one of
+  the extension's own contexts and nowhere else, so the panel's own button can only point at the
+  popup. It tries first, every time, in case that ever changes.
+- **A pause loses a tenth of a second of song.** The part-gathered capture chunk is dropped at the
+  pause and again at the resume, so that paused silence cannot be stapled into the stream. The
+  splice lands where the person paused.
+- **A long pause makes the picture further behind the page**, by exactly as long as the pause. The
+  delay between hearing something and seeing it is unchanged — that is the point — but the frames
+  being held are older, so the memory budget is reached sooner and the picture ends up less
+  delayed than asked for after several minutes of pausing. The overlay's `offsetSeconds` is what
+  says so.
 - **Ads cost the delay twice.** The extension cannot tell an ad from a song. It hands the ad back
   to the tab undelayed and primes again afterwards, which means the first eighteen seconds of
   whatever follows an ad are silent.

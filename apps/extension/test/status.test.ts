@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { IDLE, nextStatus, primingSecondsLeft, type StatusState } from '../src/audio/status.ts';
+import { IDLE, isRunning, nextStatus, type StatusState } from '../src/audio/status.ts';
 
 const PRIMING: StatusState = { status: 'priming', reason: null };
 const LIVE: StatusState = { status: 'live', reason: null };
@@ -48,6 +48,7 @@ describe('nextStatus', () => {
     expect(nextStatus(dead, { type: 'start' })).toBe(dead);
     expect(nextStatus(dead, { type: 'reset' })).toBe(dead);
     expect(nextStatus(dead, { type: 'primed' })).toBe(dead);
+    expect(nextStatus(dead, { type: 'hold' })).toBe(dead);
     // An error on top of it would replace the more useful of the two reasons.
     expect(nextStatus(dead, { type: 'error', reason: 'and then this' })).toBe(dead);
     expect(nextStatus(dead, { type: 'stop' })).toEqual(IDLE);
@@ -60,16 +61,63 @@ describe('nextStatus', () => {
   });
 });
 
-describe('primingSecondsLeft', () => {
-  it('counts the delay down and stops at zero', () => {
-    expect(primingSecondsLeft(1000, 1000, 16)).toBe(16);
-    expect(primingSecondsLeft(1000, 5000, 16)).toBe(12);
-    expect(primingSecondsLeft(1000, 17_000, 16)).toBe(0);
-    expect(primingSecondsLeft(1000, 90_000, 16)).toBe(0);
+describe('a pause', () => {
+  it('holds rather than resetting, and goes back to what it was doing', () => {
+    const paused = nextStatus(LIVE, { type: 'hold' });
+
+    expect(paused).toEqual({ status: 'paused', reason: null, resumeTo: 'live' });
+    expect(nextStatus(paused, { type: 'resume' })).toEqual(LIVE);
   });
 
-  it('says nothing is left when it cannot tell', () => {
-    expect(primingSecondsLeft(Number.NaN, 0, 16)).toBe(0);
-    expect(primingSecondsLeft(0, 0, Number.NaN)).toBe(0);
+  it('remembers that it had not finished getting ready', () => {
+    const paused = nextStatus(PRIMING, { type: 'hold' });
+
+    expect(paused).toEqual({ status: 'paused', reason: null, resumeTo: 'priming' });
+    expect(nextStatus(paused, { type: 'resume' })).toEqual(PRIMING);
+  });
+
+  it('stays paused through a second pause', () => {
+    const paused = nextStatus(LIVE, { type: 'hold' });
+
+    expect(nextStatus(paused, { type: 'hold' })).toBe(paused);
+  });
+
+  it('notices the first block becoming due while the page was paused', () => {
+    const paused = nextStatus(PRIMING, { type: 'hold' });
+    const primed = nextStatus(paused, { type: 'primed' });
+
+    expect(primed).toEqual({ status: 'paused', reason: null, resumeTo: 'live' });
+    expect(nextStatus(primed, { type: 'resume' })).toEqual(LIVE);
+  });
+
+  it('stays paused through a seek, and goes back to getting ready', () => {
+    const paused = nextStatus(LIVE, { type: 'hold' });
+    const seeked = nextStatus(paused, { type: 'reset' });
+
+    expect(seeked).toEqual({ status: 'paused', reason: null, resumeTo: 'priming' });
+    expect(nextStatus(seeked, { type: 'resume' })).toEqual(PRIMING);
+  });
+
+  it('is not something an idle tab can do', () => {
+    expect(nextStatus(IDLE, { type: 'hold' })).toBe(IDLE);
+    expect(nextStatus(IDLE, { type: 'resume' })).toBe(IDLE);
+  });
+
+  it('stops from paused like anything else', () => {
+    expect(nextStatus(nextStatus(LIVE, { type: 'hold' }), { type: 'stop' })).toEqual(IDLE);
+  });
+});
+
+describe('isRunning', () => {
+  it('counts a paused capture as running, because it still holds everything', () => {
+    expect(isRunning('priming')).toBe(true);
+    expect(isRunning('live')).toBe(true);
+    expect(isRunning('paused')).toBe(true);
+  });
+
+  it('counts a tab with nothing to lose as not running', () => {
+    expect(isRunning('idle')).toBe(false);
+    expect(isRunning('unsupported')).toBe(false);
+    expect(isRunning('error')).toBe(false);
   });
 });
