@@ -62,13 +62,20 @@ function ToastDescription({ className, ...props }: React.ComponentProps<"p">) {
   )
 }
 
-/** The stack itself: fixed, out of the way, and not in anybody's pointer path. */
+/**
+ * The stack itself: fixed, out of the way, and not in anybody's pointer path.
+ *
+ * At the top rather than the bottom, which is where a toast usually goes: the
+ * bottom of this app is a transport bar two rows deep, and a notice over the
+ * play button is a notice in the way. The analysis chip has the top right, so
+ * the middle is clear.
+ */
 function ToastViewport({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="toast-viewport"
       className={cn(
-        "pointer-events-none fixed inset-x-0 bottom-24 z-60 flex flex-col items-center gap-2 px-4 sm:bottom-28",
+        "pointer-events-none fixed inset-x-0 top-16 z-60 flex flex-col items-center gap-2 px-4 sm:top-20",
         className
       )}
       {...props}

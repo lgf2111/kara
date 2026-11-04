@@ -62,6 +62,26 @@ export function readMediaFailure(code: number | null | undefined): MediaFailure 
   }
 }
 
+/**
+ * The failure as the technical reason behind a notice. Plainer than the code
+ * and still specific enough to act on: "this browser has no decoder for it"
+ * sends somebody to a different browser, where "error 4" sends them nowhere.
+ */
+export function describeMediaFailure(failure: MediaFailure): string {
+  switch (failure) {
+    case 'aborted':
+      return 'the browser stopped loading the file';
+    case 'network':
+      return 'reading the file off this device failed partway through';
+    case 'decode':
+      return 'the browser could not decode the file, which usually means a damaged track';
+    case 'unsupported':
+      return 'this browser has no decoder for what is in this file';
+    case 'none':
+      return 'the browser reported no reason';
+  }
+}
+
 export type VideoRemedy =
   /** Play the file's sound through an audio element and give up the picture. */
   | 'audio-only'

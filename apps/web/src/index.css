@@ -115,6 +115,8 @@
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
+    /* Form controls, scrollbars and the canvas behind a fullscreen video. */
+    color-scheme: dark;
 }
 
 @layer base {
@@ -126,5 +128,22 @@
     }
   html {
     @apply font-sans;
+    }
+}
+
+/*
+  The room is one stage filling the window with everything laid over it, so
+  the document itself never scrolls and nothing peeks out behind a letterboxed
+  video. Everything else in this app is a utility class on the element it
+  belongs to.
+*/
+@layer base {
+  html,
+  body,
+  #root {
+    @apply h-full;
+    }
+  body {
+    @apply overflow-hidden bg-black;
     }
 }

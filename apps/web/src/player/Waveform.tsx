@@ -1,3 +1,4 @@
+import { cn } from '@/lib/utils';
 import { barsPlayed } from './waveform.ts';
 
 interface WaveformProps {
@@ -22,11 +23,14 @@ export function Waveform({ bars, currentSeconds, durationSeconds }: WaveformProp
   const played = barsPlayed(currentSeconds, durationSeconds, bars.length);
 
   return (
-    <div className="wave" aria-hidden="true">
+    <div className="flex h-20 w-[min(40rem,100%)] items-center gap-px" aria-hidden="true">
       {bars.map((height, index) => (
         <span
           key={index}
-          className={index < played ? 'bar on' : 'bar'}
+          className={cn(
+            'min-h-0.5 flex-1 rounded-full transition-colors',
+            index < played ? 'bg-white/90' : 'bg-white/20',
+          )}
           style={{ height: `${String(Math.round(height * 100))}%` }}
         />
       ))}

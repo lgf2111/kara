@@ -1,5 +1,7 @@
+import { TroubleError } from '../notices/notices.ts';
+import { abilitiesHere } from './opfs-abilities.ts';
 import { directoryFor } from './opfs-paths.ts';
-import { NO_WRITER, abilitiesHere, writeRouteFor } from './opfs-support.ts';
+import { NO_WRITER, appendNeedsWorker, writeRouteFor } from './opfs-support.ts';
 import { writeWithStream, writeWithSyncAccess } from './opfs-write.ts';
 import { writeInWorker } from './opfs-writer.ts';
 import type { AppendableFile, Store } from './store.ts';
@@ -26,7 +28,9 @@ async function writeWhole(path: string, blob: Blob): Promise<void> {
     case 'sync-access-worker':
       return writeInWorker(path, blob);
     case 'none':
-      throw new Error(NO_WRITER);
+      // Nothing can be kept here, which is a fact about the browser rather
+      // than about whatever was being saved, so it says so itself.
+      throw new TroubleError('storage', NO_WRITER);
   }
 }
 
@@ -46,7 +50,7 @@ async function openAppend(path: string): Promise<AppendableFile> {
     // Only the separation worker appends, and it is a dedicated worker in
     // every browser this runs in. Reaching here means somebody moved that
     // call to the page, where no browser allows it.
-    throw new Error(`${path} can only be appended to from a dedicated worker`);
+    throw new TroubleError('storage', appendNeedsWorker(path));
   }
   const [directory, name] = await directoryFor(path, true);
   const handle = await directory.getFileHandle(name, { create: true });

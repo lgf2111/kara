@@ -1,7 +1,20 @@
-import { SKIP_SECONDS } from '../player/time.ts';
+import { HardDrive, X } from 'lucide-react';
+
+import { Button } from '@/components/ui/button';
+import { Separator } from '@/components/ui/separator';
+import {
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
+import { DrawerNotes } from './DrawerNotes.tsx';
 import { DropZone } from './DropZone.tsx';
+import { QueuePanel } from './QueuePanel.tsx';
 import { SongList } from './SongList.tsx';
-import { describeStage, describeStorage, formatBytes, formatEta } from './format.ts';
+import { describeStorage, formatBytes } from './format.ts';
 import type { SongRecord } from './songs.ts';
 import { totalBytes } from './storage.ts';
 import type { Library } from './useLibrary.ts';
@@ -32,133 +45,96 @@ export function Drawer({
   onDelete,
   onRemoveLyrics,
 }: DrawerProps) {
-  const active = library.active;
-  const waiting = library.queue.waiting;
   const songCount = library.songs.length;
 
   return (
-    <div className={open ? 'drawer open' : 'drawer'} aria-hidden={!open}>
-      {/* Tapping the song behind is how a drawer is usually shut. */}
-      <button type="button" className="scrim" aria-label="close the songs" onClick={onClose} />
+    <Sheet
+      open={open}
+      onOpenChange={(next) => {
+        // Escape and a press on the song behind both land here, which is how
+        // a drawer is usually shut.
+        if (!next) {
+          onClose();
+        }
+      }}
+    >
+      <SheetContent
+        side="left"
+        showCloseButton={false}
+        className="w-full gap-0 overflow-y-auto border-white/10 bg-background/95 backdrop-blur-xl sm:max-w-md"
+      >
+        <SheetHeader className="gap-1 px-5 pt-5 pb-0">
+          <SheetTitle className="font-heading text-2xl tracking-tight">Kara</SheetTitle>
+          <SheetDescription>Songs you own, kept on this device.</SheetDescription>
+          <SheetClose
+            render={
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="close the songs"
+                className="absolute top-4 right-4"
+              />
+            }
+          >
+            <X aria-hidden="true" />
+          </SheetClose>
+        </SheetHeader>
 
-      <aside className="panel">
-        <header>
-          <h1>Kara</h1>
-          <button type="button" className="close" onClick={onClose}>
-            close
-          </button>
-        </header>
+        <div className="space-y-5 p-5">
+          <DropZone heading="Drop another song you own, or choose a file." onFiles={onFiles} />
 
-        <DropZone
-          heading="Drop another song you own, or choose a file."
-          onFiles={(files) => {
-            onFiles(files);
-          }}
-        />
+          {library.error !== null && (
+            <div className="space-y-2 rounded-xl border border-destructive/40 bg-destructive/10 p-3">
+              <p className="text-sm text-foreground">{library.error}</p>
+              <Button variant="ghost" size="sm" onClick={library.dismissError}>
+                dismiss
+              </Button>
+            </div>
+          )}
 
-        {library.error !== null && (
-          <section>
-            <h2>That did not work</h2>
-            <p className="error">{library.error}</p>
-            <button type="button" onClick={library.dismissError}>
-              dismiss
-            </button>
+          <QueuePanel library={library} />
+
+          <Separator />
+
+          <section className="space-y-3">
+            <h2 className="text-[0.7rem] font-medium tracking-[0.14em] text-muted-foreground uppercase">
+              Songs
+            </h2>
+            <SongList
+              songs={library.songs}
+              sizes={library.sizes}
+              busy={library.active !== null}
+              lyricsJob={library.lyricsJob}
+              cancellingLyrics={library.cancellingLyrics}
+              onPlay={onPlay}
+              onDelete={onDelete}
+              onReadLyrics={library.readLyrics}
+              onCancelLyrics={library.cancelLyrics}
+              onRemoveLyrics={onRemoveLyrics}
+            />
           </section>
-        )}
 
-        {(active !== null || waiting.length > 0) && (
-          <section>
-            <h2>Analysing</h2>
-            {active !== null && (
-              <>
-                <p>
-                  {active.title}: {describeStage(active.stage)}
-                  {active.stage === 'separating' &&
-                    ` ${String(active.segmentsDone)} of ${String(active.segmentsTotal)} segments`}
-                  {active.resumedFrom > 0 &&
-                    ` (carried on from segment ${String(active.resumedFrom)})`}
-                </p>
-                {active.stage === 'separating' && (
-                  <>
-                    <progress
-                      value={active.segmentsDone}
-                      max={Math.max(1, active.segmentsTotal)}
-                    />
-                    <p className="note">About {formatEta(active.etaMs)} left</p>
-                  </>
-                )}
-                <button type="button" disabled={library.cancelling} onClick={library.cancel}>
-                  {library.cancelling ? 'stopping' : 'stop'}
-                </button>
-                <p className="note">
-                  {library.cancelling
-                    ? 'Stopping after the segment it is on.'
-                    : 'Stopping keeps what is done. Resume it from the chip on the stage, or drop the same file in again.'}
-                </p>
-              </>
-            )}
-            {waiting.length > 0 && (
-              <ul className="queue">
-                {waiting.map((item, index) => (
-                  <li key={item.key}>
-                    <span className="place">{index + 1}</span>
-                    <span className="said">{item.title}</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        library.forget(item.key);
-                      }}
-                    >
-                      take out
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
+          <Separator />
+
+          <section className="space-y-1">
+            <h2 className="text-[0.7rem] font-medium tracking-[0.14em] text-muted-foreground uppercase">
+              Storage
+            </h2>
+            <p className="flex items-center gap-2 text-sm">
+              <HardDrive className="size-4 flex-none text-muted-foreground" aria-hidden="true" />
+              {formatBytes(totalBytes(library.sizes))} across {String(songCount)}{' '}
+              {songCount === 1 ? 'song' : 'songs'}, all of it on this device.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {describeStorage(library.usageBytes, library.quotaBytes)}
+            </p>
           </section>
-        )}
 
-        <section>
-          <h2>Songs</h2>
-          <SongList
-            songs={library.songs}
-            sizes={library.sizes}
-            busy={active !== null}
-            lyricsJob={library.lyricsJob}
-            cancellingLyrics={library.cancellingLyrics}
-            onPlay={onPlay}
-            onDelete={onDelete}
-            onReadLyrics={library.readLyrics}
-            onCancelLyrics={library.cancelLyrics}
-            onRemoveLyrics={onRemoveLyrics}
-          />
-        </section>
+          <Separator />
 
-        <section>
-          <h2>Storage</h2>
-          <p>
-            {formatBytes(totalBytes(library.sizes))} across {String(songCount)}{' '}
-            {songCount === 1 ? 'song' : 'songs'}, all of it on this device.
-          </p>
-          <p className="note">{describeStorage(library.usageBytes, library.quotaBytes)}</p>
-        </section>
-
-        <footer>
-          <p className="note">
-            Space plays and pauses, the left and right arrows skip {SKIP_SECONDS} seconds, up and
-            down change the volume, m mutes and f fills the screen.
-          </p>
-          <p className="note">
-            Upload only, by design: there is no link import and no downloader. Your file is decoded
-            and separated in this tab, and what you share with a friend holds timings and settings,
-            never audio. Lyrics read off your own video stay on this device too.
-          </p>
-          <p className="note">
-            Cross-origin isolation: <strong>{crossOriginIsolated ? 'on' : 'off'}</strong>.
-            Separation needs it.
-          </p>
-        </footer>
-      </aside>
-    </div>
+          <DrawerNotes />
+        </div>
+      </SheetContent>
+    </Sheet>
   );
 }

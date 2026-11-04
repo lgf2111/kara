@@ -1,3 +1,9 @@
+import { LoaderCircle, RotateCcw, Square, TriangleAlert } from 'lucide-react';
+
+import { Button } from '@/components/ui/button';
+import { Progress } from '@/components/ui/progress';
+import { cn } from '@/lib/utils';
+import { formatPercent } from '../library/format.ts';
 import { describeAnalysis, type AnalysisView } from './analysis.ts';
 
 interface ProgressChipProps {
@@ -23,25 +29,63 @@ export function ProgressChip({ view, dim, onCancel, onResume }: ProgressChipProp
   }
 
   const share = view.share;
+  const failed = view.phase === 'failed';
 
   return (
-    <div className={dim ? 'chip dim' : 'chip'} aria-live="polite">
-      <span className={`dot ${view.phase}`} aria-hidden="true" />
-      <span className="said">{describeAnalysis(view)}</span>
+    <div
+      className={cn(
+        'absolute top-3 right-3 z-30 flex max-w-[min(26rem,calc(100%-1.5rem))] items-center gap-2 rounded-full border border-white/10 bg-black/70 py-1 pr-1 pl-3 text-xs text-white/75 shadow-lg backdrop-blur-md transition-opacity duration-200',
+        dim && 'opacity-35',
+      )}
+      aria-live="polite"
+    >
+      {failed ? (
+        <TriangleAlert className="size-3.5 flex-none text-destructive" aria-hidden="true" />
+      ) : (
+        <LoaderCircle
+          className={cn(
+            'size-3.5 flex-none',
+            view.phase === 'running' && 'animate-spin motion-reduce:animate-none',
+          )}
+          aria-hidden="true"
+        />
+      )}
+
+      <span className="truncate">{describeAnalysis(view)}</span>
+
       {share !== null && (
-        <span className="meter" aria-hidden="true">
-          <span className="fill" style={{ width: `${String(Math.round(share * 100))}%` }} />
-        </span>
+        <>
+          <Progress
+            className="w-16 flex-none"
+            value={Math.round(share * 100)}
+            aria-label="analysis progress"
+          />
+          <span className="flex-none tabular-nums">{formatPercent(share)}</span>
+        </>
       )}
+
       {onCancel !== null && (
-        <button type="button" onClick={onCancel}>
-          stop
-        </button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="stop analysing"
+          className="flex-none rounded-full text-white/70 hover:bg-white/10 hover:text-white"
+          onClick={onCancel}
+        >
+          <Square aria-hidden="true" />
+        </Button>
       )}
+
       {onResume !== null && (
-        <button type="button" onClick={onResume}>
-          resume
-        </button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="carry on analysing"
+          className="flex-none rounded-full text-white/70 hover:bg-white/10 hover:text-white"
+          onClick={onResume}
+        >
+          <RotateCcw aria-hidden="true" />
+        </Button>
       )}
     </div>
   );

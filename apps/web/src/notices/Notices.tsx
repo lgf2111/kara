@@ -27,8 +27,11 @@ import { describeTrouble, type NoticeText, type Trouble } from './notices.ts';
  * component between.
  */
 
-/** How long a notice stays before it takes itself away. */
-const KEEP_MS = 8000;
+/** How long a failure stays. Long enough to read the reason under it. */
+const KEEP_TROUBLE_MS = 8000;
+
+/** How long anything else stays. Long enough to read once, and no longer. */
+const KEEP_NOTICE_MS = 3600;
 
 interface Shown extends NoticeText {
   readonly id: number;
@@ -58,9 +61,12 @@ export function NoticesProvider({ children }: { readonly children: ReactNode }) 
       // from one thread, and nothing needs the ids to be consecutive.
       const id = Date.now() + Math.random();
       setShown((current) => [...current, { ...text, id, bad }]);
-      setTimeout(() => {
-        dismiss(id);
-      }, KEEP_MS);
+      setTimeout(
+        () => {
+          dismiss(id);
+        },
+        bad ? KEEP_TROUBLE_MS : KEEP_NOTICE_MS,
+      );
     },
     [dismiss],
   );

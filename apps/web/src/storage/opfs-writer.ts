@@ -1,3 +1,4 @@
+import { TroubleError } from '../notices/notices.ts';
 import type { WriteReply, WriteRequest } from './writer-protocol.ts';
 
 /**
@@ -23,7 +24,7 @@ function breakOff(reason: string): void {
   const failed = [...waiting.values()];
   waiting.clear();
   for (const waiter of failed) {
-    waiter.reject(new Error(reason));
+    waiter.reject(new TroubleError('storage', reason));
   }
 }
 
@@ -45,7 +46,9 @@ function open(): Worker {
     if (message.kind === 'written') {
       waiter.resolve();
     } else {
-      waiter.reject(new Error(message.error));
+      // Whatever the worker could not do, it could not do to the filesystem,
+      // so the notice says that rather than blaming the song.
+      waiter.reject(new TroubleError('storage', message.error));
     }
   });
   started.addEventListener('error', (event) => {

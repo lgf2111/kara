@@ -75,18 +75,20 @@ export function VocalsControl({ toggle, analysis, choice, onChoice }: VocalsCont
 
       <div className="flex flex-none items-center gap-2">
         <span className="text-xs text-white/50">guide</span>
-        <Slider
-          className="w-20 sm:w-28"
-          thumbLabel="guide vocal"
-          min={0}
-          max={100}
-          step={5}
-          value={[choice.guidePercent]}
-          disabled={waiting || !instrumental}
-          onValueChange={(next) => {
-            onChoice({ ...choice, guidePercent: sliderNumber(next) });
-          }}
-        />
+        {/* Sized by the wrapper: the slider itself fills whatever holds it. */}
+        <div className="w-20 flex-none sm:w-28">
+          <Slider
+            thumbLabel="guide vocal"
+            min={0}
+            max={100}
+            step={5}
+            value={[choice.guidePercent]}
+            disabled={waiting || !instrumental}
+            onValueChange={(next) => {
+              onChoice({ ...choice, guidePercent: sliderNumber(next) });
+            }}
+          />
+        </div>
         <span className="min-w-10 text-xs tabular-nums text-white/50">
           {String(Math.round(choice.guidePercent))}%
         </span>

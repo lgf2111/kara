@@ -1,5 +1,6 @@
 import { useRef } from 'react';
 
+import { cn } from '@/lib/utils';
 import type { SongRecord } from '../library/songs.ts';
 import { StageOverlays } from './StageOverlays.tsx';
 import { Waveform } from './Waveform.tsx';
@@ -62,9 +63,17 @@ export function StemStage({
   const shown = useIdleOverlays(player.playing);
 
   return (
-    <div className={shown ? 'stage' : 'stage idle'} ref={frame}>
-      <div className="art">
-        <p className="song">{song.title}</p>
+    <div
+      ref={frame}
+      className={cn(
+        'relative size-full overflow-hidden bg-black [&:fullscreen]:size-full',
+        !shown && 'cursor-none',
+      )}
+    >
+      <div className="flex size-full flex-col items-center justify-center gap-6 bg-[radial-gradient(circle_at_50%_42%,#24272f,#07080a_76%)] px-6 py-20">
+        <p className="max-w-[34rem] text-center font-heading text-2xl font-semibold tracking-tight text-white sm:text-4xl">
+          {song.title}
+        </p>
         <Waveform
           bars={player.bars}
           currentSeconds={player.currentSeconds}

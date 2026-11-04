@@ -72,18 +72,24 @@ export function Controls({ transport }: ControlsProps) {
         <span className="flex-none text-xs tabular-nums text-white/60">
           {formatClock(currentSeconds)}
         </span>
-        <Slider
-          className="min-w-20 flex-1"
-          thumbLabel="seek"
-          min={0}
-          max={known ? durationSeconds : 1}
-          step={0.1}
-          value={[at]}
-          disabled={!known}
-          onValueChange={(next) => {
-            transport.seek(sliderNumber(next));
-          }}
-        />
+        {/*
+          Sized by a wrapper rather than on the slider: the slider asks for the
+          full width of whatever holds it, which is what a seek bar wants and
+          what the two short sliders have to be told otherwise.
+        */}
+        <div className="min-w-20 flex-1">
+          <Slider
+            thumbLabel="seek"
+            min={0}
+            max={known ? durationSeconds : 1}
+            step={0.1}
+            value={[at]}
+            disabled={!known}
+            onValueChange={(next) => {
+              transport.seek(sliderNumber(next));
+            }}
+          />
+        </div>
         <span className="flex-none text-xs tabular-nums text-white/60">
           {formatClock(durationSeconds)}
         </span>
@@ -129,17 +135,18 @@ export function Controls({ transport }: ControlsProps) {
         >
           {silent ? <VolumeX aria-hidden="true" /> : <Volume2 aria-hidden="true" />}
         </Action>
-        <Slider
-          className="w-20 flex-none sm:w-28"
-          thumbLabel="volume"
-          min={0}
-          max={1}
-          step={0.05}
-          value={[muted ? 0 : volume]}
-          onValueChange={(next) => {
-            transport.setVolume(sliderNumber(next));
-          }}
-        />
+        <div className="w-20 flex-none sm:w-28">
+          <Slider
+            thumbLabel="volume"
+            min={0}
+            max={1}
+            step={0.05}
+            value={[muted ? 0 : volume]}
+            onValueChange={(next) => {
+              transport.setVolume(sliderNumber(next));
+            }}
+          />
+        </div>
         <Action
           label={transport.fullscreen ? 'leave fullscreen' : 'fullscreen'}
           onClick={() => {

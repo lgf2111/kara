@@ -1,5 +1,5 @@
 /**
- * Which of the two ways of writing a file this context actually has.
+ * Which of the two ways of writing a file a context actually has.
  *
  * The filesystem has two writers and no browser has both everywhere.
  * `createWritable` is a stream, and Safari does not offer it on origin
@@ -8,8 +8,9 @@
  * throws. So a write from the page in Safari has to be handed to a worker,
  * and a write already inside a worker can do it where it stands.
  *
- * Pure: the decision is the part worth testing, and it is the part that was
- * wrong, so it is not left inline in the store.
+ * Pure, and free of the filesystem types: the decision is the part worth
+ * testing, and it is the part that was wrong. The probe that reads the real
+ * browser is in `opfs-abilities.ts`.
  */
 
 export interface WriteAbilities {
@@ -53,14 +54,7 @@ export function writeRouteFor(abilities: WriteAbilities): WriteRoute {
 export const NO_WRITER =
   'this browser offers no way to write to its own private filesystem, so songs cannot be kept on this device';
 
-export function abilitiesHere(): WriteAbilities {
-  const handle =
-    typeof FileSystemFileHandle === 'undefined' ? null : FileSystemFileHandle.prototype;
-  return {
-    // A worker has no `window`. Checked this way round so the page, where the
-    // property is always there, is the one that needs no feature test.
-    inWorker: typeof window === 'undefined',
-    writableStream: handle !== null && 'createWritable' in handle,
-    syncAccess: handle !== null && 'createSyncAccessHandle' in handle,
-  };
+/** Why an append could not start, which is only ever a mistake in this app. */
+export function appendNeedsWorker(path: string): string {
+  return `${path} can only be appended to from a dedicated worker`;
 }

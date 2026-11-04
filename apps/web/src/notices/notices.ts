@@ -20,10 +20,40 @@ export interface Trouble {
   readonly reason: string;
 }
 
+/**
+ * A failure that already knows which part of the app it belongs to.
+ *
+ * Thrown where the code that fails knows better than the code that catches
+ * it: a write refused by the filesystem is a storage failure wherever it was
+ * asked for, and the caller that happens to be ingesting a file should not
+ * relabel it as a bad file.
+ */
+export class TroubleError extends Error {
+  readonly area: TroubleArea;
+
+  constructor(area: TroubleArea, message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'TroubleError';
+    this.area = area;
+  }
+}
+
+/**
+ * The exception's own name, when it adds anything. `Error` says nothing, and
+ * a {@link TroubleError} is already labelled by its area, so neither is
+ * repeated in front of the message.
+ */
+function namePrefix(error: Error): string {
+  if (error instanceof TroubleError || error.name === '' || error.name === 'Error') {
+    return '';
+  }
+  return `${error.name}: `;
+}
+
 /** What a caught `unknown` has to say for itself. Never empty. */
 export function reasonText(cause: unknown): string {
   if (cause instanceof Error) {
-    const named = cause.name === '' || cause.name === 'Error' ? '' : `${cause.name}: `;
+    const named = namePrefix(cause);
     return cause.message === '' ? `${named}no reason given`.trim() : `${named}${cause.message}`;
   }
   if (typeof cause === 'string' && cause !== '') {
@@ -32,8 +62,15 @@ export function reasonText(cause: unknown): string {
   return 'no reason given';
 }
 
+/**
+ * A caught `unknown` as something to show, filed under the part of the app
+ * that caught it unless the failure named its own.
+ */
 export function troubleFrom(area: TroubleArea, cause: unknown): Trouble {
-  return { area, reason: reasonText(cause) };
+  return {
+    area: cause instanceof TroubleError ? cause.area : area,
+    reason: reasonText(cause),
+  };
 }
 
 export interface NoticeText {

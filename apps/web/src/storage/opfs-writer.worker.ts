@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import { reasonText } from '../notices/notices.ts';
 import { writeWithSyncAccess } from './opfs-write.ts';
 import type { WriteReply, WriteRequest } from './writer-protocol.ts';
 
@@ -29,11 +30,7 @@ self.addEventListener('message', (event: MessageEvent<WriteRequest>) => {
       await writeWithSyncAccess(request.path, request.blob);
       reply({ kind: 'written', id: request.id });
     } catch (cause) {
-      reply({
-        kind: 'failed',
-        id: request.id,
-        error: cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause),
-      });
+      reply({ kind: 'failed', id: request.id, error: reasonText(cause) });
     }
   });
 });
