@@ -1,3 +1,4 @@
+import { clampKey, KEY_DEFAULT } from './audio/key.ts';
 import { startPipeline, type Pipeline } from './offscreen/pipeline.ts';
 import {
   IDLE_REPORT,
@@ -79,6 +80,11 @@ async function start(command: Extract<Command, { type: 'start' }>): Promise<void
     captureWorkletUrl: chrome.runtime.getURL('capture-worklet.js'),
     playbackWorkletUrl: chrome.runtime.getURL('playback-worklet.js'),
     onReady,
+    // The remembered default, handed over by the service worker with the start.
+    // From here on the key belongs to the capture and only a command moves it,
+    // so that a change made in the popup for one song cannot be undone by a
+    // sync that arrives mid-song.
+    key: clampKey(command.key ?? KEY_DEFAULT),
     onStatus: (report) => {
       tell(report);
     },
@@ -118,6 +124,9 @@ function accept(command: Command): void {
       return;
     case 'guide':
       pipeline?.setGuide(command.level);
+      return;
+    case 'key':
+      pipeline?.setKey(command.semitones);
       return;
     case 'passthrough':
       pipeline?.setPassthrough(command.enabled);

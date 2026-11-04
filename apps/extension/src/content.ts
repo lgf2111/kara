@@ -337,6 +337,9 @@ function mount(): void {
     onGuide: (level) => {
       setGuide(level);
     },
+    onKey: (semitones) => {
+      setKey(semitones);
+    },
   });
   const picture = createDelayedPicture({ video: parts.video, container: parts.player });
   mounted = {
@@ -398,6 +401,20 @@ function setGuide(level: number): void {
   toOffscreen({ type: 'guide', level });
   if (report !== null) {
     report = { ...report, guide: level };
+  }
+}
+
+/**
+ * The key, which moves the capture and not the remembered default: a nudge for
+ * one song is not a decision about every song after it, and the popup is where
+ * a decision about those is made.
+ */
+function setKey(semitones: number): void {
+  toOffscreen({ type: 'key', semitones });
+  if (report !== null) {
+    // The words answer now; the report confirms them a moment later.
+    report = { ...report, semitones };
+    refresh();
   }
 }
 

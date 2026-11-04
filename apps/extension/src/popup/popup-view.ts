@@ -1,3 +1,4 @@
+import { clampKey, keyLabel } from '../audio/key.ts';
 import { delayNote, prepareDetail, reprimeNote } from '../content/panel-view.ts';
 import type { OnReady, StatusReport } from '../protocol.ts';
 
@@ -16,7 +17,9 @@ import type { OnReady, StatusReport } from '../protocol.ts';
  * Two of the sentences are shared with the panel in the page rather than
  * written twice: what getting ready is doing, and how far behind the picture
  * is. They are the same facts about the same capture, and words that drift
- * apart between two windows are worse than an import across a folder.
+ * apart between two windows are worse than an import across a folder. The key
+ * is a third: the same control, with the same words, except that this is the
+ * one that is also remembered.
  *
  * Pure, so the mapping is the test. Nothing here touches `chrome`.
  */
@@ -35,6 +38,9 @@ export interface PopupView {
   readonly action: PopupAction;
   readonly actionLabel: string;
   readonly onReady: OnReady;
+  /** The key, and the words the control wears, both of them whole semitones. */
+  readonly semitones: number;
+  readonly keyLabel: string;
 }
 
 export interface PopupInput {
@@ -43,6 +49,8 @@ export interface PopupInput {
   /** The active tab's address, or undefined when there is no tab. */
   readonly url: string | undefined;
   readonly onReady: OnReady;
+  /** The remembered default, which is what to show with nothing running. */
+  readonly key: number;
 }
 
 /** Schemes a tab capture can be started on at all. */
@@ -102,7 +110,10 @@ export function pageNote(url: string | undefined): string | null {
 export function popupView(input: PopupInput): PopupView {
   const report = input.report;
   const onReady = report?.onReady ?? input.onReady;
-  const quiet = { progress: null, onReady };
+  // The running capture over the remembered default, same as the setting: what
+  // is playing now is what the person is looking at the popup to change.
+  const semitones = clampKey(report?.semitones ?? input.key);
+  const quiet = { progress: null, onReady, semitones, keyLabel: keyLabel(semitones) };
 
   if (report === null || report.status === 'idle') {
     const blocked = captureBlock(input.url);

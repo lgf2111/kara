@@ -1,3 +1,4 @@
+import { clampKey, KEY_DEFAULT, keyLabel } from '../audio/key.ts';
 import { aboutText, prepareLabel } from '../audio/progress.ts';
 import type { PlayMode, ResetReason, StatusReport } from '../protocol.ts';
 
@@ -32,11 +33,14 @@ export interface PanelView {
   readonly detail: string | null;
   /** Something that happened, which the bar starting over needs explaining by. */
   readonly note: string | null;
-  /** Whether the mode switch and the guide slider belong on screen. */
+  /** Whether the mode switch, the guide and the key belong on screen. */
   readonly controls: boolean;
   readonly mode: PlayMode;
   /** Where the guide slider sits, 0 to 100. */
   readonly guide: number;
+  /** The key, in whole semitones, and the words the control wears. */
+  readonly semitones: number;
+  readonly keyLabel: string;
 }
 
 export interface PanelInput {
@@ -124,7 +128,16 @@ export function panelView(input: PanelInput): PanelView {
   const report = input.report;
   const mode: PlayMode = report?.mode ?? 'instrumental';
   const guide = guidePercent(report?.guide ?? 0);
-  const quiet = { progress: null, note: null, controls: false, mode, guide };
+  const semitones = clampKey(report?.semitones ?? KEY_DEFAULT);
+  const quiet = {
+    progress: null,
+    note: null,
+    controls: false,
+    mode,
+    guide,
+    semitones,
+    keyLabel: keyLabel(semitones),
+  };
 
   if (report === null || report.status === 'idle') {
     return { ...quiet, state: 'off', label: 'Karaoke', detail: input.hint ?? null };

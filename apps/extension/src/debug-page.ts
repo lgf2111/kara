@@ -23,8 +23,9 @@ import type { BlockStat, Metrics, PlayMode, PrepareStage, StatusReport } from '.
  * parts that can be wrong are whether the delay is what the separator said,
  * whether blocks come back in order and tile the timeline, whether the
  * instrumental actually has anything in it, whether the progress bar moves
- * forwards, and whether a pause leaves the delay alone. All of them only need
- * a video and a stream.
+ * forwards, whether a pause leaves the delay alone, and whether the key
+ * control moves the pitch by the ratio it claims. All of them only need a
+ * video and a stream.
  *
  * So this page plays a local fixture in a `<video>`, takes
  * `video.captureStream()` as the pipeline's input, and puts the status, the
@@ -97,6 +98,17 @@ export interface KaraDebug {
   start: (fixture?: string) => Promise<void>;
   setMode: (mode: PlayMode) => void;
   setGuide: (level: number) => void;
+  /** The key, in semitones, which the player applies last of all. */
+  setTranspose: (semitones: number) => void;
+  /**
+   * The loudest frequency coming out of the player, off an `AnalyserNode` on
+   * its output, or null before there is anything above the noise floor.
+   *
+   * The one number that can prove the key control did what it said: play the
+   * tone fixture, read this, transpose, read it again, and the ratio of the
+   * two is `2 ** (semitones / 12)` or the shifter is wrong.
+   */
+  dominantHz: () => number | null;
   setOnReady: (onReady: OnReady) => void;
   /** Seconds along the fixture, for testing what a seek does to both halves. */
   seek: (seconds: number) => void;
@@ -204,6 +216,8 @@ function draw(): void {
   metricsBlock.textContent = JSON.stringify(
     {
       metrics,
+      semitones: status?.semitones ?? 0,
+      dominantHz: pipeline?.dominantHz() ?? null,
       picture: picture?.state() ?? null,
       pictureOffsetSeconds: pictureOffsetSeconds(),
       progress: { monotonic, max: maxFraction, samples: progressSamples.length },
@@ -375,6 +389,8 @@ async function start(fixture = DEFAULT_FIXTURE): Promise<void> {
     captureWorkletUrl: CAPTURE_WORKLET,
     playbackWorkletUrl: PLAYBACK_WORKLET,
     onReady,
+    // So `dominantHz` has something to read. The packed extension never asks.
+    analyse: true,
     onStatus,
     onMetrics: (next) => {
       metrics = next;
@@ -427,6 +443,14 @@ need<HTMLButtonElement>('#seek').addEventListener('click', () => {
   seek(video.currentTime + 30);
 });
 
+need<HTMLButtonElement>('#key-down').addEventListener('click', () => {
+  pipeline?.setKey((status?.semitones ?? 0) - 1);
+});
+
+need<HTMLButtonElement>('#key-up').addEventListener('click', () => {
+  pipeline?.setKey((status?.semitones ?? 0) + 1);
+});
+
 need<HTMLButtonElement>('#hold').addEventListener('click', () => {
   if (video.paused) {
     void video.play();
@@ -473,6 +497,10 @@ window.__karaDebug = {
   setGuide: (level) => {
     pipeline?.setGuide(level);
   },
+  setTranspose: (semitones) => {
+    pipeline?.setKey(semitones);
+  },
+  dominantHz: () => pipeline?.dominantHz() ?? null,
   setOnReady: (next) => {
     onReady = next;
     pipeline?.setOnReady(next);

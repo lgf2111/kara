@@ -1,7 +1,9 @@
+import { canNudge, KEY_DEFAULT, nudgeKey } from './audio/key.ts';
 import { ON_READY_CHOICES, popupView, type PopupView } from './popup/popup-view.ts';
 import {
   packet,
   STATUS_KEY,
+  type Command,
   type Request,
   type StatusReport,
   type StoredStatus,
@@ -23,7 +25,7 @@ import { mediaStreamId } from './tab-capture.ts';
  *
  * Plain DOM, no framework, and every decision about what to say is in
  * `popup/popup-view.ts` where it can be tested. What is left here is reading
- * two pieces of storage, drawing, and three event listeners.
+ * two pieces of storage, drawing, and the listeners.
  *
  * The state it shows is the last status report, which the service worker
  * leaves in `chrome.storage.session` as it routes it. A popup cannot have been
@@ -46,11 +48,17 @@ const detail = need<HTMLParagraphElement>('#detail');
 const bar = need<HTMLProgressElement>('#bar');
 const action = need<HTMLButtonElement>('#action');
 const onReadyBox = need<HTMLFieldSetElement>('#on-ready');
+const keyValue = need<HTMLSpanElement>('#key-value');
+const keyDown = need<HTMLButtonElement>('#key-down');
+const keyUp = need<HTMLButtonElement>('#key-up');
+const keyClear = need<HTMLButtonElement>('#key-clear');
 
 let tabId: number | null = null;
 let url: string | undefined;
 let report: StatusReport | null = null;
 let onReady: OnReady = DEFAULT_SETTINGS.onReady;
+/** The remembered default, until a report says what is actually playing. */
+let key = DEFAULT_SETTINGS.key;
 /** A start that has been asked for and not yet answered. */
 let starting = false;
 let failure: string | null = null;
@@ -61,8 +69,17 @@ function send(body: Request): void {
   chrome.runtime.sendMessage(packet('background', body, tabId)).catch(() => undefined);
 }
 
+/**
+ * Straight to the audio, with no relay: a runtime message already reaches
+ * every extension context, and the envelope is what stops the wrong one
+ * acting on it.
+ */
+function command(body: Command): void {
+  chrome.runtime.sendMessage(packet('offscreen', body, tabId)).catch(() => undefined);
+}
+
 function view(): PopupView {
-  return popupView({ report, url, onReady });
+  return popupView({ report, url, onReady, key });
 }
 
 function draw(): void {
@@ -79,6 +96,29 @@ function draw(): void {
   for (const [value, radio] of radios) {
     radio.checked = value === shown.onReady;
   }
+  keyValue.textContent = shown.keyLabel;
+  keyDown.disabled = !canNudge(shown.semitones, -1);
+  keyUp.disabled = !canNudge(shown.semitones, 1);
+  keyClear.hidden = shown.semitones === KEY_DEFAULT;
+}
+
+/**
+ * The key, in two places at once: the capture that is playing, by command, and
+ * the remembered default, by storage.
+ *
+ * Both, because the popup is where a decision rather than a nudge is made. The
+ * command is sent rather than left to the offscreen document's storage watcher
+ * on purpose — the panel in the page can move the key too, without touching
+ * the default, and a watcher pushing the stored value would undo that.
+ */
+function setKey(semitones: number): void {
+  key = semitones;
+  if (report !== null) {
+    report = { ...report, semitones };
+  }
+  draw();
+  command({ type: 'key', semitones });
+  writeSettings({ key: semitones }).catch(() => undefined);
 }
 
 /** Two radios rather than a switch, because neither of them is the off one. */
@@ -100,8 +140,8 @@ function buildChoices(): void {
       }
       onReady = choice.value;
       draw();
-      // The offscreen document watches the same key, so a capture already
-      // running picks this up without being told.
+      // The offscreen document watches the same storage key, so a capture
+      // already running picks this up without being told.
       writeSettings({ onReady: choice.value }).catch(() => undefined);
     });
   }
@@ -133,6 +173,18 @@ async function start(): Promise<void> {
   }
 }
 
+keyDown.addEventListener('click', () => {
+  setKey(nudgeKey(view().semitones, -1));
+});
+
+keyUp.addEventListener('click', () => {
+  setKey(nudgeKey(view().semitones, 1));
+});
+
+keyClear.addEventListener('click', () => {
+  setKey(KEY_DEFAULT);
+});
+
 action.addEventListener('click', () => {
   if (view().action === 'stop') {
     send({ type: 'request-stop' });
@@ -149,7 +201,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
     draw();
   }
   if (area === 'sync' && Object.hasOwn(changes, SETTINGS_KEY)) {
-    onReady = parseSettings(changes[SETTINGS_KEY]?.newValue).onReady;
+    const settings = parseSettings(changes[SETTINGS_KEY]?.newValue);
+    onReady = settings.onReady;
+    key = settings.key;
     draw();
   }
 });
@@ -159,7 +213,9 @@ async function open(): Promise<void> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   tabId = tab?.id ?? null;
   url = tab?.url;
-  onReady = (await readSettings()).onReady;
+  const settings = await readSettings();
+  onReady = settings.onReady;
+  key = settings.key;
   take((await chrome.storage.session.get(STATUS_KEY))[STATUS_KEY]);
   draw();
 }

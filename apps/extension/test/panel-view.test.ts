@@ -24,6 +24,7 @@ function reported(status: Status, rest: Partial<StatusReport> = {}): StatusRepor
     heldSeconds: 0,
     mode: 'instrumental',
     guide: 0,
+    semitones: 0,
     onReady: 'restart',
     ...rest,
   };
@@ -132,6 +133,20 @@ describe('panelView', () => {
     expect(view.guide).toBe(40);
     // Without this the delay reads as a broken page.
     expect(view.detail).toBe('picture is 18 s behind YouTube');
+  });
+
+  it('carries the key and its words out of the report', () => {
+    const view = panelView({ report: reported('live', { delaySeconds: 17.5, semitones: -2 }) });
+
+    expect(view.semitones).toBe(-2);
+    expect(view.keyLabel).toBe('Key −2');
+  });
+
+  it('says the original key before anybody has moved it', () => {
+    expect(panelView({ report: null }).semitones).toBe(0);
+    expect(panelView({ report: null }).keyLabel).toBe('Original key');
+    // Whatever a report from some other version of this extension said.
+    expect(panelView({ report: reported('live', { semitones: 40 }) }).semitones).toBe(6);
   });
 
   it('says the picture jumped back, for as long as the caller asks', () => {

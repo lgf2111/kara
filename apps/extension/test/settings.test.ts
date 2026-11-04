@@ -8,20 +8,30 @@ import {
   withSettings,
 } from '../src/settings.ts';
 
-describe('the default', () => {
+describe('the defaults', () => {
   it('is restart, because the quiet surprises people less than the jump', () => {
-    expect(DEFAULT_SETTINGS).toEqual({ onReady: 'restart' });
+    expect(DEFAULT_SETTINGS.onReady).toBe('restart');
   });
 
-  it('is one key, so a write is never half of a read', () => {
+  it('is the original key, because that is the song as it was recorded', () => {
+    expect(DEFAULT_SETTINGS.key).toBe(0);
+  });
+
+  it('is one storage key, so a write is never half of a read', () => {
     expect(SETTINGS_KEY).toBe('kara.settings');
   });
 });
 
 describe('parseSettings', () => {
   it('reads back what was written', () => {
-    expect(parseSettings({ onReady: 'continue' })).toEqual({ onReady: 'continue' });
-    expect(parseSettings({ onReady: 'restart' })).toEqual({ onReady: 'restart' });
+    expect(parseSettings({ onReady: 'continue', key: 0 })).toEqual({
+      onReady: 'continue',
+      key: 0,
+    });
+    expect(parseSettings({ onReady: 'restart', key: -3 })).toEqual({
+      onReady: 'restart',
+      key: -3,
+    });
   });
 
   it('falls back to the default rather than throwing, whatever is in storage', () => {
@@ -30,8 +40,28 @@ describe('parseSettings', () => {
     }
   });
 
+  it('takes the readable half of a half-readable object', () => {
+    expect(parseSettings({ onReady: 'continue', key: 'two' })).toEqual({
+      onReady: 'continue',
+      key: 0,
+    });
+    expect(parseSettings({ onReady: 'sideways', key: 2 })).toEqual({
+      onReady: 'restart',
+      key: 2,
+    });
+  });
+
+  it('keeps the key inside the range the control offers', () => {
+    expect(parseSettings({ key: 99 }).key).toBe(6);
+    expect(parseSettings({ key: -99 }).key).toBe(-6);
+    expect(parseSettings({ key: 2.6 }).key).toBe(3);
+  });
+
   it('ignores anything else that happens to be alongside it', () => {
-    expect(parseSettings({ onReady: 'continue', guide: 0.4 })).toEqual({ onReady: 'continue' });
+    expect(parseSettings({ onReady: 'continue', guide: 0.4 })).toEqual({
+      onReady: 'continue',
+      key: 0,
+    });
   });
 });
 
@@ -39,8 +69,16 @@ describe('withSettings', () => {
   it('changes the one field and keeps the rest readable', () => {
     expect(withSettings(DEFAULT_SETTINGS, { onReady: 'continue' })).toEqual({
       onReady: 'continue',
+      key: 0,
     });
-    expect(withSettings({ onReady: 'continue' }, {})).toEqual({ onReady: 'continue' });
+    expect(withSettings(DEFAULT_SETTINGS, { key: 4 })).toEqual({
+      onReady: 'restart',
+      key: 4,
+    });
+    expect(withSettings({ onReady: 'continue', key: 4 }, {})).toEqual({
+      onReady: 'continue',
+      key: 4,
+    });
   });
 });
 

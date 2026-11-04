@@ -194,7 +194,7 @@ async function start(tabId: number, offered: string | null): Promise<void> {
   // The offscreen document cannot read storage, so it is told the setting.
   const settings = await readSettings();
   send(packet('offscreen', { type: 'on-ready', onReady: settings.onReady }, tabId));
-  send(packet('offscreen', { type: 'start', streamId, tabId }, tabId));
+  send(packet('offscreen', { type: 'start', streamId, tabId, key: settings.key }, tabId));
 }
 
 /**
