@@ -14,8 +14,15 @@ const EVENTS: readonly PageEvent[] = [
 ];
 
 describe('decidePageEvent', () => {
-  it('throws the buffer away for everything that moves the timeline', () => {
-    expect(decidePageEvent('seeking').reset).toBe('seek');
+  /**
+   * The seek row is deliberately absent. A `seeking` event is not evidence of
+   * a seek — the page fires it for buffering, for a quality change and for
+   * adopting a new source, none of which move anybody anywhere — so the audio
+   * no longer resets on it. The audio side decides a seek for itself, from
+   * whether media time jumped, which only these events are still another
+   * timeline in a way the page alone can know.
+   */
+  it('resets the audio for the events that are still another timeline', () => {
     expect(decidePageEvent('ratechange').reset).toBe('ratechange');
     expect(decidePageEvent('ended').reset).toBe('ended');
     expect(decidePageEvent('ad-start').reset).toBe('ad');
@@ -48,10 +55,17 @@ describe('decidePageEvent', () => {
     }
   });
 
-  it('splits a seek, so a long scrub primes once at the end', () => {
+  /**
+   * A seek is no longer the page's to reset. `seeking`/`seeked` leave the audio
+   * alone: it detects the real discontinuity in media time for itself, which a
+   * buffering stall or a quality change cannot fake. What stays on the page
+   * side is the picture: down on `seeking`, back up on `seeked`, because the
+   * frames it is holding are from elsewhere in the song.
+   */
+  it('leaves a seek to media time, moving only the picture', () => {
     expect(decidePageEvent('seeking')).toEqual({
-      audio: 'reset',
-      reset: 'seek',
+      audio: 'none',
+      reset: null,
       picture: 'clear',
       passthrough: null,
     });

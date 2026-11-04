@@ -22,6 +22,8 @@ function reported(status: Status, rest: Partial<StatusReport> = {}): StatusRepor
     reprime: null,
     delaySeconds: null,
     heldSeconds: 0,
+    catchUp: null,
+    waitingForPlay: false,
     mode: 'instrumental',
     guide: 0,
     semitones: 0,

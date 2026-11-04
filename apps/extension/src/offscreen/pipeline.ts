@@ -2,7 +2,6 @@ import { createCaptureClock } from '../audio/capture-clock.ts';
 import {
   grownDelaySeconds,
   initialDelaySeconds,
-  MAX_DELAY_SECONDS,
   needsCatchUp,
   shortfallSeconds,
   type DelayChange,

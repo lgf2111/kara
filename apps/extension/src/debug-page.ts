@@ -1,3 +1,4 @@
+import type { DelayChange } from './audio/delay-plan.ts';
 import type { LoggedEvent } from './audio/event-log.ts';
 import type { MediaSample } from './audio/media-time.ts';
 import { decidePageEvent, type PageEvent } from './content/page-events.ts';
@@ -13,7 +14,7 @@ import {
 import { wallNowMs } from './picture/wall-clock.ts';
 import { reasonText } from './reason.ts';
 import { isOnReady, type OnReady } from './settings.ts';
-import type { BlockStat, DelayChange, Metrics, PlayMode, PrepareStage, StatusReport } from './protocol.ts';
+import type { BlockStat, Metrics, PlayMode, PrepareStage, StatusReport } from './protocol.ts';
 
 /**
  * The audio pipeline with the extension taken away.
