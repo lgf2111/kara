@@ -1,14 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 
+import { cn } from '@/lib/utils';
+import { useNotices } from '../notices/Notices.tsx';
 import { Controls } from './Controls.tsx';
 import { ProgressChip } from './ProgressChip.tsx';
+import { SongsButton } from './SongsButton.tsx';
 import { VocalsControl } from './VocalsControl.tsx';
 import type { AnalysisView, VocalToggle } from './analysis.ts';
 import type { VocalChoice } from './stem-mix.ts';
 import type { Transport } from './transport.ts';
-
-/** How long the instrumental announces itself for. Long enough to read once. */
-const TOAST_MS = 3200;
 
 interface StageOverlaysProps {
   readonly title: string;
@@ -47,7 +47,7 @@ export function StageOverlays({
   onResumeAnalysis,
   error,
 }: StageOverlaysProps) {
-  const [announcing, setAnnouncing] = useState(false);
+  const notices = useNotices();
   const announced = useRef(toggle.enabled);
 
   useEffect(() => {
@@ -55,30 +55,38 @@ export function StageOverlays({
     // separated when it went on has nothing to announce.
     const fresh = toggle.enabled && !announced.current;
     announced.current = toggle.enabled;
-    if (!fresh) {
-      return;
+    if (fresh) {
+      notices.show({ headline: 'Instrumental ready', detail: null });
     }
-    setAnnouncing(true);
-    const timer = setTimeout(() => {
-      setAnnouncing(false);
-    }, TOAST_MS);
-    return () => {
-      clearTimeout(timer);
-    };
-  }, [toggle.enabled]);
+  }, [notices, toggle.enabled]);
+
+  const bar = cn(
+    'absolute inset-x-0 z-20 transition-opacity duration-200',
+    shown ? 'opacity-100' : 'pointer-events-none opacity-0',
+  );
 
   return (
     <>
-      <div className="overlay top">
-        <button type="button" className="songs-open" onClick={onOpenDrawer}>
-          songs
-        </button>
-        <p className="now">{title}</p>
+      <div
+        className={cn(
+          bar,
+          'top-0 flex items-center gap-2 bg-gradient-to-b from-black/75 to-transparent p-3 pb-10',
+        )}
+      >
+        <SongsButton onClick={onOpenDrawer} />
+        <p className="truncate font-heading font-medium tracking-tight text-white drop-shadow">
+          {title}
+        </p>
       </div>
 
-      <div className="overlay bottom">
-        {error !== null && <p className="error">{error}</p>}
-        <VocalsControl toggle={toggle} choice={vocals} onChoice={onVocals} />
+      <div
+        className={cn(
+          bar,
+          'bottom-0 flex flex-col gap-2 bg-gradient-to-t from-black/85 to-transparent px-3 pt-16 pb-3',
+        )}
+      >
+        {error !== null && <p className="text-sm text-destructive">{error}</p>}
+        <VocalsControl toggle={toggle} analysis={analysis} choice={vocals} onChoice={onVocals} />
         <Controls transport={transport} />
       </div>
 
@@ -88,12 +96,6 @@ export function StageOverlays({
         onCancel={onCancelAnalysis}
         onResume={onResumeAnalysis}
       />
-
-      {announcing && (
-        <p className="toast" role="status">
-          Instrumental ready
-        </p>
-      )}
     </>
   );
 }

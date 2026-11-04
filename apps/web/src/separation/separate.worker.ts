@@ -33,6 +33,7 @@ import type {
   StartMessage,
   StemFile,
 } from './protocol.ts';
+import { reasonText } from '../notices/notices.ts';
 import { createOpfsStore } from '../storage/opfs-store.ts';
 
 const MODEL_ID = 'htdemucs-web';
@@ -585,7 +586,9 @@ self.addEventListener('message', (event: MessageEvent<SeparationRequest>) => {
       post({
         kind: 'failed',
         stage: 'separation',
-        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        // The same wording the room will show, so a bare `Error:` does not
+        // end up in front of the reason on its way to the notice.
+        error: reasonText(error),
       });
     }
   })();

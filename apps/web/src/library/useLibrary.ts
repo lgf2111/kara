@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { describeRead, readLyricsFromVideo, type RunningLyricsRead } from '../lyrics/read.ts';
+import { useNotices } from '../notices/Notices.tsx';
+import { troubleFrom } from '../notices/notices.ts';
 import { jobIdFor, jobPaths } from '../separation/job.ts';
 import {
   analysisKeyFor,
@@ -55,6 +57,12 @@ export interface Library {
   readonly cancelling: boolean;
   readonly lyricsJob: LyricsJob | null;
   readonly cancellingLyrics: boolean;
+  /**
+   * What the person just asked for could not be done, in words about what
+   * they asked for. Failures thrown by a decode, a worker or the filesystem
+   * do not come out here: those go to the notices, which say which part of
+   * the app they came from and keep the technical reason with them.
+   */
   readonly error: string | null;
   /** Queues a picked file for analysis. Playing it is the player's business. */
   add(file: File, onIdentified?: Identified): void;
@@ -75,11 +83,8 @@ export interface Library {
   dismissError(): void;
 }
 
-function errorText(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
-}
-
 export function useLibrary(): Library {
+  const notices = useNotices();
   const fileStore = useMemo(() => createOpfsStore(), []);
   const songStore = useMemo(() => createIdbSongStore(), []);
   const [songs, setSongs] = useState<readonly SongRecord[]>([]);
@@ -127,9 +132,9 @@ export function useLibrary(): Library {
 
   useEffect(() => {
     void refresh().catch((cause: unknown) => {
-      setError(errorText(cause));
+      notices.report(troubleFrom('storage', cause));
     });
-  }, [refresh]);
+  }, [notices, refresh]);
 
   /**
    * One file, decoded and separated. Never rejects: a job that goes wrong
@@ -208,7 +213,9 @@ export function useLibrary(): Library {
         const outcome = await run.finished;
         await songStore.put({ ...record, status: outcome.cancelled ? 'cancelled' : 'ready' });
       } catch (cause) {
-        setError(errorText(cause));
+        // Separation unless the failure named itself, which a refused decode
+        // and a filesystem that cannot write both do.
+        notices.report(troubleFrom('analysis', cause));
         if (record !== null) {
           await songStore.put({ ...record, status: 'failed' });
         }
@@ -220,7 +227,7 @@ export function useLibrary(): Library {
         await refresh();
       }
     },
-    [commit, fileStore, refresh, songStore],
+    [commit, fileStore, notices, refresh, songStore],
   );
 
   /**
@@ -314,10 +321,10 @@ export function useLibrary(): Library {
       void deleteSong(fileStore, songStore, song)
         .then(refresh)
         .catch((cause: unknown) => {
-          setError(errorText(cause));
+          notices.report(troubleFrom('storage', cause));
         });
     },
-    [fileStore, refresh, songStore],
+    [fileStore, notices, refresh, songStore],
   );
 
   const readLyrics = useCallback(
@@ -372,7 +379,7 @@ export function useLibrary(): Library {
             }),
           );
         } catch (cause) {
-          setError(errorText(cause));
+          notices.report(troubleFrom('lyrics', cause));
         } finally {
           reading.current = null;
           setLyricsJob(null);
@@ -382,10 +389,10 @@ export function useLibrary(): Library {
           pump();
         }
       })().catch((cause: unknown) => {
-        setError(errorText(cause));
+        notices.report(troubleFrom('lyrics', cause));
       });
     },
-    [fileStore, pump, refresh, songStore],
+    [fileStore, notices, pump, refresh, songStore],
   );
 
   const cancelLyrics = useCallback((): void => {
@@ -402,10 +409,10 @@ export function useLibrary(): Library {
         .put(withoutLyrics(song))
         .then(refresh)
         .catch((cause: unknown) => {
-          setError(errorText(cause));
+          notices.report(troubleFrom('storage', cause));
         });
     },
-    [refresh, songStore],
+    [notices, refresh, songStore],
   );
 
   const dismissError = useCallback((): void => {

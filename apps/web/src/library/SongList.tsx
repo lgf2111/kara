@@ -1,6 +1,10 @@
+import { Film, HardDrive, Music, Play, Trash2 } from 'lucide-react';
+
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { LyricsActions } from './LyricsActions.tsx';
 import { describeStatus, formatBytes, formatDuration } from './format.ts';
-import { canPlay, type SongRecord } from './songs.ts';
+import { canPlay, type SongRecord, type SongStatus } from './songs.ts';
 import type { LyricsJob } from './useLibrary.ts';
 
 interface SongListProps {
@@ -19,6 +23,20 @@ interface SongListProps {
   readonly onRemoveLyrics: (song: SongRecord) => void;
 }
 
+/** How a status reads at a glance, before the words beside it are read. */
+function statusTone(status: SongStatus): 'default' | 'secondary' | 'outline' | 'destructive' {
+  switch (status) {
+    case 'ready':
+      return 'secondary';
+    case 'separating':
+      return 'default';
+    case 'cancelled':
+      return 'outline';
+    case 'failed':
+      return 'destructive';
+  }
+}
+
 export function SongList({
   songs,
   sizes,
@@ -32,56 +50,80 @@ export function SongList({
   onRemoveLyrics,
 }: SongListProps) {
   if (songs.length === 0) {
-    return <p className="note">No songs yet.</p>;
+    return <p className="text-sm text-muted-foreground">No songs yet.</p>;
   }
 
   return (
-    <ul className="songs">
-      {songs.map((song) => (
-        <li key={song.id}>
-          <div>
-            <p className="song-title">{song.title}</p>
-            <p className="song-meta">
-              {formatDuration(song.durationMs)} · {describeStatus(song.status)} ·{' '}
-              {formatBytes(sizes.get(song.id) ?? 0)} on this device · {formatBytes(song.sourceBytes)}{' '}
-              {song.sourceKind} file
-              {song.sourcePath === null ? ', stems only' : ', kept as it arrived'}
-            </p>
+    <ul className="space-y-2">
+      {songs.map((song) => {
+        const reading = lyricsJob?.songId === song.id;
+        const Kind = song.sourceKind === 'video' ? Film : Music;
+
+        return (
+          <li
+            key={song.id}
+            className="space-y-2 rounded-xl border border-border/60 bg-muted/20 p-3"
+          >
+            <div className="flex items-start gap-2">
+              <div className="min-w-0 flex-1">
+                <p className="truncate font-medium">{song.title}</p>
+                <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                  <span className="tabular-nums">{formatDuration(song.durationMs)}</span>
+                  <Badge variant={statusTone(song.status)}>{describeStatus(song.status)}</Badge>
+                  <span className="inline-flex items-center gap-1">
+                    <HardDrive className="size-3" aria-hidden="true" />
+                    {formatBytes(sizes.get(song.id) ?? 0)} on this device
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <Kind className="size-3" aria-hidden="true" />
+                    {formatBytes(song.sourceBytes)}{' '}
+                    {song.sourcePath === null ? 'file, stems only' : 'file, kept as it arrived'}
+                  </span>
+                </p>
+              </div>
+
+              <div className="flex flex-none items-center gap-1">
+                {/* A kept file plays as it stands; stems play on a stage of their own. */}
+                {canPlay(song) && (
+                  <Button
+                    variant="secondary"
+                    size="icon-sm"
+                    aria-label={`play ${song.title}`}
+                    onClick={() => {
+                      onPlay(song);
+                    }}
+                  >
+                    <Play aria-hidden="true" />
+                  </Button>
+                )}
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={`delete ${song.title}`}
+                  className="text-muted-foreground hover:text-destructive"
+                  // Whatever is holding this song's files holds them open.
+                  disabled={(busy && song.status === 'separating') || reading}
+                  onClick={() => {
+                    onDelete(song);
+                  }}
+                >
+                  <Trash2 aria-hidden="true" />
+                </Button>
+              </div>
+            </div>
+
             <LyricsActions
               song={song}
-              job={lyricsJob?.songId === song.id ? lyricsJob : null}
+              job={reading ? lyricsJob : null}
               cancelling={cancellingLyrics}
               busy={busy || lyricsJob !== null}
               onRead={onReadLyrics}
               onCancel={onCancelLyrics}
               onRemove={onRemoveLyrics}
             />
-          </div>
-          <div className="song-actions">
-            {/* A kept file plays as it stands; stems play on a stage of their own. */}
-            {canPlay(song) && (
-              <button
-                type="button"
-                onClick={() => {
-                  onPlay(song);
-                }}
-              >
-                play
-              </button>
-            )}
-            <button
-              type="button"
-              // Whatever is holding this song's files holds them open.
-              disabled={(busy && song.status === 'separating') || lyricsJob?.songId === song.id}
-              onClick={() => {
-                onDelete(song);
-              }}
-            >
-              delete
-            </button>
-          </div>
-        </li>
-      ))}
+          </li>
+        );
+      })}
     </ul>
   );
 }

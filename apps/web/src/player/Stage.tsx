@@ -1,6 +1,9 @@
+import { LoaderCircle } from 'lucide-react';
+
 import { DropZone } from '../library/DropZone.tsx';
 import type { SongRecord } from '../library/songs.ts';
 import { MediaStage } from './MediaStage.tsx';
+import { SongsButton } from './SongsButton.tsx';
 import { StemStage } from './StemStage.tsx';
 import type { AnalysisView } from './analysis.ts';
 import type { VocalChoice } from './stem-mix.ts';
@@ -21,6 +24,10 @@ interface StageProps {
   readonly onCancelAnalysis: (() => void) | null;
   readonly onResumeAnalysis: (() => void) | null;
 }
+
+/** The empty stage and the dead end share their frame: dark, centred, calm. */
+const BACKDROP =
+  'relative flex size-full items-center justify-center overflow-hidden bg-[radial-gradient(circle_at_50%_40%,#1d1f25,#07080a_78%)] p-6';
 
 /**
  * The whole window: whatever is playing, or the invitation to put something
@@ -47,11 +54,9 @@ export function Stage({
 }: StageProps) {
   if (staged === null) {
     return (
-      <div className="stage empty">
-        <button type="button" className="songs-open" onClick={onOpenDrawer}>
-          songs
-        </button>
-        <DropZone className="whole" onFiles={onFiles} />
+      <div className={BACKDROP}>
+        <SongsButton onClick={onOpenDrawer} className="absolute top-3 left-3 z-10" />
+        <DropZone size="stage" onFiles={onFiles} />
       </div>
     );
   }
@@ -88,16 +93,24 @@ export function Stage({
   }
 
   return (
-    <div className="stage empty">
-      <button type="button" className="songs-open" onClick={onOpenDrawer}>
-        songs
-      </button>
-      <div className="middle">
-        <p className="song">{staged.title}</p>
-        {error !== null && <p className="error">{error}</p>}
-        {error === null && opening && <p className="note">Opening the file…</p>}
+    <div className={BACKDROP}>
+      <SongsButton onClick={onOpenDrawer} className="absolute top-3 left-3 z-10" />
+      <div className="max-w-md space-y-3 text-center">
+        <p className="font-heading text-xl font-semibold tracking-tight text-white">
+          {staged.title}
+        </p>
+        {error !== null && <p className="text-sm text-destructive">{error}</p>}
+        {error === null && opening && (
+          <p className="flex items-center justify-center gap-2 text-sm text-white/60">
+            <LoaderCircle
+              className="size-4 animate-spin motion-reduce:animate-none"
+              aria-hidden="true"
+            />
+            Opening the file…
+          </p>
+        )}
         {error === null && !opening && (
-          <p className="note">
+          <p className="text-sm leading-relaxed text-white/60">
             Nothing to play for this one. It kept no file of its own, and its stems are not
             finished: drop the same file in again to carry on separating it.
           </p>
