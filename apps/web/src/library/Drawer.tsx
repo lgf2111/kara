@@ -92,6 +92,15 @@ export function Drawer({
             </div>
           )}
 
+          {library.notice !== null && (
+            <div className="space-y-2 rounded-xl border border-white/10 bg-muted/40 p-3">
+              <p className="text-sm text-foreground">{library.notice}</p>
+              <Button variant="ghost" size="sm" onClick={library.dismissNotice}>
+                dismiss
+              </Button>
+            </div>
+          )}
+
           <QueuePanel library={library} />
 
           <Separator />

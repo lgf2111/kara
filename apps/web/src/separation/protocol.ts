@@ -45,6 +45,14 @@ export interface ProgressMessage {
   readonly resumedFrom: number;
   /** The segment just finished, or null before any has been. */
   readonly stemSumError: number | null;
+  /** The backend this attempt is running on, which a fallback changes. */
+  readonly backend: Backend;
+  /**
+   * Something to show a person in their own words, or null, which is almost
+   * always. Set once when a backend had to be abandoned: the progress stream
+   * is the only channel the worker has while a job is in flight.
+   */
+  readonly notice: string | null;
 }
 
 export interface StemFile {
@@ -55,13 +63,21 @@ export interface StemFile {
 
 export interface SeparationResult {
   readonly jobId: string;
+  /** The backend that actually produced these stems. */
   readonly backend: Backend;
+  /** The backend that was abandoned mid-job, or null if none was. */
+  readonly fellBackFrom: Backend | null;
   /** Segment the run started at: non-zero means it resumed. */
   readonly resumedFrom: number;
   readonly segmentsDone: number;
   readonly segmentsTotal: number;
   readonly loadMs: number;
   readonly inferenceMs: number;
+  /**
+   * Inference milliseconds for each segment this run processed, in order. The
+   * median of these is the number that says whether a backend is worth having.
+   */
+  readonly segmentMs: readonly number[];
   readonly hostMs: Readonly<Record<string, number>>;
   readonly totalMs: number;
   readonly audioSeconds: number;

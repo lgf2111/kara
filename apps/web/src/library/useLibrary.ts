@@ -64,6 +64,11 @@ export interface Library {
    * the app they came from and keep the technical reason with them.
    */
   readonly error: string | null;
+  /**
+   * Something that went differently but not wrong, in a person's words. Set
+   * when separation had to abandon the GPU and start again on the CPU.
+   */
+  readonly notice: string | null;
   /** Queues a picked file for analysis. Playing it is the player's business. */
   add(file: File, onIdentified?: Identified): void;
   cancel(): void;
@@ -81,6 +86,7 @@ export interface Library {
   cancelLyrics(): void;
   removeLyrics(song: SongRecord): void;
   dismissError(): void;
+  dismissNotice(): void;
 }
 
 export function useLibrary(): Library {
@@ -98,6 +104,7 @@ export function useLibrary(): Library {
   const [lyricsJob, setLyricsJob] = useState<LyricsJob | null>(null);
   const [cancellingLyrics, setCancellingLyrics] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const running = useRef<RunningSeparation | null>(null);
   const reading = useRef<RunningLyricsRead | null>(null);
   /**
@@ -196,7 +203,13 @@ export function useLibrary(): Library {
         await refresh();
 
         const title = record.title;
-        const run = startSeparation(decoded, (progress) => {
+        const run = await startSeparation(decoded, (progress) => {
+          if (progress.notice !== null) {
+            // Not a stage of this job: a backend was dropped and the job
+            // started again. Leave the progress panel as it was and say so.
+            setNotice(progress.notice);
+            return;
+          }
           setActive({
             key: item.key,
             title,
@@ -419,6 +432,10 @@ export function useLibrary(): Library {
     setError(null);
   }, []);
 
+  const dismissNotice = useCallback((): void => {
+    setNotice(null);
+  }, []);
+
   return {
     songs,
     loaded,
@@ -431,6 +448,7 @@ export function useLibrary(): Library {
     lyricsJob,
     cancellingLyrics,
     error,
+    notice,
     add,
     cancel,
     resumeKeyFor,
@@ -441,5 +459,6 @@ export function useLibrary(): Library {
     cancelLyrics,
     removeLyrics,
     dismissError,
+    dismissNotice,
   };
 }

@@ -1,3 +1,5 @@
+import { chooseBackend } from '../separation/backend-choice.ts';
+import type { BackendRequest } from '../separation/backend-policy.ts';
 import { TroubleError } from '../notices/notices.ts';
 import type { JobSource } from '../separation/job.ts';
 import type {
@@ -6,6 +8,7 @@ import type {
   SeparationResult,
   StartMessage,
 } from '../separation/protocol.ts';
+import { blockWebgpu } from '../separation/webgpu-memo.ts';
 
 /**
  * Taking a picked file through decode and separation. Both steps happen in
@@ -81,13 +84,21 @@ export interface RunningSeparation {
 /**
  * Hands the decoded audio to the separation worker and reports progress.
  *
- * WASM only: the WebGPU backend returns NaN for every value of this model's
- * chain, which M1 measured and the worker refuses to write.
+ * The backend comes from the policy: WebGPU where the adapter has shader-f16,
+ * WASM otherwise, and `?backend=` overrules it. Deciding needs an adapter, so
+ * starting a job is asynchronous.
+ *
+ * A WebGPU session that turns out to compute garbage is dropped by the worker
+ * after its first segment and the job finishes on WASM. That arrives as a
+ * progress message carrying a notice, which is also where this records that
+ * the rest of the session should stay off WebGPU.
  */
-export function startSeparation(
+export async function startSeparation(
   decoded: Decoded,
   onProgress: (progress: ProgressMessage) => void,
-): RunningSeparation {
+  backend: BackendRequest = 'auto',
+): Promise<RunningSeparation> {
+  const choice = await chooseBackend(location.search, backend);
   const worker = new Worker(new URL('../separation/separate.worker.ts', import.meta.url), {
     type: 'module',
   });
@@ -96,6 +107,9 @@ export function startSeparation(
     worker.addEventListener('message', (event: MessageEvent<SeparationMessage>) => {
       const message = event.data;
       if (message.kind === 'progress') {
+        if (message.notice !== null) {
+          blockWebgpu(message.stage);
+        }
         onProgress(message);
         return;
       }
@@ -119,7 +133,7 @@ export function startSeparation(
 
   const start: StartMessage = {
     kind: 'start',
-    backend: 'wasm',
+    backend: choice.backend,
     source: decoded.source,
     audio: { sampleRate: decoded.source.sampleRate, channels: decoded.channels },
     overlap: OVERLAP,

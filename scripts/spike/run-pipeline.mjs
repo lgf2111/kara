@@ -27,12 +27,16 @@
 // fixtures/generated/pipeline-results/<name>/, which is gitignored. They are
 // derived from your own file, so treat them the way you treat the original.
 //
-// Separation runs on WASM. The WebGPU backend returns NaN for every value of
-// this model's chain, so `--backend` accepts nothing else.
+// `--backend` is auto by default, which is the page's own policy: WebGPU when
+// the adapter has shader-f16, WASM otherwise. `--backend webgpu` and
+// `--backend wasm` force one. A WebGPU run that returns garbage is abandoned
+// after its first segment and finishes on WASM by itself, which the summary
+// reports as the backend actually used.
 //
-// Flags: --input <path>, --fixture <name>, --segments N (0 means the whole
-// track), --stems all|pair, --no-wav, --kill-after N, --stall S, --clear,
-// --inspect, --headed true, --port N, --label NAME, --opt LEVEL.
+// Flags: --input <path>, --fixture <name>, --backend auto|webgpu|wasm,
+// --segments N (0 means the whole track), --stems all|pair, --no-wav,
+// --kill-after N, --stall S, --clear, --inspect, --headed true, --port N,
+// --label NAME, --opt LEVEL.
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { freemem, loadavg, tmpdir, totalmem } from 'node:os';
@@ -352,6 +356,27 @@ function printSumErrors(errors, firstSegment) {
   }
 }
 
+/**
+ * Inference time per segment, which is the number that decides whether a
+ * backend is worth having. Median rather than mean: one stalled segment should
+ * not speak for the run.
+ *
+ * @param {number[]} segmentMs
+ */
+function printSegmentTimes(segmentMs) {
+  if (segmentMs.length === 0) {
+    console.log('per segment      not measured');
+    return;
+  }
+  const sorted = [...segmentMs].sort((a, b) => a - b);
+  const seconds = (/** @type {number} */ ms) => `${(ms / 1000).toFixed(2)}s`;
+  console.log(
+    `per segment      median ${seconds(sorted[Math.floor(sorted.length / 2)] ?? 0)}, min ${seconds(
+      sorted[0] ?? 0,
+    )}, max ${seconds(sorted[sorted.length - 1] ?? 0)} over ${String(sorted.length)} segment(s)`,
+  );
+}
+
 async function main() {
   mkdirSync(RESULTS_DIR, { recursive: true });
   mkdirSync(PROFILE_DIR, { recursive: true });
@@ -359,7 +384,7 @@ async function main() {
   const fixture = flag('fixture', 'tone-240s.wav');
   const inputFlag = flags.get('input');
   const inputPath = inputFlag === undefined ? null : resolve(inputFlag);
-  const backend = flag('backend', 'wasm');
+  const backend = flag('backend', 'auto');
   const stems = flag('stems', 'all');
   const segments = Number(flag('segments', '0'));
   const killAfter = Number(flag('kill-after', '0'));
@@ -370,10 +395,8 @@ async function main() {
   const outputName = outputNameFor(inputPath ?? fixture);
   const label = flag('label', killAfter > 0 ? 'killed' : inputPath === null ? 'run' : outputName);
 
-  if (backend !== 'wasm') {
-    throw new Error(
-      `--backend ${backend} is not available: WebGPU returns NaN for every value of this model's chain`,
-    );
+  if (!['auto', 'webgpu', 'wasm'].includes(backend)) {
+    throw new Error(`--backend takes auto, webgpu or wasm, got ${backend}`);
   }
   if (stems !== 'all' && stems !== 'pair') {
     throw new Error(`--stems takes all or pair, got ${stems}`);
@@ -462,7 +485,7 @@ async function main() {
     }
 
     const start = pressure();
-    console.log(`backend          ${backend}`);
+    console.log(`backend asked    ${backend}`);
     console.log(`stems            ${stems}`);
     console.log(`source           ${inputPath ?? `fixtures/generated/${fixture} (synthesised)`}`);
     console.log(`profile          ${PROFILE_DIR}`);
@@ -548,10 +571,18 @@ async function main() {
       console.log(`outcome          completed`);
       console.log(`job              ${String(result.jobId)}`);
       console.log(
+        `backend used     ${String(result.backend)}${
+          result.fellBackFrom === null || result.fellBackFrom === undefined
+            ? ''
+            : ` (${String(result.fellBackFrom)} was dropped mid-job)`
+        }`,
+      );
+      console.log(
         `segments         ${String(result.segmentsDone)}/${String(result.segmentsTotal)}, resumed from ${String(result.resumedFrom)}`,
       );
       console.log(`model load       ${(Number(result.loadMs) / 1000).toFixed(2)}s`);
       console.log(`inference        ${(Number(result.inferenceMs) / 1000).toFixed(1)}s`);
+      printSegmentTimes((result.segmentMs ?? []).map((/** @type {unknown} */ ms) => Number(ms)));
       console.log(`wall clock       ${(wallMs / 1000).toFixed(1)}s`);
       console.log(`audio written    ${Number(result.audioSeconds).toFixed(1)}s`);
       printSumErrors(
@@ -588,7 +619,10 @@ async function main() {
       );
     }
 
-    const target = `${RESULTS_DIR}/htdemucs-${backend}-${label}.json`;
+    // Named for the backend that did the work, not the one asked for, so an
+    // auto run and a forced run of the same backend land in the same place.
+    const used = result === null ? backend : String(result.backend);
+    const target = `${RESULTS_DIR}/htdemucs-${used}-${label}.json`;
     writeFileSync(
       target,
       `${JSON.stringify(

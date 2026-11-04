@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { chooseBackend } from './separation/backend-choice.ts';
+import type { BackendRequest } from './separation/backend-policy.ts';
 import { SEGMENT_SAMPLES } from './separation/htdemucs.ts';
 import { jobIdFor, jobPaths, planJob, type JobSource } from './separation/job.ts';
-import type {
-  Backend,
-  SeparationMessage,
-  SeparationResult,
-} from './separation/protocol.ts';
+import type { Backend, SeparationMessage, SeparationResult } from './separation/protocol.ts';
+import { blockWebgpu } from './separation/webgpu-memo.ts';
 import { createOpfsStore } from './storage/opfs-store.ts';
 
 /** The element the automation driver puts a local file into. */
@@ -19,7 +18,8 @@ interface Loaded {
 
 interface RunOptions {
   readonly url?: string;
-  readonly backend: Backend;
+  /** `auto` leaves it to the policy, which is what a person gets. */
+  readonly backend?: BackendRequest;
   readonly overlap: number;
   readonly maxSegments: number | null;
   readonly stems?: 'pair' | 'all';
@@ -32,6 +32,7 @@ interface Snapshot {
   readonly segmentsTotal: number;
   readonly etaMs: number | null;
   readonly resumedFrom: number;
+  readonly backend: Backend;
 }
 
 /**
@@ -111,12 +112,13 @@ function toBase64(bytes: Uint8Array): string {
 
 export function PipelineApp() {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
-  // WASM by default: the WebGPU backend returns NaN for every value of this
-  // model's chain, and the worker refuses to write those stems.
-  const [backend, setBackend] = useState<Backend>('wasm');
+  // The policy decides: WebGPU where the adapter has shader-f16, WASM
+  // otherwise. `?backend=wasm` overrules it for a measurement.
+  const [backend, setBackend] = useState<BackendRequest>('auto');
   const [segmentCap, setSegmentCap] = useState('0');
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [result, setResult] = useState<SeparationResult | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [storageBytes, setStorageBytes] = useState<number | null>(null);
@@ -136,7 +138,10 @@ export function PipelineApp() {
       setBusy(true);
       setError(null);
       setResult(null);
-      report('run-start', { backend: options.backend, maxSegments: options.maxSegments });
+      setNotice(null);
+      const choice = await chooseBackend(location.search, options.backend ?? 'auto');
+      report('backend-chosen', choice);
+      report('run-start', { backend: choice.backend, maxSegments: options.maxSegments });
 
       const child = new Worker(new URL('./separation/separate.worker.ts', import.meta.url), {
         type: 'module',
@@ -148,6 +153,14 @@ export function PipelineApp() {
         (resolve) => {
           child.addEventListener('message', (event: MessageEvent<SeparationMessage>) => {
             const message = event.data;
+            if (message.kind === 'progress' && message.notice !== null) {
+              // A backend was abandoned mid-job. Say so once, in a person's
+              // words, and remember it so the next song does not try again.
+              report(message.stage, { backend: message.backend });
+              blockWebgpu(message.stage);
+              setNotice(message.notice);
+              return;
+            }
             if (message.kind === 'progress') {
               report(message.stage, {
                 done: message.segmentsDone,
@@ -174,7 +187,7 @@ export function PipelineApp() {
           child.postMessage(
             {
               kind: 'start',
-              backend: options.backend,
+              backend: choice.backend,
               source: input.source,
               audio: { sampleRate: input.source.sampleRate, channels },
               overlap: options.overlap,
@@ -332,9 +345,13 @@ export function PipelineApp() {
         <h2>Run</h2>
         <label>
           Backend{' '}
-          <select value={backend} onChange={(event) => setBackend(event.target.value as Backend)}>
+          <select
+            value={backend}
+            onChange={(event) => setBackend(event.target.value as BackendRequest)}
+          >
+            <option value="auto">auto (webgpu where it works)</option>
+            <option value="webgpu">webgpu</option>
             <option value="wasm">wasm</option>
-            <option value="webgpu">webgpu (returns NaN for this model)</option>
           </select>
         </label>
         <label>
@@ -371,10 +388,18 @@ export function PipelineApp() {
         <section>
           <h2>Progress</h2>
           <p>
-            {snapshot.stage}: {snapshot.segmentsDone}/{snapshot.segmentsTotal}
+            {snapshot.stage} on {snapshot.backend}: {snapshot.segmentsDone}/
+            {snapshot.segmentsTotal}
             {snapshot.resumedFrom > 0 ? ` (resumed from ${snapshot.resumedFrom})` : ''}
           </p>
           <p>About {formatSeconds(snapshot.etaMs)} left</p>
+        </section>
+      )}
+
+      {notice !== null && (
+        <section>
+          <h2>Notice</h2>
+          <p className="warn">{notice}</p>
         </section>
       )}
 
@@ -391,6 +416,11 @@ export function PipelineApp() {
           <dl>
             <dt>Job</dt>
             <dd>{result.jobId}</dd>
+            <dt>Backend</dt>
+            <dd>
+              {result.backend}
+              {result.fellBackFrom === null ? '' : ` (after ${result.fellBackFrom} was dropped)`}
+            </dd>
             <dt>Segments</dt>
             <dd>
               {result.segmentsDone}/{result.segmentsTotal}

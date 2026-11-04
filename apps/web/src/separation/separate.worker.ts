@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 import * as ort from 'onnxruntime-web/webgpu';
 
+import { FALLBACK_NOTICE, FALLBACK_STAGE, checkSegment } from './backend-guard.ts';
 import {
   SEGMENT_SAMPLES,
   SOURCES,
@@ -21,6 +22,7 @@ import {
   saveJob,
   type JobState,
 } from './job.ts';
+import { patchNormalisationIslands } from './onnx-fp32-island.ts';
 import { createStitcher, type Stitcher } from './stitch.ts';
 import type {
   Backend,
@@ -66,6 +68,58 @@ function providers(backend: Backend, level: Optimisation): ort.InferenceSession.
     ? { executionProviders: [{ name: 'webgpu' }], graphOptimizationLevel: level }
     : { executionProviders: ['wasm'], graphOptimizationLevel: level };
 }
+
+/**
+ * One session per piece of the split model.
+ *
+ * WebGPU gets each piece with its float16 normalisation islands rebuilt in
+ * float32. Without that rewrite the fp16 `ReduceMean` over 2.75M elements
+ * divides by an element count that is not representable in half precision,
+ * returns exactly zero, and the normalisation then divides by its bare
+ * epsilon: the whole chain comes back as +-65000. docs/webgpu-bisect.md has
+ * the measurement. The rewrite is local and casts back at the island's edge,
+ * so the piece's inputs and outputs are the contract they were.
+ *
+ * WASM is loaded by URL instead, which lets ONNX Runtime fetch and keep the
+ * weights itself rather than routing 21 MiB per piece through this heap.
+ */
+async function createSessions(
+  manifest: SplitManifest,
+  backend: Backend,
+  level: Optimisation,
+  onPiece: (index: number) => void,
+): Promise<{ sessions: ort.InferenceSession[]; islands: number }> {
+  const options = providers(backend, level);
+  const sessions: ort.InferenceSession[] = [];
+  let islands = 0;
+
+  for (const [index, piece] of manifest.pieces.entries()) {
+    if (backend === 'webgpu') {
+      const response = await fetch(`${WEIGHTS}/${piece.file}`);
+      if (!response.ok) {
+        throw new Error(
+          `${piece.file} ${String(response.status)}: run scripts/spike/models.mjs fetch`,
+        );
+      }
+      const patch = patchNormalisationIslands(new Uint8Array(await response.arrayBuffer()));
+      islands += patch.islands.length;
+      sessions.push(await ort.InferenceSession.create(patch.bytes, options));
+    } else {
+      sessions.push(await ort.InferenceSession.create(`${WEIGHTS}/${piece.file}`, options));
+    }
+    onPiece(index);
+  }
+  return { sessions, islands };
+}
+
+/**
+ * What one attempt at a job came to. A backend that returns garbage is not a
+ * failure to report: it is an attempt that has to be made again elsewhere, and
+ * the guard sees to it that nothing was written before this is decided.
+ */
+type Attempt =
+  | { readonly outcome: 'result'; readonly result: SeparationResult }
+  | { readonly outcome: 'fallback'; readonly reason: string };
 
 /** The fp16 chain can hand back half-precision tensors. */
 function halfToFloat(half: number): number {
@@ -192,7 +246,11 @@ async function runChain(
   return { freq, time };
 }
 
-async function separate(request: StartMessage): Promise<SeparationResult> {
+async function separate(
+  request: StartMessage,
+  backend: Backend,
+  fellBackFrom: Backend | null = null,
+): Promise<Attempt> {
   const startedAt = performance.now();
   const store = createOpfsStore();
   const hostMs: Record<string, number> = {};
@@ -226,6 +284,8 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
     etaMs: null,
     resumedFrom: resume.from,
     stemSumError: null,
+    backend,
+    notice: null,
   });
 
   const total = request.maxSegments === null ? plan.total : Math.min(plan.total, request.maxSegments);
@@ -238,11 +298,7 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
   }
   const manifest = (await manifestResponse.json()) as SplitManifest;
   const optimisation = request.optimisation ?? 'all';
-  const sessions: ort.InferenceSession[] = [];
-  for (const [index, piece] of manifest.pieces.entries()) {
-    sessions.push(
-      await ort.InferenceSession.create(`${WEIGHTS}/${piece.file}`, providers(request.backend, optimisation)),
-    );
+  const loaded = await createSessions(manifest, backend, optimisation, (index) => {
     post({
       kind: 'progress',
       stage: 'loading model',
@@ -251,8 +307,12 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
       etaMs: null,
       resumedFrom: resume.from,
       stemSumError: null,
+      backend,
+      notice: null,
     });
-  }
+  });
+  const sessions = loaded.sessions;
+  diagnostics['fp32Islands'] = loaded.islands;
   const loadMs = performance.now() - loadStart;
 
   const host = createHtdemucsHost(SEGMENT_SAMPLES);
@@ -338,6 +398,10 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
   let stemSumError: number | null = null;
   const stemSumErrors: number[] = [];
   let cancelled = false;
+  /** Non-finite values in the model's outputs on the segment the guard sees. */
+  let outputNonFinite = 0;
+  let guarded = false;
+  let fallback: string | null = null;
 
   const persist = async (status: JobState['status']): Promise<void> => {
     for (const stem of stemStates) {
@@ -388,7 +452,7 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
     packMagnitude(magData, specLeftRe, specLeftIm, specRightRe, specRightIm, bins, frames);
     stage('spec', specAt);
 
-    if (Object.keys(diagnostics).length === 0) {
+    if (diagnostics['magNonFinite'] === undefined) {
       let badMag = 0;
       let magPeak = 0;
       for (let i = 0; i < magData.length; i += 1) {
@@ -456,16 +520,8 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
       diagnostics['timeNonFinite'] = badT;
       diagnostics['freqFirst'] = Number((x[0] ?? 0).toFixed(6));
       diagnostics['timeFirst'] = Number((xt[0] ?? 0).toFixed(6));
-
-      // A backend that miscompiles this graph returns NaN rather than failing.
-      // Writing those stems would fill the library with silence-shaped
-      // garbage, so stop here and name the backend.
-      if (badX > 0 || badT > 0) {
-        throw new Error(
-          `the ${request.backend} backend returned ${String(badX + badT)} non-finite values for ` +
-            `${String(diagnostics['firstBadPiece'] ?? 'an unknown piece')}; this model cannot be run on it`,
-        );
-      }
+      // Judged below, once the stem-sum error for this segment is known too.
+      outputNonFinite = badX + badT;
     }
 
     vocals.fill(0);
@@ -508,6 +564,22 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
       stemSumErrors.push(stemSumError);
     }
 
+    // The first segment of a run is the last moment at which nothing has been
+    // written, and a backend that miscompiles this graph miscompiles it on
+    // every segment. So this is where the backend is believed or dropped.
+    if (!guarded) {
+      guarded = true;
+      const decision = checkSegment(backend, { nonFinite: outputNonFinite, stemSumError });
+      diagnostics['guard'] = decision.action;
+      if (decision.action === 'fall-back-to-wasm') {
+        fallback = decision.reason;
+        break;
+      }
+      if (decision.action === 'stop') {
+        throw new Error(decision.reason);
+      }
+    }
+
     const writeAt = performance.now();
     const isLast = index === total - 1;
     let releasedFrames = 0;
@@ -535,6 +607,8 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
       etaMs: estimateRemainingMs(segmentMs, total - segmentsDone),
       resumedFrom: resume.from,
       stemSumError,
+      backend,
+      notice: null,
     });
   }
 
@@ -542,6 +616,9 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
     await persist('cancelled');
   }
 
+  // Closed before anything else can happen: a sync access handle holds an
+  // exclusive lock, so a retry on another backend cannot reopen these stems
+  // until this attempt has let them go.
   const stems: StemFile[] = [];
   for (const stem of stemStates) {
     const bytes = stem.file.size();
@@ -553,22 +630,31 @@ async function separate(request: StartMessage): Promise<SeparationResult> {
     await session.release();
   }
 
+  if (fallback !== null) {
+    return { outcome: 'fallback', reason: fallback };
+  }
+
   return {
-    jobId,
-    backend: request.backend,
-    resumedFrom: resume.from,
-    segmentsDone,
-    segmentsTotal: total,
-    loadMs,
-    inferenceMs,
-    hostMs,
-    totalMs: performance.now() - startedAt,
-    audioSeconds: samplesWritten / source.sampleRate,
-    samplesWritten,
-    stems,
-    stemSumError,
-    stemSumErrors,
-    diagnostics,
+    outcome: 'result',
+    result: {
+      jobId,
+      backend,
+      fellBackFrom,
+      resumedFrom: resume.from,
+      segmentsDone,
+      segmentsTotal: total,
+      loadMs,
+      inferenceMs,
+      segmentMs,
+      hostMs,
+      totalMs: performance.now() - startedAt,
+      audioSeconds: samplesWritten / source.sampleRate,
+      samplesWritten,
+      stems,
+      stemSumError,
+      stemSumErrors,
+      diagnostics,
+    },
   };
 }
 
@@ -580,8 +666,36 @@ self.addEventListener('message', (event: MessageEvent<SeparationRequest>) => {
   }
   void (async () => {
     try {
-      const result = await separate(request);
-      post(cancelRequested ? { kind: 'cancelled', result } : { kind: 'done', result });
+      const finish = (result: SeparationResult): void => {
+        post(cancelRequested ? { kind: 'cancelled', result } : { kind: 'done', result });
+      };
+
+      const first = await separate(request, request.backend);
+      if (first.outcome === 'result') {
+        finish(first.result);
+        return;
+      }
+
+      // The guard runs before the first segment is released, so WebGPU wrote
+      // nothing and the same job can start again on WASM from the same place.
+      // One retry only: WASM has nothing to fall back to, so a guard failure
+      // there is a failure.
+      post({
+        kind: 'progress',
+        stage: `${FALLBACK_STAGE}: ${first.reason}`,
+        segmentsDone: 0,
+        segmentsTotal: 0,
+        etaMs: null,
+        resumedFrom: 0,
+        stemSumError: null,
+        backend: 'wasm',
+        notice: FALLBACK_NOTICE,
+      });
+      const second = await separate(request, 'wasm', request.backend);
+      if (second.outcome !== 'result') {
+        throw new Error(second.reason);
+      }
+      finish(second.result);
     } catch (error) {
       post({
         kind: 'failed',
