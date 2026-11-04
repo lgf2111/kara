@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
 
@@ -116,8 +117,10 @@ const hfOrtDist = require
   .replace(/\/[^/]+$/u, '');
 
 export default defineConfig({
+  resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
   plugins: [
     react(),
+    tailwindcss(),
     devRoutes(),
     // Weights live at a same-origin path, which is the arrangement M1 chose:
     // production will serve /weights/* from R2 behind the same host, so no CSP

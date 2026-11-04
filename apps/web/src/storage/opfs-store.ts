@@ -1,39 +1,53 @@
+import { directoryFor } from './opfs-paths.ts';
+import { NO_WRITER, abilitiesHere, writeRouteFor } from './opfs-support.ts';
+import { writeWithStream, writeWithSyncAccess } from './opfs-write.ts';
+import { writeInWorker } from './opfs-writer.ts';
 import type { AppendableFile, Store } from './store.ts';
 
 /**
  * The OPFS implementation of {@link Store}. Kept apart from the interface and
  * the in-memory store so that tests, which run in Node, never pull the
  * filesystem API types into their program.
+ *
+ * Every write goes through {@link writeWhole} rather than straight to a
+ * stream. Safari has no `createWritable` on these files, so writing from the
+ * page there means handing the bytes to a worker; writing it inline worked in
+ * Chrome and failed silently in Safari, which is the bug this routing exists
+ * to close.
  */
 
-async function directoryFor(
-  path: string,
-  create: boolean,
-): Promise<[FileSystemDirectoryHandle, string]> {
-  const parts = path.split('/').filter((part) => part.length > 0);
-  const name = parts.pop();
-  if (name === undefined) {
-    throw new Error(`not a file path: ${path}`);
+/** One file replaced, by whichever writer this context has. */
+async function writeWhole(path: string, blob: Blob): Promise<void> {
+  switch (writeRouteFor(abilitiesHere())) {
+    case 'sync-access-here':
+      return writeWithSyncAccess(path, blob);
+    case 'writable-stream':
+      return writeWithStream(path, blob);
+    case 'sync-access-worker':
+      return writeInWorker(path, blob);
+    case 'none':
+      throw new Error(NO_WRITER);
   }
-  let directory = await navigator.storage.getDirectory();
-  for (const part of parts) {
-    directory = await directory.getDirectoryHandle(part, { create });
-  }
-  return [directory, name];
 }
 
 /**
  * Appends through a sync access handle, which is worker-only and writes
  * through rather than buffering.
  *
- * `createWritable` would be wrong here: it stages everything in a swap file
- * and only commits when the stream closes, so killing the tab mid-job loses
- * every byte written since the stream opened. A resumable job needs each
- * segment to be durable the moment it is written, which is what flush() gives.
- * The handle holds an exclusive lock, so the page cannot read a stem until the
- * job closes it.
+ * `createWritable` would be wrong here even where it exists: it stages
+ * everything in a swap file and only commits when the stream closes, so
+ * killing the tab mid-job loses every byte written since the stream opened. A
+ * resumable job needs each segment to be durable the moment it is written,
+ * which is what flush() gives. The handle holds an exclusive lock, so the
+ * page cannot read a stem until the job closes it.
  */
 async function openAppend(path: string): Promise<AppendableFile> {
+  if (!abilitiesHere().syncAccess) {
+    // Only the separation worker appends, and it is a dedicated worker in
+    // every browser this runs in. Reaching here means somebody moved that
+    // call to the page, where no browser allows it.
+    throw new Error(`${path} can only be appended to from a dedicated worker`);
+  }
   const [directory, name] = await directoryFor(path, true);
   const handle = await directory.getFileHandle(name, { create: true });
   const access = await handle.createSyncAccessHandle();
@@ -87,12 +101,8 @@ export function createOpfsStore(): Store {
         return null;
       }
     },
-    async writeJson(path, value) {
-      const [directory, name] = await directoryFor(path, true);
-      const handle = await directory.getFileHandle(name, { create: true });
-      const stream = await handle.createWritable({ keepExistingData: false });
-      await stream.write(JSON.stringify(value));
-      await stream.close();
+    writeJson(path, value) {
+      return writeWhole(path, new Blob([JSON.stringify(value)]));
     },
     async readFloat32(path) {
       try {
@@ -103,21 +113,12 @@ export function createOpfsStore(): Store {
         return null;
       }
     },
-    async writeFloat32(path, data) {
-      const [directory, name] = await directoryFor(path, true);
-      const handle = await directory.getFileHandle(name, { create: true });
-      const stream = await handle.createWritable({ keepExistingData: false });
-      await stream.write(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
-      await stream.close();
+    writeFloat32(path, data) {
+      const view = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      return writeWhole(path, new Blob([view]));
     },
-    async writeBlob(path, blob) {
-      const [directory, name] = await directoryFor(path, true);
-      const handle = await directory.getFileHandle(name, { create: true });
-      const stream = await handle.createWritable({ keepExistingData: false });
-      // Handing the blob straight to the stream copies it on the browser's
-      // side, so the bytes never pass through this heap.
-      await stream.write(blob);
-      await stream.close();
+    writeBlob(path, blob) {
+      return writeWhole(path, blob);
     },
     async readBlob(path) {
       try {

@@ -1,3 +1,19 @@
+import type { ReactNode } from 'react';
+import {
+  Maximize,
+  Minimize,
+  Pause,
+  Play,
+  SkipBack,
+  SkipForward,
+  Volume2,
+  VolumeX,
+} from 'lucide-react';
+
+import { Button } from '@/components/ui/button';
+import { Slider } from '@/components/ui/slider';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { sliderNumber } from '@/lib/slider-value';
 import { SKIP_SECONDS, formatClock } from './time.ts';
 import type { Transport } from './transport.ts';
 
@@ -14,92 +30,128 @@ interface ControlsProps {
  * Every state it shows comes from the transport, so it holds none of its own
  * and cannot drift out of step with what is playing.
  */
+
+interface ActionProps {
+  /** Both the tooltip and the accessible name: one label, said once. */
+  readonly label: string;
+  readonly children: ReactNode;
+  readonly onClick: () => void;
+}
+
+/** An icon and its name, which a room on a phone reaches for with a thumb. */
+function Action({ label, children, onClick }: ActionProps) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            variant="ghost"
+            size="icon-lg"
+            aria-label={label}
+            className="size-11 text-white/85 hover:bg-white/10 hover:text-white sm:size-10"
+            onClick={onClick}
+          />
+        }
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function Controls({ transport }: ControlsProps) {
   const { currentSeconds, durationSeconds, muted, volume } = transport;
   const known = Number.isFinite(durationSeconds) && durationSeconds > 0;
+  const at = known ? Math.min(currentSeconds, durationSeconds) : 0;
+  const silent = muted || volume === 0;
 
   return (
-    <div className="controls">
-      <div className="seeking">
-        <span className="clock">{formatClock(currentSeconds)}</span>
-        <input
-          className="seek"
-          type="range"
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-3">
+        <span className="flex-none text-xs tabular-nums text-white/60">
+          {formatClock(currentSeconds)}
+        </span>
+        <Slider
+          className="min-w-20 flex-1"
+          thumbLabel="seek"
           min={0}
-          max={known ? durationSeconds : 0}
+          max={known ? durationSeconds : 1}
           step={0.1}
-          value={Math.min(currentSeconds, known ? durationSeconds : 0)}
+          value={[at]}
           disabled={!known}
-          aria-label="seek"
-          onChange={(event) => {
-            transport.seek(event.currentTarget.valueAsNumber);
+          onValueChange={(next) => {
+            transport.seek(sliderNumber(next));
           }}
         />
-        <span className="clock">{formatClock(durationSeconds)}</span>
+        <span className="flex-none text-xs tabular-nums text-white/60">
+          {formatClock(durationSeconds)}
+        </span>
       </div>
 
-      <div className="buttons">
-        <button
-          type="button"
-          className="play"
-          aria-label={transport.playing ? 'pause' : 'play'}
+      <div className="flex flex-wrap items-center gap-1">
+        <Action
+          label={transport.playing ? 'pause' : 'play'}
           onClick={() => {
             transport.toggle();
           }}
         >
-          {transport.playing ? 'pause' : 'play'}
-        </button>
-        <button
-          type="button"
-          aria-label={`back ${String(SKIP_SECONDS)} seconds`}
+          {transport.playing ? (
+            <Pause className="size-5" aria-hidden="true" />
+          ) : (
+            <Play className="size-5" aria-hidden="true" />
+          )}
+        </Action>
+        <Action
+          label={`back ${String(SKIP_SECONDS)} seconds`}
           onClick={() => {
             transport.skip(-SKIP_SECONDS);
           }}
         >
-          -{SKIP_SECONDS}s
-        </button>
-        <button
-          type="button"
-          aria-label={`forward ${String(SKIP_SECONDS)} seconds`}
+          <SkipBack aria-hidden="true" />
+        </Action>
+        <Action
+          label={`forward ${String(SKIP_SECONDS)} seconds`}
           onClick={() => {
             transport.skip(SKIP_SECONDS);
           }}
         >
-          +{SKIP_SECONDS}s
-        </button>
+          <SkipForward aria-hidden="true" />
+        </Action>
 
-        <span className="spacer" />
+        <span className="flex-1" />
 
-        <button
-          type="button"
-          aria-label={muted ? 'unmute' : 'mute'}
+        <Action
+          label={muted ? 'unmute' : 'mute'}
           onClick={() => {
             transport.toggleMute();
           }}
         >
-          {muted || volume === 0 ? 'muted' : 'sound'}
-        </button>
-        <input
-          className="volume"
-          type="range"
+          {silent ? <VolumeX aria-hidden="true" /> : <Volume2 aria-hidden="true" />}
+        </Action>
+        <Slider
+          className="w-20 flex-none sm:w-28"
+          thumbLabel="volume"
           min={0}
           max={1}
           step={0.05}
-          value={muted ? 0 : volume}
-          aria-label="volume"
-          onChange={(event) => {
-            transport.setVolume(event.currentTarget.valueAsNumber);
+          value={[muted ? 0 : volume]}
+          onValueChange={(next) => {
+            transport.setVolume(sliderNumber(next));
           }}
         />
-        <button
-          type="button"
-          aria-label={transport.fullscreen ? 'leave fullscreen' : 'fullscreen'}
+        <Action
+          label={transport.fullscreen ? 'leave fullscreen' : 'fullscreen'}
           onClick={() => {
             transport.toggleFullscreen();
           }}
         >
-          {transport.fullscreen ? 'exit' : 'full'}
-        </button>
+          {transport.fullscreen ? (
+            <Minimize aria-hidden="true" />
+          ) : (
+            <Maximize aria-hidden="true" />
+          )}
+        </Action>
       </div>
     </div>
   );
