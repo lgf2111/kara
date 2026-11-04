@@ -35,11 +35,16 @@ export interface SongRecord {
   readonly sourceKind: SourceKind;
   readonly status: SongStatus;
   /**
-   * OPFS directory holding this song's stems, its job state and, for a video,
-   * its own bytes. Removing it removes everything the song owns.
+   * OPFS directory holding this song's stems, its job state and the bytes of
+   * the file it came from. Removing it removes everything the song owns.
    */
   readonly stemsDirectory: string;
-  /** Where a video's own bytes are kept for the room background, else null. */
+  /**
+   * Where the file the person picked is kept, which is what the stage plays:
+   * a video's picture and sound, or an audio file as it arrived. Null only for
+   * a song added before audio sources were kept, whose stems are the only
+   * copy of it on this device.
+   */
   readonly sourcePath: string | null;
   readonly createdAt: string;
   /**
@@ -97,10 +102,10 @@ export function titleFromFileName(fileName: string): string {
 /**
  * Whether there is anything to play.
  *
- * A kept video plays whatever its stems are doing, picture, own sound and
- * all. A song that came in as audio kept no file, so its stems are the only
- * copy of it on this device and there is nothing to play until they are
- * finished.
+ * A kept file plays as it stands, from the moment it is in and whatever
+ * separation is doing. A song added before audio sources were kept has no
+ * file of its own, so its stems are the only copy of it here and there is
+ * nothing to play until they are finished.
  */
 export function canPlay(song: SongRecord): boolean {
   return song.sourcePath !== null || song.status === 'ready';

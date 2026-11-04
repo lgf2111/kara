@@ -1,14 +1,13 @@
-import type { SongStatus } from '../library/songs.ts';
 import { clampVolume } from './time.ts';
 
 /**
- * The arithmetic behind playing a song's stems, against its own picture or,
- * for a song that has none, on their own. Kept away from Web Audio so it can
- * be tested without a browser.
+ * The arithmetic behind playing a song's stems, alongside the file it came
+ * from or, for a song that kept none, on their own. Kept away from Web Audio
+ * so it can be tested without a browser.
  *
- * Two clocks are involved and only one of them can be driven: the video
+ * Two clocks are involved and only one of them can be driven: the media
  * element keeps time, and a buffer source, once started, runs on the audio
- * device's clock. So the stems are started from wherever the video is and
+ * device's clock. So the stems are started from wherever the element is and
  * restarted when the two have come apart.
  */
 
@@ -33,22 +32,14 @@ export interface VocalChoice {
 }
 
 /**
- * Vocals out, no guide. This is a KTV room: someone else is about to sing the
- * part, and the fader is there for the verse they do not know.
- */
-export const DEFAULT_VOCAL_CHOICE: VocalChoice = { mode: 'instrumental', guidePercent: 0 };
-
-/**
- * What a song starts on before anyone in the room has said otherwise.
+ * What a song goes on as: itself.
  *
- * A song with no picture is nothing but its stems, and taking the voice out
- * of a song the moment it goes on reads as a fault rather than a feature when
- * there is nothing else to look at; the instrumental is one button away. A
- * song with its own picture gets the room default.
+ * Nothing waits for separation, so a song starts the instant its file is in,
+ * and at that moment there is nothing but the song as it arrived. Switching
+ * to the instrumental is the room's to ask for once it can be given, which is
+ * a button lighting up rather than a song changing under them.
  */
-export function defaultVocalChoice(hasOwnPicture: boolean): VocalChoice {
-  return hasOwnPicture ? DEFAULT_VOCAL_CHOICE : { mode: 'original', guidePercent: 0 };
-}
+export const ORIGINAL_CHOICE: VocalChoice = { mode: 'original', guidePercent: 0 };
 
 /** How far the stems have got towards being playable. */
 export type StemMixState = 'absent' | 'loading' | 'ready' | 'failed';
@@ -194,22 +185,4 @@ export function driftAction(
     return 'hold';
   }
   return Math.abs(videoSeconds - stemSeconds) > toleranceSeconds ? 'resync' : 'hold';
-}
-
-/**
- * Why a song cannot have its vocals taken out yet, or null when it can. The
- * player still plays either way: this is a line under the controls, not a
- * reason to stop.
- */
-export function vocalsUnavailableNote(status: SongStatus): string | null {
-  switch (status) {
-    case 'ready':
-      return null;
-    case 'separating':
-      return 'Taking the vocals out needs the song to finish separating. It is separating now.';
-    case 'cancelled':
-      return 'Taking the vocals out needs the song to finish separating. This one is paused: drop the same file in again to carry on.';
-    case 'failed':
-      return 'Taking the vocals out needs the song to finish separating. This one did not finish.';
-  }
 }

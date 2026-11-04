@@ -1,25 +1,99 @@
-.library {
-  max-width: 46rem;
-  margin: 0 auto;
-  padding: 3rem 1.25rem 5rem;
+/*
+  The library, which is a drawer over the stage rather than a page of its own.
+  A song keeps playing behind it.
+*/
+
+.drawer {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+  /* Out of reach of the keyboard when shut, but only once it has slid away. */
+  visibility: hidden;
+  transition: visibility 0s linear 220ms;
 }
 
-.library p {
+.drawer .scrim {
+  position: absolute;
+  inset: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  background: rgb(0 0 0 / 55%);
+  border: 0;
+  border-radius: 0;
+  opacity: 0;
+  transition: opacity 200ms ease;
+  cursor: pointer;
+}
+
+.drawer .panel {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(30rem, 100%);
+  padding: 1.25rem 1.25rem 3rem;
+  overflow-y: auto;
+  background: #15161a;
+  border-right: 1px solid #2c2e36;
+  transform: translateX(-100%);
+  transition: transform 220ms ease;
+}
+
+.drawer.open {
+  pointer-events: auto;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+.drawer.open .scrim {
+  opacity: 1;
+}
+
+.drawer.open .panel {
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer .scrim,
+  .drawer .panel {
+    transition: none;
+  }
+}
+
+.drawer header {
+  display: flex;
+  gap: 1rem;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.drawer header button {
+  margin: 0;
+}
+
+.drawer h1 {
+  font-size: 1.75rem;
+}
+
+.drawer p {
   margin: 0.25rem 0;
 }
 
-.library .note,
-.library .song-meta {
+.drawer .note,
+.drawer .song-meta {
   color: var(--ink-dim);
   font-size: 0.9rem;
 }
 
-.library .error {
+.drawer .error {
   color: #ff9f9f;
 }
 
-.library button {
+.drawer button {
   margin: 0.75rem 0 0;
+  min-height: 2.5rem;
   padding: 0.4rem 0.9rem;
   background: #2c2e36;
   color: inherit;
@@ -29,19 +103,21 @@
   cursor: pointer;
 }
 
-.library button:disabled {
+.drawer button:disabled {
   opacity: 0.5;
   cursor: default;
 }
 
-.library progress {
+.drawer progress {
   width: 100%;
   margin-top: 0.75rem;
 }
 
+/* The way in, here and on an empty stage. */
+
 .drop {
-  margin-top: 2rem;
-  padding: 1.5rem;
+  margin-top: 1.5rem;
+  padding: 1.25rem;
   border: 1px dashed #44464f;
   border-radius: 0.6rem;
 }
@@ -51,16 +127,79 @@
   background: #1b1d23;
 }
 
+.drop .ask {
+  margin: 0;
+  font-weight: 600;
+}
+
+/*
+  The file input itself is taken out of sight rather than hidden: the label is
+  the button, and the input still takes the focus ring and the keyboard.
+*/
 .drop .pick {
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  margin-top: 0.75rem;
+  padding: 0.4rem 1rem;
+  border: 1px solid #44464f;
+  border-radius: 0.4rem;
+  cursor: pointer;
+}
+
+.drop .pick:hover,
+.drop .pick:focus-within {
+  background: #2c2e36;
+  border-color: var(--ink);
+}
+
+.drop .pick input {
+  width: 0;
+  height: 0;
+  opacity: 0;
+}
+
+.drop .note {
   margin-top: 0.75rem;
   color: var(--ink-dim);
   font-size: 0.9rem;
 }
 
-.drop .note {
-  margin-top: 0.75rem;
+/* What is being analysed, and what is behind it. */
+
+.queue {
+  margin: 0.75rem 0 0;
+  padding: 0;
+  list-style: none;
 }
+
+.queue li {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  padding: 0.25rem 0;
+  font-size: 0.9rem;
+}
+
+.queue .place {
+  flex: none;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.queue .said {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.queue button {
+  margin: 0;
+  flex: none;
+}
+
+/* The songs. */
 
 .songs {
   margin: 0;
@@ -86,6 +225,13 @@
   font-weight: 600;
 }
 
+.song-actions {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
 .songs .lyrics {
   margin-top: 0.5rem;
 }
@@ -96,18 +242,6 @@
 
 .songs .lyrics button {
   margin-top: 0.35rem;
-}
-
-.library footer {
-  margin-top: 3rem;
-  padding-top: 1rem;
-  border-top: 1px solid #2c2e36;
-}
-.song-actions {
-  display: flex;
-  flex: none;
-  flex-direction: column;
-  gap: 0.4rem;
 }
 
 .songs .lyric-lines {
@@ -133,6 +267,7 @@
   display: flex;
   gap: 0.75rem;
   padding: 0.1rem 0;
+  border: 0;
   font-size: 0.9rem;
 }
 
@@ -142,238 +277,8 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The player. */
-
-.player {
-  max-width: 60rem;
-  margin: 0 auto;
-  padding: 1.5rem 1.25rem 4rem;
-}
-
-.player p {
-  margin: 0.25rem 0;
-}
-
-.player .note {
-  color: var(--ink-dim);
-  font-size: 0.9rem;
-}
-
-.player .error {
-  color: #ff9f9f;
-}
-
-.player h1 {
-  margin: 0.75rem 0 0;
-  font-size: 1.4rem;
-}
-
-.player button {
-  padding: 0.4rem 0.9rem;
-  background: #2c2e36;
-  color: inherit;
-  border: 1px solid #44464f;
-  border-radius: 0.3rem;
-  font: inherit;
-  cursor: pointer;
-}
-
-.player button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.player .back {
-  margin: 0;
-}
-
-.stage {
-  margin-top: 1rem;
-  background: #000;
-  border: 1px solid #2c2e36;
-  border-radius: 0.6rem;
-  overflow: hidden;
-}
-
-.stage video {
-  display: block;
-  width: 100%;
-  /* Letterboxed rather than cropped: a lyric video's words are at the edge. */
-  aspect-ratio: 16 / 9;
-  object-fit: contain;
-  background: #000;
-  cursor: pointer;
-}
-
-/* Fullscreen shows the picture and the bar, nothing else. */
-.stage:fullscreen {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  border: 0;
-  border-radius: 0;
-}
-
-.stage:fullscreen video {
-  flex: 1;
-  aspect-ratio: auto;
-  min-height: 0;
-}
-
-.controls {
-  padding: 0.75rem;
-  background: #16181d;
-}
-
-.controls .bar,
-.controls .buttons {
-  display: flex;
-  gap: 0.6rem;
-  align-items: center;
-}
-
-.controls .buttons {
-  margin-top: 0.6rem;
-  flex-wrap: wrap;
-}
-
-.controls .spacer {
-  flex: 1;
-}
-
-.controls .clock {
-  flex: none;
-  color: var(--ink-dim);
-  font-size: 0.9rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.controls .seek {
-  flex: 1;
-  min-width: 6rem;
-}
-
-.controls .volume {
-  flex: none;
-  width: 6rem;
-}
-
-.controls .play {
-  min-width: 5rem;
-}
-
-.controls .note {
-  margin-top: 0.6rem;
-}
-
-/* Vocals, under the controls and part of the same band. */
-
-.vocals {
-  padding: 0 0.75rem 0.75rem;
-  background: #16181d;
-}
-
-.vocals .row {
-  display: flex;
-  gap: 0.6rem;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.vocals .label {
-  flex: none;
-  color: var(--ink-dim);
-  font-size: 0.9rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.vocals button[aria-pressed='true'] {
-  background: #3a3d47;
-  border-color: var(--ink);
-}
-
-.vocals .spacer {
-  flex: 1;
-}
-
-.vocals .guide {
-  display: flex;
-  flex: none;
-  gap: 0.5rem;
-  align-items: center;
-  color: var(--ink-dim);
-  font-size: 0.9rem;
-}
-
-.vocals .guide input {
-  width: 7rem;
-}
-
-.vocals .percent {
-  flex: none;
-  min-width: 2.5rem;
-  color: var(--ink-dim);
-  font-size: 0.9rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.vocals .note,
-.vocals .error {
-  margin-top: 0.6rem;
-}
-
-/* The stage for a song with no picture of its own. */
-
-.stage.audio .art {
-  display: flex;
-  flex-direction: column;
-  gap: 1.25rem;
-  align-items: center;
-  justify-content: center;
-  padding: 2rem 1.25rem;
-  aspect-ratio: 16 / 9;
-  background: radial-gradient(circle at 50% 38%, #24272f, #0c0d11 72%);
-}
-
-.stage.audio .song {
-  max-width: 30rem;
-  margin: 0;
-  text-align: center;
-  font-size: 1.5rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.stage.audio .big {
-  min-width: 7rem;
-  padding: 0.6rem 1.4rem;
-  border-radius: 2rem;
-  font-size: 1.05rem;
-}
-
-.stage.audio .wave {
-  display: flex;
-  gap: 2px;
-  align-items: center;
-  width: min(34rem, 100%);
-  height: 4rem;
-}
-
-/* Heights come from the stem, so the row is set here and the bar is not. */
-.stage.audio .bar {
-  flex: 1;
-  min-height: 2px;
-  background: #3a3d47;
-  border-radius: 1px;
-}
-
-.stage.audio .bar.on {
-  background: var(--ink);
-}
-
-.stage.audio:fullscreen .art {
-  flex: 1;
-  aspect-ratio: auto;
-  min-height: 0;
+.drawer footer {
+  margin-top: 2.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #2c2e36;
 }

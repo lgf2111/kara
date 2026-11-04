@@ -1,0 +1,421 @@
+/*
+  The room: one stage filling the window, with everything else laid over it.
+
+  Nothing here is beside the picture. The bars sit on top, go away when the
+  room settles, and come back on the first sign of a hand.
+*/
+
+.room {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: #000;
+}
+
+.stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+}
+
+.stage:fullscreen {
+  width: 100vw;
+  height: 100vh;
+}
+
+/* The cursor is furniture too. */
+.stage.idle {
+  cursor: none;
+}
+
+.stage video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* Letterboxed rather than cropped: a lyric video's words are at the edge. */
+  object-fit: contain;
+  background: #000;
+  cursor: pointer;
+}
+
+.stage.idle video {
+  cursor: none;
+}
+
+/* A song with no picture of its own. */
+
+.stage .art {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 4.5rem 1.5rem;
+  background: radial-gradient(circle at 50% 42%, #24272f, #07080a 76%);
+}
+
+.stage .art .song {
+  max-width: 34rem;
+  margin: 0;
+  text-align: center;
+  font-size: clamp(1.4rem, 4vw, 2.4rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.stage .wave {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+  width: min(40rem, 100%);
+  height: 5rem;
+}
+
+/* Heights come from the stem, so the row is set here and the bar is not. */
+.stage .bar {
+  flex: 1;
+  min-height: 2px;
+  background: #3a3d47;
+  border-radius: 1px;
+}
+
+.stage .bar.on {
+  background: var(--ink);
+}
+
+/* Nothing on yet: the whole stage is the way in. */
+
+.stage.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: radial-gradient(circle at 50% 40%, #1d1f25, #07080a 78%);
+}
+
+.stage.empty .middle {
+  max-width: 30rem;
+  text-align: center;
+}
+
+.stage.empty .middle .song {
+  margin: 0 0 0.5rem;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.drop.whole {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  align-items: center;
+  justify-content: center;
+  width: min(42rem, 100%);
+  min-height: min(22rem, 60vh);
+  margin: 0;
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+  border-style: dashed;
+}
+
+.drop.whole .ask {
+  margin: 0;
+  font-size: clamp(1.1rem, 3vw, 1.6rem);
+  font-weight: 600;
+}
+
+.drop.whole .pick {
+  margin: 0;
+  font-weight: 600;
+}
+
+.drop.whole .note {
+  max-width: 28rem;
+  margin: 0;
+}
+
+/* The overlaid furniture. */
+
+.overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  transition: opacity 180ms ease;
+}
+
+.stage.idle .overlay {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.overlay.top {
+  top: 0;
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.75rem;
+  background: linear-gradient(to bottom, rgb(0 0 0 / 72%), transparent);
+}
+
+.overlay.top .now {
+  margin: 0;
+  overflow: hidden;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.overlay.bottom {
+  bottom: 0;
+  padding: 2.5rem 0.75rem 0.75rem;
+  background: linear-gradient(to top, rgb(0 0 0 / 82%), transparent);
+}
+
+.overlay.bottom .error {
+  margin: 0 0 0.5rem;
+  color: #ff9f9f;
+  font-size: 0.9rem;
+}
+
+/* Buttons and sliders, big enough for a thumb on a phone. */
+
+.room button {
+  min-height: 2.75rem;
+  padding: 0.4rem 0.9rem;
+  background: rgb(44 46 54 / 85%);
+  color: inherit;
+  border: 1px solid #44464f;
+  border-radius: 0.4rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.room button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.room button:hover:not(:disabled) {
+  background: rgb(66 69 80 / 90%);
+}
+
+.room input[type='range'] {
+  min-height: 2.75rem;
+  accent-color: var(--ink);
+  cursor: pointer;
+}
+
+.songs-open {
+  flex: none;
+}
+
+.stage.empty .songs-open {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+}
+
+/* The transport. */
+
+.controls .seeking,
+.controls .buttons {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.controls .buttons {
+  flex-wrap: wrap;
+}
+
+.controls .spacer {
+  flex: 1;
+}
+
+.controls .clock {
+  flex: none;
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.controls .seek {
+  flex: 1;
+  min-width: 5rem;
+}
+
+.controls .volume {
+  flex: none;
+  width: 6rem;
+}
+
+.controls .play {
+  min-width: 5rem;
+}
+
+/* Vocals, above the transport and part of the same band. */
+
+.vocals {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+
+.vocals .label {
+  flex: none;
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.vocals .pair {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.vocals button[aria-pressed='true']:not(:disabled) {
+  background: #3a3d47;
+  border-color: var(--ink);
+}
+
+.vocals .guide {
+  display: flex;
+  flex: none;
+  gap: 0.5rem;
+  align-items: center;
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+}
+
+.vocals .guide input {
+  width: 7rem;
+}
+
+.vocals .percent {
+  flex: none;
+  min-width: 2.5rem;
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.vocals .why {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 0.85rem;
+}
+
+/* Analysis, which outlasts the rest of the furniture. */
+
+.chip {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  z-index: 3;
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  max-width: min(26rem, calc(100% - 1.5rem));
+  padding: 0.35rem 0.5rem 0.35rem 0.7rem;
+  background: rgb(12 13 17 / 78%);
+  border: 1px solid #2c2e36;
+  border-radius: 2rem;
+  font-size: 0.85rem;
+  transition: opacity 180ms ease;
+}
+
+.chip.dim {
+  opacity: 0.32;
+}
+
+.chip .said {
+  overflow: hidden;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chip button {
+  min-height: 2rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 1rem;
+  font-size: 0.85rem;
+}
+
+.chip .dot {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  background: var(--ink-dim);
+  border-radius: 50%;
+}
+
+.chip .dot.running {
+  background: #8fd6a0;
+  animation: chip-pulse 1.6s ease-in-out infinite;
+}
+
+.chip .dot.failed {
+  background: #ff9f9f;
+}
+
+@keyframes chip-pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chip .dot.running {
+    animation: none;
+  }
+}
+
+.chip .meter {
+  flex: none;
+  width: 4rem;
+  height: 0.25rem;
+  overflow: hidden;
+  background: #2c2e36;
+  border-radius: 0.25rem;
+}
+
+.chip .fill {
+  display: block;
+  height: 100%;
+  background: var(--ink);
+}
+
+/* The instrumental saying it has arrived. */
+
+.toast {
+  position: absolute;
+  bottom: 7.5rem;
+  left: 50%;
+  z-index: 3;
+  margin: 0;
+  padding: 0.5rem 1rem;
+  background: rgb(12 13 17 / 88%);
+  border: 1px solid #44464f;
+  border-radius: 2rem;
+  transform: translateX(-50%);
+}
+
+@media (width <= 32rem) {
+  .vocals .guide input {
+    width: 5rem;
+  }
+
+  .controls .volume {
+    width: 4rem;
+  }
+}
