@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { createMemorySongStore, type SongRecord } from '../src/library/songs.ts';
 import {
   deleteSong,
+  mediaTypeFor,
   playableSource,
   songBytes,
   songSizes,
@@ -63,6 +64,23 @@ describe('videoTypeFor', () => {
   });
 });
 
+describe('mediaTypeFor', () => {
+  it('names an audio container too, now that audio files are kept', () => {
+    expect(mediaTypeFor('songs/x/source.mp3', 'audio')).toBe('audio/mpeg');
+    expect(mediaTypeFor('songs/x/source.FLAC', 'audio')).toBe('audio/flac');
+    expect(mediaTypeFor('songs/x/source.m4a', 'audio')).toBe('audio/mp4');
+  });
+
+  it('goes by the extension rather than what the record claims', () => {
+    expect(mediaTypeFor('songs/x/source.mp4', 'audio')).toBe('video/mp4');
+  });
+
+  it('falls back on the kind when the extension says nothing', () => {
+    expect(mediaTypeFor('songs/x/source', 'audio')).toBe('audio/mpeg');
+    expect(mediaTypeFor('songs/x/source', 'video')).toBe('video/mp4');
+  });
+});
+
 describe('sourceBlob', () => {
   const path = 'songs/a/source.mp4';
 
@@ -105,6 +123,16 @@ describe('playableSource', () => {
     expect(blob.type).toBe('video/quicktime');
     expect(blob.size).toBe(30);
     expect(new Uint8Array(await blob.arrayBuffer())).toEqual(bytes);
+  });
+
+  it('labels a kept audio file for an audio element', async () => {
+    const store = createMemoryStore();
+    await store.writeBlob('songs/a/source.mp3', new Blob([new Uint8Array(12)]));
+
+    const blob = await playableSource(store, 'songs/a/source.mp3', 'audio');
+
+    expect(blob.type).toBe('audio/mpeg');
+    expect(blob.size).toBe(12);
   });
 
   it('says so when the kept file is gone', async () => {

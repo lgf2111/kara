@@ -1,5 +1,5 @@
 import type { Store } from '../storage/store.ts';
-import type { SongRecord, SongStore } from './songs.ts';
+import type { SongRecord, SongStore, SourceKind } from './songs.ts';
 
 /**
  * What the library occupies, and how a song is taken away again. Browser-free
@@ -7,29 +7,48 @@ import type { SongRecord, SongStore } from './songs.ts';
  * against the in-memory store.
  */
 
-/** Where a video's own bytes are kept, inside the directory the job owns. */
+/** Where a song's own bytes are kept, inside the directory the job owns. */
 export function sourcePathFor(directory: string, fileName: string): string {
   const match = /\.[a-z0-9]{1,5}$/iu.exec(fileName);
   return `${directory}/source${match === null ? '' : match[0].toLowerCase()}`;
 }
 
 /**
- * Containers whose type a video element wants told. The browser sniffs the
+ * Containers whose type a media element wants told. The browser sniffs the
  * bytes too, but a blob with no type at all is refused outright, and the
  * record keeps the extension rather than the type the file arrived with.
  */
-const VIDEO_TYPES = new Map([
+const MEDIA_TYPES = new Map([
   ['mp4', 'video/mp4'],
   ['m4v', 'video/mp4'],
   ['mov', 'video/quicktime'],
   ['mkv', 'video/x-matroska'],
   ['webm', 'video/webm'],
   ['avi', 'video/x-msvideo'],
+  ['mp3', 'audio/mpeg'],
+  ['m4a', 'audio/mp4'],
+  ['aac', 'audio/aac'],
+  ['flac', 'audio/flac'],
+  ['wav', 'audio/wav'],
+  ['aiff', 'audio/aiff'],
+  ['ogg', 'audio/ogg'],
+  ['oga', 'audio/ogg'],
+  ['opus', 'audio/ogg'],
 ]);
 
-export function videoTypeFor(path: string): string {
+/**
+ * The type to label a kept file with. An extension nobody recognises falls
+ * back on the kind the record says it is, which is enough for the element to
+ * agree to sniff the bytes.
+ */
+export function mediaTypeFor(path: string, kind: SourceKind = 'video'): string {
   const extension = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
-  return VIDEO_TYPES.get(extension) ?? 'video/mp4';
+  return MEDIA_TYPES.get(extension) ?? (kind === 'audio' ? 'audio/mpeg' : 'video/mp4');
+}
+
+/** The same, for a path known to hold a video. */
+export function videoTypeFor(path: string): string {
+  return mediaTypeFor(path, 'video');
 }
 
 /** Read in pieces this big, so a long video is never one allocation. */
@@ -70,19 +89,23 @@ export async function sourceBlob(
  *
  * Unlike {@link sourceBlob} this never reads a byte: the store hands back a
  * handle to what is on disk, and `slice` relabels it without copying, so the
- * player can hold a whole video open for nothing. Use the chunked read only
+ * player can hold a whole song open for nothing. Use the chunked read only
  * where the bytes themselves are needed.
  */
-export async function playableSource(store: Store, path: string): Promise<Blob> {
+export async function playableSource(
+  store: Store,
+  path: string,
+  kind: SourceKind = 'video',
+): Promise<Blob> {
   const blob = await store.readBlob(path);
   if (blob === null) {
     throw new Error(`the file kept for this song is gone from ${path}`);
   }
-  return blob.slice(0, blob.size, videoTypeFor(path));
+  return blob.slice(0, blob.size, mediaTypeFor(path, kind));
 }
 
 /**
- * Bytes one song occupies: its stems, its job state and any kept source.
+ * Bytes one song occupies: its stems, its job state and its kept source.
  *
  * A stem being written is locked by the worker, so while a job runs its size
  * reads as nothing. The figure settles once the job closes its files.

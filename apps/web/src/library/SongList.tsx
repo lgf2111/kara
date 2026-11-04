@@ -43,9 +43,9 @@ export function SongList({
             <p className="song-title">{song.title}</p>
             <p className="song-meta">
               {formatDuration(song.durationMs)} · {describeStatus(song.status)} ·{' '}
-              {formatBytes(sizes.get(song.id) ?? 0)} of stems · {formatBytes(song.sourceBytes)}{' '}
+              {formatBytes(sizes.get(song.id) ?? 0)} on this device · {formatBytes(song.sourceBytes)}{' '}
               {song.sourceKind} file
-              {song.sourcePath === null ? '' : ', kept as the background'}
+              {song.sourcePath === null ? ', stems only' : ', kept as it arrived'}
             </p>
             <LyricsActions
               song={song}
@@ -58,7 +58,7 @@ export function SongList({
             />
           </div>
           <div className="song-actions">
-            {/* A kept picture plays on its own; stems play on a stage of their own. */}
+            {/* A kept file plays as it stands; stems play on a stage of their own. */}
             {canPlay(song) && (
               <button
                 type="button"

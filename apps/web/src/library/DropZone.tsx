@@ -1,23 +1,27 @@
 import { useState, type ChangeEvent, type DragEvent } from 'react';
 
 interface DropZoneProps {
-  readonly busy: boolean;
-  readonly onFile: (file: File) => void;
+  readonly onFiles: (files: readonly File[]) => void;
+  /** What it says for itself, which differs on the stage and in the drawer. */
+  readonly heading?: string;
+  /** Extra class, so the same target can be the whole stage or a block in a list. */
+  readonly className?: string;
 }
 
-/** Drop a file or pick one. There is no third way in by design. */
-export function DropZone({ busy, onFile }: DropZoneProps) {
+/** Drop files or pick them. There is no third way in by design. */
+export function DropZone({ onFiles, heading, className }: DropZoneProps) {
   const [over, setOver] = useState(false);
 
-  const take = (file: File | undefined): void => {
-    if (file !== undefined && !busy) {
-      onFile(file);
+  const take = (picked: FileList | null): void => {
+    const files = picked === null ? [] : [...picked];
+    if (files.length > 0) {
+      onFiles(files);
     }
   };
 
   return (
     <div
-      className={over ? 'drop over' : 'drop'}
+      className={`drop${className === undefined ? '' : ` ${className}`}${over ? ' over' : ''}`}
       onDragOver={(event: DragEvent<HTMLDivElement>) => {
         event.preventDefault();
         event.dataTransfer.dropEffect = 'copy';
@@ -29,27 +33,29 @@ export function DropZone({ busy, onFile }: DropZoneProps) {
       onDrop={(event: DragEvent<HTMLDivElement>) => {
         event.preventDefault();
         setOver(false);
-        take(event.dataTransfer.files[0]);
+        take(event.dataTransfer.files);
       }}
     >
-      <p>Drop an audio or video file you own here.</p>
+      <p className="ask">{heading ?? 'Drop a song you own, or choose a file.'}</p>
       <label className="pick">
-        or choose a file
+        choose a file
         <input
           type="file"
           accept="audio/*,video/*"
-          disabled={busy}
+          // Several at once queue up: one separation already takes the whole
+          // machine, so they are analysed in the order they arrived.
+          multiple
           onChange={(event: ChangeEvent<HTMLInputElement>) => {
-            take(event.target.files?.[0]);
+            take(event.target.files);
             // Cleared so picking the same file again still fires a change,
-            // which is how a paused song is carried on.
+            // which is how a stopped job is carried on.
             event.target.value = '';
           }}
         />
       </label>
       <p className="note">
-        The file is decoded and separated in this tab. It is never uploaded, and no link or search
-        can bring media in.
+        The file plays here and is separated here. It is never uploaded, and no link or search can
+        bring media in.
       </p>
     </div>
   );

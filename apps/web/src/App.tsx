@@ -1,32 +1,76 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
-import { DropZone } from './library/DropZone.tsx';
-import { SongList } from './library/SongList.tsx';
-import { describeStage, describeStorage, formatBytes, formatEta } from './library/format.ts';
+import { Drawer } from './library/Drawer.tsx';
 import type { SongRecord } from './library/songs.ts';
-import { totalBytes } from './library/storage.ts';
 import { useLibrary } from './library/useLibrary.ts';
-import { Player } from './player/Player.tsx';
-import { defaultVocalChoice, type VocalChoice } from './player/stem-mix.ts';
+import { Stage } from './player/Stage.tsx';
+import { stageAnalysis } from './player/analysis.ts';
+import { ORIGINAL_CHOICE, type VocalChoice } from './player/stem-mix.ts';
+import { usePlayback } from './player/usePlayback.ts';
 import { useSongRoute } from './player/useSongRoute.ts';
 
+/**
+ * Kara is a player with a library behind it, not a library with a player in
+ * it. The window is the stage: a song goes on the moment its file is in, and
+ * the list, the storage figures and the lyrics are all in a drawer over the
+ * top of it that shuts again.
+ */
 export function App() {
   const library = useLibrary();
   const route = useSongRoute();
-  // Above the player, so going back to the library and putting the next song
-  // on keeps the choice. A room sets this once an evening, not once a song.
-  // Null until someone sets it, because what a song should start on depends
-  // on whether it has a picture of its own.
-  const [vocals, setVocals] = useState<VocalChoice | null>(null);
-  const active = library.active;
-  const songCount = library.songs.length;
-  const playing =
-    route.songId === null ? null : (library.songs.find((song) => song.id === route.songId) ?? null);
+  const playback = usePlayback();
+  // Above the song, so putting the next one on keeps the choice. A room sets
+  // this once an evening, not once a song.
+  const [vocals, setVocals] = useState<VocalChoice>(ORIGINAL_CHOICE);
+  const [drawer, setDrawer] = useState(false);
+
+  const staged = playback.staged;
+  const stagedId = staged === null ? null : staged.songId;
+  const stagedSong =
+    stagedId === null ? null : (library.songs.find((song) => song.id === stagedId) ?? null);
+
+  // The hash is what survives a reload, so it decides which song is on unless
+  // somebody has just handed over a file, which has no record to name yet.
+  const routeSong =
+    route.songId === null
+      ? null
+      : (library.songs.find((song) => song.id === route.songId) ?? null);
+  const openSong = playback.openSong;
+  useEffect(() => {
+    if (routeSong !== null) {
+      openSong(routeSong);
+    }
+  }, [openSong, routeSong]);
+
+  const openFiles = (files: readonly File[]): void => {
+    const first = files[0];
+    if (first === undefined) {
+      return;
+    }
+    // Whatever the hash named, it is not this.
+    route.clear();
+    playback.openFile(first);
+    // Analysis of all of them, in the order they arrived, one at a time.
+    for (const file of files) {
+      library.add(file, (song, key) => {
+        // Only the one on the stage names itself in the address bar.
+        if (playback.identify(key, song.id)) {
+          route.openPlayer(song.id);
+        }
+      });
+    }
+    setDrawer(false);
+  };
 
   const askThenDelete = (song: SongRecord): void => {
-    if (confirm(`Delete ${song.title}? Its stems and anything kept with them go with it.`)) {
-      library.remove(song);
+    if (!confirm(`Delete ${song.title}? Its stems and anything kept with them go with it.`)) {
+      return;
     }
+    if (stagedId === song.id) {
+      playback.clear();
+      route.clear();
+    }
+    library.remove(song);
   };
 
   const askThenRemoveLyrics = (song: SongRecord): void => {
@@ -35,109 +79,58 @@ export function App() {
     }
   };
 
-  if (route.songId !== null) {
-    // The list arrives a moment after the first render, and a hash typed in or
-    // reloaded can name a song that has since been deleted.
-    if (playing === null) {
-      return (
-        <main className="player">
-          <button type="button" className="back" onClick={route.openLibrary}>
-            back to the library
-          </button>
-          <p className="note">
-            {library.loaded ? 'That song is not in this library.' : 'Looking for that song…'}
-          </p>
-        </main>
-      );
-    }
-    return (
-      <Player
-        song={playing}
-        onBack={route.openLibrary}
-        vocals={vocals ?? defaultVocalChoice(playing.sourcePath !== null)}
-        onVocals={setVocals}
-      />
-    );
-  }
+  const analysis = stageAnalysis({
+    status: stagedSong === null ? null : stagedSong.status,
+    job: library.active,
+    queue: library.queue,
+    key: staged === null ? null : staged.key,
+    songId: stagedId,
+  });
+  const resumeKey =
+    staged === null ? null : library.resumeKeyFor(staged.key, staged.songId);
+  const resumable = analysis.phase === 'paused' || analysis.phase === 'failed';
 
   return (
-    <main className="library">
-      <h1>Kara</h1>
-      <p className="tagline">Upload a song you own. Get a KTV room.</p>
-
-      <DropZone busy={active !== null || library.lyricsJob !== null} onFile={library.add} />
-
-      {library.error !== null && (
-        <section>
-          <h2>That did not work</h2>
-          <p className="error">{library.error}</p>
-        </section>
-      )}
-
-      {active !== null && (
-        <section>
-          <h2>Working</h2>
-          <p>
-            {active.title}: {describeStage(active.stage)}
-            {active.stage === 'separating' &&
-              ` ${String(active.segmentsDone)} of ${String(active.segmentsTotal)} segments`}
-            {active.resumedFrom > 0 && ` (carried on from segment ${String(active.resumedFrom)})`}
-          </p>
-          {active.stage === 'separating' && (
-            <>
-              <progress value={active.segmentsDone} max={Math.max(1, active.segmentsTotal)} />
-              <p className="note">About {formatEta(active.etaMs)} left</p>
-            </>
-          )}
-          <button type="button" disabled={library.cancelling} onClick={library.cancel}>
-            {library.cancelling ? 'cancelling' : 'cancel'}
-          </button>
-          <p className="note">
-            {library.cancelling
-              ? 'Stopping after the segment it is on.'
-              : 'Cancelling keeps what is done. Drop the same file again to carry on from there.'}
-          </p>
-        </section>
-      )}
-
-      <section>
-        <h2>Songs</h2>
-        <SongList
-          songs={library.songs}
-          sizes={library.sizes}
-          busy={active !== null}
-          lyricsJob={library.lyricsJob}
-          cancellingLyrics={library.cancellingLyrics}
-          onPlay={(song) => {
-            route.openPlayer(song.id);
+    <>
+      <main className="room">
+        <Stage
+          staged={staged}
+          song={stagedSong}
+          opening={playback.opening}
+          error={playback.error}
+          analysis={analysis}
+          vocals={vocals}
+          onVocals={setVocals}
+          onFiles={openFiles}
+          onOpenDrawer={() => {
+            setDrawer(true);
           }}
-          onDelete={askThenDelete}
-          onReadLyrics={library.readLyrics}
-          onCancelLyrics={library.cancelLyrics}
-          onRemoveLyrics={askThenRemoveLyrics}
+          shortcuts={!drawer}
+          onCancelAnalysis={analysis.phase === 'running' ? library.cancel : null}
+          onResumeAnalysis={
+            resumable && resumeKey !== null
+              ? () => {
+                  library.resume(resumeKey);
+                }
+              : null
+          }
         />
-      </section>
+      </main>
 
-      <section>
-        <h2>Storage</h2>
-        <p>
-          {formatBytes(totalBytes(library.sizes))} across {String(songCount)}{' '}
-          {songCount === 1 ? 'song' : 'songs'}, all of it on this device.
-        </p>
-        <p className="note">{describeStorage(library.usageBytes, library.quotaBytes)}</p>
-      </section>
-
-      <footer>
-        <p className="note">
-          Upload only, by design: there is no link import and no downloader. Your file is decoded
-          and separated in this tab, and what you share with a friend holds timings and settings,
-          never audio. Lyrics read off your own video stay on this device too.
-        </p>
-        <p className="note">
-          Cross-origin isolation: <strong>{crossOriginIsolated ? 'on' : 'off'}</strong>. Separation
-          needs it.
-        </p>
-      </footer>
-    </main>
+      <Drawer
+        open={drawer}
+        library={library}
+        onClose={() => {
+          setDrawer(false);
+        }}
+        onPlay={(song) => {
+          setDrawer(false);
+          route.openPlayer(song.id);
+        }}
+        onFiles={openFiles}
+        onDelete={askThenDelete}
+        onRemoveLyrics={askThenRemoveLyrics}
+      />
+    </>
   );
 }

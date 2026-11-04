@@ -1,10 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  DEFAULT_VOCAL_CHOICE,
+  ORIGINAL_CHOICE,
   STEM_SAMPLE_RATE,
   audioStemGains,
-  defaultVocalChoice,
   driftAction,
   frameCount,
   guideGain,
@@ -12,7 +11,6 @@ import {
   stemGains,
   stemPosition,
   stemSampleRate,
-  vocalsUnavailableNote,
   type VocalChoice,
 } from '../src/player/stem-mix.ts';
 
@@ -121,8 +119,8 @@ describe('stemGains', () => {
     });
   });
 
-  it('plays the backing alone by default', () => {
-    expect(stemGains(DEFAULT_VOCAL_CHOICE, 1, false)).toEqual({ instrumental: 1, vocals: 0 });
+  it('plays the backing alone with the guide right down', () => {
+    expect(stemGains(instrumental(0), 1, false)).toEqual({ instrumental: 1, vocals: 0 });
   });
 
   it('brings the voice back at the level asked for', () => {
@@ -179,13 +177,13 @@ describe('audioStemGains', () => {
   });
 });
 
-describe('defaultVocalChoice', () => {
-  it('leaves a song with its own picture on the room default', () => {
-    expect(defaultVocalChoice(true)).toEqual(DEFAULT_VOCAL_CHOICE);
+describe('ORIGINAL_CHOICE', () => {
+  it('is what a song goes on as: itself, with nothing to wait for', () => {
+    expect(ORIGINAL_CHOICE).toEqual({ mode: 'original', guidePercent: 0 });
   });
 
-  it('starts a song with no picture on the original', () => {
-    expect(defaultVocalChoice(false)).toEqual({ mode: 'original', guidePercent: 0 });
+  it('leaves the stems silent, so a song plays from its own file', () => {
+    expect(stemGains(ORIGINAL_CHOICE, 1, false)).toEqual({ instrumental: 0, vocals: 0 });
   });
 });
 
@@ -226,17 +224,5 @@ describe('driftAction', () => {
   it('leaves a time that is not there yet alone', () => {
     expect(driftAction(Number.NaN, 30)).toBe('hold');
     expect(driftAction(30, Number.NaN)).toBe('hold');
-  });
-});
-
-describe('vocalsUnavailableNote', () => {
-  it('says nothing for a song whose stems are there', () => {
-    expect(vocalsUnavailableNote('ready')).toBeNull();
-  });
-
-  it('explains what is missing without blaming the player', () => {
-    for (const status of ['separating', 'cancelled', 'failed'] as const) {
-      expect(vocalsUnavailableNote(status)).toMatch(/finish separating/u);
-    }
   });
 });
