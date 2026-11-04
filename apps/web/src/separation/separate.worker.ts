@@ -1,16 +1,6 @@
 /// <reference lib="webworker" />
-import * as ort from 'onnxruntime-web/webgpu';
-
 import { FALLBACK_NOTICE, FALLBACK_STAGE, checkSegment } from './backend-guard.ts';
-import {
-  SEGMENT_SAMPLES,
-  SOURCES,
-  VOCALS_INDEX,
-  createHtdemucsHost,
-  packMagnitude,
-  readStemSpectrum,
-  readStemWaveform,
-} from './htdemucs.ts';
+import { SEGMENT_SAMPLES, SOURCES } from './htdemucs.ts';
 import {
   JOB_SCHEMA,
   decideResume,
@@ -22,7 +12,8 @@ import {
   saveJob,
   type JobState,
 } from './job.ts';
-import { patchNormalisationIslands } from './onnx-fp32-island.ts';
+import type { SegmentRun } from './segment-contract.ts';
+import { MODEL_ID, createSegmentRunner } from './segment-runner.ts';
 import { createStitcher, type Stitcher } from './stitch.ts';
 import type {
   Backend,
@@ -38,107 +29,10 @@ import type {
 import { reasonText } from '../notices/notices.ts';
 import { createOpfsStore } from '../storage/opfs-store.ts';
 
-const MODEL_ID = 'htdemucs-web';
-const WEIGHTS = `/weights/${MODEL_ID}`;
-
-ort.env.wasm.wasmPaths = '/spike-ort/';
-ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 1);
-
-/**
- * The runtime's wasm is over the 25 MiB a Pages asset may be, so the deployed
- * site serves it gzipped and the bytes are handed to the runtime here. In dev
- * the plain file is served and the runtime fetches it itself.
- */
-let runtimeReady: Promise<void> | null = null;
-function prepareRuntime(): Promise<void> {
-  runtimeReady ??= (async () => {
-    if (!import.meta.env.PROD) {
-      return;
-    }
-    const response = await fetch('/spike-ort/ort-wasm-simd-threaded.asyncify.wasm.gz');
-    if (!response.ok) {
-      throw new Error(`the runtime could not be loaded (${String(response.status)})`);
-    }
-    const fetched = await response.arrayBuffer();
-    // A host that labels the file as gzip has already unzipped it by now.
-    const zipped = new Uint8Array(fetched, 0, 2);
-    const isGzip = zipped[0] === 0x1f && zipped[1] === 0x8b;
-    ort.env.wasm.wasmBinary = isGzip
-      ? await new Response(
-          new Blob([fetched]).stream().pipeThrough(new DecompressionStream('gzip')),
-        ).arrayBuffer()
-      : fetched;
-  })();
-  return runtimeReady;
-}
-
 let cancelRequested = false;
 
 function post(message: ProgressMessage | DoneMessage | CancelledMessage | FailedMessage): void {
   self.postMessage(message);
-}
-
-interface PieceSpec {
-  readonly file: string;
-  readonly inputs: readonly string[];
-  readonly outputs: readonly string[];
-}
-
-interface SplitManifest {
-  readonly pieces: readonly PieceSpec[];
-  readonly outputs: { readonly freq: string; readonly time: string };
-}
-
-type Optimisation = 'disabled' | 'basic' | 'extended' | 'all';
-
-function providers(backend: Backend, level: Optimisation): ort.InferenceSession.SessionOptions {
-  return backend === 'webgpu'
-    ? { executionProviders: [{ name: 'webgpu' }], graphOptimizationLevel: level }
-    : { executionProviders: ['wasm'], graphOptimizationLevel: level };
-}
-
-/**
- * One session per piece of the split model.
- *
- * WebGPU gets each piece with its float16 normalisation islands rebuilt in
- * float32. Without that rewrite the fp16 `ReduceMean` over 2.75M elements
- * divides by an element count that is not representable in half precision,
- * returns exactly zero, and the normalisation then divides by its bare
- * epsilon: the whole chain comes back as +-65000. docs/webgpu-bisect.md has
- * the measurement. The rewrite is local and casts back at the island's edge,
- * so the piece's inputs and outputs are the contract they were.
- *
- * WASM is loaded by URL instead, which lets ONNX Runtime fetch and keep the
- * weights itself rather than routing 21 MiB per piece through this heap.
- */
-async function createSessions(
-  manifest: SplitManifest,
-  backend: Backend,
-  level: Optimisation,
-  onPiece: (index: number) => void,
-): Promise<{ sessions: ort.InferenceSession[]; islands: number }> {
-  await prepareRuntime();
-  const options = providers(backend, level);
-  const sessions: ort.InferenceSession[] = [];
-  let islands = 0;
-
-  for (const [index, piece] of manifest.pieces.entries()) {
-    if (backend === 'webgpu') {
-      const response = await fetch(`${WEIGHTS}/${piece.file}`);
-      if (!response.ok) {
-        throw new Error(
-          `${piece.file} ${String(response.status)}: run scripts/spike/models.mjs fetch`,
-        );
-      }
-      const patch = patchNormalisationIslands(new Uint8Array(await response.arrayBuffer()));
-      islands += patch.islands.length;
-      sessions.push(await ort.InferenceSession.create(patch.bytes, options));
-    } else {
-      sessions.push(await ort.InferenceSession.create(`${WEIGHTS}/${piece.file}`, options));
-    }
-    onPiece(index);
-  }
-  return { sessions, islands };
 }
 
 /**
@@ -150,131 +44,6 @@ type Attempt =
   | { readonly outcome: 'result'; readonly result: SeparationResult }
   | { readonly outcome: 'fallback'; readonly reason: string };
 
-/** The fp16 chain can hand back half-precision tensors. */
-function halfToFloat(half: number): number {
-  const sign = (half & 0x8000) === 0 ? 1 : -1;
-  const exponent = (half & 0x7c00) >> 10;
-  const fraction = half & 0x03ff;
-  if (exponent === 0) {
-    return sign * 2 ** -14 * (fraction / 1024);
-  }
-  if (exponent === 0x1f) {
-    return fraction === 0 ? sign * Infinity : Number.NaN;
-  }
-  return sign * 2 ** (exponent - 15) * (1 + fraction / 1024);
-}
-
-function asFloat32(tensor: ort.Tensor, into: Float32Array): Float32Array {
-  const data = tensor.data as unknown;
-  if (data instanceof Float32Array) {
-    return data;
-  }
-  if (data instanceof Uint16Array) {
-    for (let i = 0; i < data.length; i += 1) {
-      into[i] = halfToFloat(data[i] ?? 0);
-    }
-    return into.subarray(0, data.length);
-  }
-  if (ArrayBuffer.isView(data) && 'length' in data) {
-    const view = data as unknown as { length: number; [index: number]: number };
-    for (let i = 0; i < view.length; i += 1) {
-      into[i] = Number(view[i] ?? 0);
-    }
-    return into.subarray(0, view.length);
-  }
-  throw new Error(`unexpected tensor data type: ${tensor.type}`);
-}
-
-/** Last piece index that reads each tensor, so intermediates free early. */
-function lastUse(pieces: readonly PieceSpec[]): Map<string, number> {
-  const last = new Map<string, number>();
-  pieces.forEach((piece, index) => {
-    for (const name of piece.inputs) {
-      last.set(name, index);
-    }
-  });
-  return last;
-}
-
-async function runChain(
-  sessions: readonly ort.InferenceSession[],
-  manifest: SplitManifest,
-  seed: Record<string, ort.Tensor>,
-  trace: Record<string, string | number> | null = null,
-): Promise<{ freq: ort.Tensor; time: ort.Tensor }> {
-  const live = new Map<string, ort.Tensor>(Object.entries(seed));
-  const release = lastUse(manifest.pieces);
-  const keep = new Set([manifest.outputs.freq, manifest.outputs.time]);
-
-  for (const [index, piece] of manifest.pieces.entries()) {
-    const session = sessions[index];
-    if (session === undefined) {
-      throw new Error(`missing session for piece ${piece.file}`);
-    }
-    const feeds: Record<string, ort.Tensor> = {};
-    for (const name of piece.inputs) {
-      const tensor = live.get(name);
-      if (tensor === undefined) {
-        throw new Error(`piece ${piece.file} wants ${name}, which no earlier piece produced`);
-      }
-      feeds[name] = tensor;
-    }
-
-    const outputs = await session.run(feeds);
-    for (const name of piece.outputs) {
-      const tensor = outputs[name];
-      if (tensor === undefined) {
-        throw new Error(`piece ${piece.file} did not return ${name}`);
-      }
-      live.set(name, tensor);
-    }
-
-    // On a traced segment, find the first piece whose output goes non-finite:
-    // that is where the chain breaks, and nothing after it is informative.
-    if (trace !== null && trace['firstBadPiece'] === undefined) {
-      for (const name of piece.outputs) {
-        const tensor = live.get(name);
-        const data = tensor?.data as unknown;
-        if (!(data instanceof Float32Array)) {
-          continue;
-        }
-        let bad = 0;
-        for (let i = 0; i < data.length; i += 1) {
-          if (!Number.isFinite(data[i] ?? 0)) {
-            bad += 1;
-          }
-        }
-        if (bad > 0) {
-          trace['firstBadPiece'] = piece.file;
-          trace['firstBadOutput'] = name;
-          trace['firstBadCount'] = bad;
-          trace['firstBadOf'] = data.length;
-          break;
-        }
-      }
-    }
-
-    for (const [name, tensor] of live) {
-      if (!keep.has(name) && (release.get(name) ?? Number.MAX_SAFE_INTEGER) <= index) {
-        tensor.dispose();
-        live.delete(name);
-      }
-    }
-  }
-
-  const freq = live.get(manifest.outputs.freq);
-  const time = live.get(manifest.outputs.time);
-  if (freq === undefined || time === undefined) {
-    throw new Error('the chain did not produce both branches');
-  }
-  for (const [name, tensor] of live) {
-    if (!keep.has(name)) {
-      tensor.dispose();
-    }
-  }
-  return { freq, time };
-}
-
 async function separate(
   request: StartMessage,
   backend: Backend,
@@ -284,8 +53,11 @@ async function separate(
   const store = createOpfsStore();
   const hostMs: Record<string, number> = {};
   const diagnostics: Record<string, string | number> = {};
+  const addStage = (name: string, ms: number): void => {
+    hostMs[name] = (hostMs[name] ?? 0) + ms;
+  };
   const stage = (name: string, since: number): void => {
-    hostMs[name] = (hostMs[name] ?? 0) + (performance.now() - since);
+    addStage(name, performance.now() - since);
   };
 
   const source = request.source;
@@ -321,72 +93,40 @@ async function separate(
 
   // Model first: a resume that cannot load the model should not touch stems.
   const loadStart = performance.now();
-  const manifestResponse = await fetch(`${WEIGHTS}/htdemucs_split_manifest.json`);
-  if (!manifestResponse.ok) {
-    throw new Error(`manifest ${String(manifestResponse.status)}: run scripts/spike/models.mjs fetch`);
-  }
-  const manifest = (await manifestResponse.json()) as SplitManifest;
-  const optimisation = request.optimisation ?? 'all';
-  const loaded = await createSessions(manifest, backend, optimisation, (index) => {
-    post({
-      kind: 'progress',
-      stage: 'loading model',
-      segmentsDone: index + 1,
-      segmentsTotal: manifest.pieces.length,
-      etaMs: null,
-      resumedFrom: resume.from,
-      stemSumError: null,
-      backend,
-      notice: null,
-    });
+  const runner = await createSegmentRunner({
+    backend,
+    optimisation: request.optimisation ?? 'all',
+    onPiece: (loaded, pieces) => {
+      post({
+        kind: 'progress',
+        stage: 'loading model',
+        segmentsDone: loaded,
+        segmentsTotal: pieces,
+        etaMs: null,
+        resumedFrom: resume.from,
+        stemSumError: null,
+        backend,
+        notice: null,
+      });
+    },
+    onStage: addStage,
   });
-  const sessions = loaded.sessions;
-  diagnostics['fp32Islands'] = loaded.islands;
+  diagnostics['fp32Islands'] = runner.islands;
   const loadMs = performance.now() - loadStart;
-
-  const host = createHtdemucsHost(SEGMENT_SAMPLES);
-  const { bins, frames } = host.framing;
-  const plane = bins * frames;
 
   const left = request.audio.channels[0] ?? new Float32Array(source.samples);
   const right = request.audio.channels[1] ?? left;
 
-  // Preallocated once; the segment loop allocates nothing.
-  const leftSlice = new Float32Array(SEGMENT_SAMPLES);
-  const rightSlice = new Float32Array(SEGMENT_SAMPLES);
-  const specLeftRe = new Float32Array(plane);
-  const specLeftIm = new Float32Array(plane);
-  const specRightRe = new Float32Array(plane);
-  const specRightIm = new Float32Array(plane);
-  const magData = new Float32Array(4 * plane);
-  const mixData = new Float32Array(2 * SEGMENT_SAMPLES);
-  const stemRe = new Float32Array(plane);
-  const stemIm = new Float32Array(plane);
-  const stemChannel = new Float32Array(SEGMENT_SAMPLES);
-  const freqScratch = new Float32Array(SOURCES.length * 4 * plane);
-  const timeScratch = new Float32Array(SOURCES.length * 2 * SEGMENT_SAMPLES);
-  const vocals = new Float32Array(SEGMENT_SAMPLES * 2);
-  const instrumental = new Float32Array(SEGMENT_SAMPLES * 2);
-
-  // Only in 'all' mode, and never for the vocal: `vocals` already holds the
-  // vocal alone, so a second buffer for it would be the same numbers twice.
-  const sourceBuffers = new Map<string, Float32Array>();
-  if (writeAllStems) {
-    for (const name of SOURCES) {
-      if (name !== 'vocals') {
-        sourceBuffers.set(name, new Float32Array(SEGMENT_SAMPLES * 2));
-      }
-    }
-  }
-
-  const freshFor = (name: string): Float32Array => {
+  /** Which of a run's buffers a stem file takes its samples from. */
+  const freshFor = (name: string, run: SegmentRun): Float32Array => {
     if (name === 'vocals') {
-      return vocals;
+      return run.vocals;
     }
     if (name === 'instrumental') {
-      return instrumental;
+      return run.instrumental;
     }
-    const buffer = sourceBuffers.get(name);
+    const index = SOURCES.findIndex((stem) => stem === name);
+    const buffer = index < 0 ? undefined : run.stems[index];
     if (buffer === undefined) {
       throw new Error(`no segment buffer for stem ${name}`);
     }
@@ -396,7 +136,6 @@ async function separate(
   interface StemState {
     readonly name: string;
     readonly file: Awaited<ReturnType<typeof store.openAppend>>;
-    readonly fresh: Float32Array;
     readonly stitcher: Stitcher;
   }
 
@@ -412,12 +151,7 @@ async function separate(
       }
       stitcher.restore(saved);
     }
-    stemStates.push({
-      name,
-      file,
-      fresh: freshFor(name),
-      stitcher,
-    });
+    stemStates.push({ name, file, stitcher });
   }
 
   const segmentMs: number[] = [];
@@ -427,8 +161,6 @@ async function separate(
   let stemSumError: number | null = null;
   const stemSumErrors: number[] = [];
   let cancelled = false;
-  /** Non-finite values in the model's outputs on the segment the guard sees. */
-  let outputNonFinite = 0;
   let guarded = false;
   let fallback: string | null = null;
 
@@ -459,136 +191,17 @@ async function separate(
     }
     const start = index * plan.stride;
 
-    const sliceAt = performance.now();
-    const copy = (channel: Float32Array, target: Float32Array): void => {
-      const available = Math.max(0, Math.min(target.length, channel.length - start));
-      if (available > 0) {
-        target.set(channel.subarray(start, start + available));
-      }
-      if (available < target.length) {
-        target.fill(0, available);
-      }
-    };
-    copy(left, leftSlice);
-    copy(right, rightSlice);
-    mixData.set(leftSlice, 0);
-    mixData.set(rightSlice, SEGMENT_SAMPLES);
-    stage('slice', sliceAt);
-
-    const specAt = performance.now();
-    host.spec(leftSlice, specLeftRe, specLeftIm);
-    host.spec(rightSlice, specRightRe, specRightIm);
-    packMagnitude(magData, specLeftRe, specLeftIm, specRightRe, specRightIm, bins, frames);
-    stage('spec', specAt);
-
-    if (diagnostics['magNonFinite'] === undefined) {
-      let badMag = 0;
-      let magPeak = 0;
-      for (let i = 0; i < magData.length; i += 1) {
-        const value = magData[i] ?? 0;
-        if (!Number.isFinite(value)) {
-          badMag += 1;
-        } else {
-          magPeak = Math.max(magPeak, Math.abs(value));
-        }
-      }
-      let badMix = 0;
-      let mixPeak = 0;
-      for (let i = 0; i < mixData.length; i += 1) {
-        const value = mixData[i] ?? 0;
-        if (!Number.isFinite(value)) {
-          badMix += 1;
-        } else {
-          mixPeak = Math.max(mixPeak, Math.abs(value));
-        }
-      }
-      diagnostics['magNonFinite'] = badMag;
-      diagnostics['magPeak'] = Number(magPeak.toFixed(6));
-      diagnostics['mixNonFinite'] = badMix;
-      diagnostics['mixPeak'] = Number(mixPeak.toFixed(6));
-    }
-
-    const mix = new ort.Tensor('float32', mixData, [1, 2, SEGMENT_SAMPLES]);
-    const mag = new ort.Tensor('float32', magData, [1, 4, bins, frames]);
-
-    const inferAt = performance.now();
-    const { freq, time } = await runChain(
-      sessions,
-      manifest,
-      { mix, mag },
+    // Past the end of the input the subarray comes back short and the runner
+    // zero-pads it, which is the padding demucs applies to a final chunk.
+    const run = await runner.run(
+      left.subarray(start, start + SEGMENT_SAMPLES),
+      right.subarray(start, start + SEGMENT_SAMPLES),
       index === resume.from ? diagnostics : null,
     );
-    const took = performance.now() - inferAt;
-    segmentMs.push(took);
-    inferenceMs += took;
-    mix.dispose();
-    mag.dispose();
+    segmentMs.push(run.inferenceMs);
+    inferenceMs += run.inferenceMs;
 
-    const combineAt = performance.now();
-    const x = asFloat32(freq, freqScratch);
-    const xt = asFloat32(time, timeScratch);
-
-    if (diagnostics['freqType'] === undefined) {
-      let badX = 0;
-      for (let i = 0; i < x.length; i += 1) {
-        if (!Number.isFinite(x[i] ?? 0)) {
-          badX += 1;
-        }
-      }
-      let badT = 0;
-      for (let i = 0; i < xt.length; i += 1) {
-        if (!Number.isFinite(xt[i] ?? 0)) {
-          badT += 1;
-        }
-      }
-      diagnostics['freqType'] = freq.type;
-      diagnostics['timeType'] = time.type;
-      diagnostics['freqLength'] = x.length;
-      diagnostics['timeLength'] = xt.length;
-      diagnostics['freqNonFinite'] = badX;
-      diagnostics['timeNonFinite'] = badT;
-      diagnostics['freqFirst'] = Number((x[0] ?? 0).toFixed(6));
-      diagnostics['timeFirst'] = Number((xt[0] ?? 0).toFixed(6));
-      // Judged below, once the stem-sum error for this segment is known too.
-      outputNonFinite = badX + badT;
-    }
-
-    vocals.fill(0);
-    instrumental.fill(0);
-    for (let stem = 0; stem < SOURCES.length; stem += 1) {
-      const summed = stem === VOCALS_INDEX ? vocals : instrumental;
-      const own = stem === VOCALS_INDEX ? undefined : sourceBuffers.get(SOURCES[stem] ?? '');
-      for (let channel = 0; channel < 2; channel += 1) {
-        readStemSpectrum(x, stem, channel, bins, frames, stemRe, stemIm);
-        host.ispec(stemRe, stemIm, stemChannel);
-        const branch = readStemWaveform(xt, stem, channel, SEGMENT_SAMPLES);
-        for (let i = 0; i < SEGMENT_SAMPLES; i += 1) {
-          const at = i * 2 + channel;
-          const value = (stemChannel[i] ?? 0) + (branch[i] ?? 0);
-          summed[at] = (summed[at] ?? 0) + value;
-          if (own !== undefined) {
-            // Written, not accumulated: this source owns the whole buffer.
-            own[at] = value;
-          }
-        }
-      }
-    }
-    freq.dispose();
-    time.dispose();
-    stage('combine', combineAt);
-
-    // Stems should add back up to the mixture: cac applies no mask.
-    let errorSum = 0;
-    let mixSum = 0;
-    for (let i = 0; i < SEGMENT_SAMPLES; i += 1) {
-      for (let channel = 0; channel < 2; channel += 1) {
-        const expected = channel === 0 ? (leftSlice[i] ?? 0) : (rightSlice[i] ?? 0);
-        const actual = (vocals[i * 2 + channel] ?? 0) + (instrumental[i * 2 + channel] ?? 0);
-        errorSum += (expected - actual) ** 2;
-        mixSum += expected ** 2;
-      }
-    }
-    stemSumError = mixSum > 0 ? Math.sqrt(errorSum / mixSum) : null;
+    stemSumError = run.stemSumError;
     if (stemSumError !== null) {
       stemSumErrors.push(stemSumError);
     }
@@ -598,7 +211,7 @@ async function separate(
     // every segment. So this is where the backend is believed or dropped.
     if (!guarded) {
       guarded = true;
-      const decision = checkSegment(backend, { nonFinite: outputNonFinite, stemSumError });
+      const decision = checkSegment(backend, { nonFinite: run.nonFinite, stemSumError });
       diagnostics['guard'] = decision.action;
       if (decision.action === 'fall-back-to-wasm') {
         fallback = decision.reason;
@@ -613,7 +226,7 @@ async function separate(
     const isLast = index === total - 1;
     let releasedFrames = 0;
     for (const stem of stemStates) {
-      const chunk = stem.stitcher.push(stem.fresh);
+      const chunk = stem.stitcher.push(freshFor(stem.name, run));
       if (chunk !== null) {
         await stem.file.append(chunk);
         releasedFrames = chunk.length / 2;
@@ -655,9 +268,7 @@ async function separate(
     stems.push({ name: stem.name, path: paths.stem(stem.name), bytes });
   }
 
-  for (const session of sessions) {
-    await session.release();
-  }
+  await runner.release();
 
   if (fallback !== null) {
     return { outcome: 'fallback', reason: fallback };
