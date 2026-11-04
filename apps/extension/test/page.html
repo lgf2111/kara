@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kara extension debug</title>
+    <style>
+      body {
+        margin: 2rem auto;
+        max-width: 48rem;
+        font: 14px/1.5 system-ui, sans-serif;
+      }
+      video {
+        width: 100%;
+        background: #111;
+      }
+      pre {
+        background: #f4f4f5;
+        padding: 0.75rem;
+        overflow-x: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Kara extension debug</h1>
+    <p>
+      The same audio pipeline the offscreen document runs, fed from a local fixture instead of
+      from <code>chrome.tabCapture</code>. Synthesise one with
+      <code>node scripts/spike/make-fixtures.mjs</code>; nothing is fetched and nothing leaves
+      this machine. The fixture plays undelayed, so the separated output arrives on top of it
+      about sixteen seconds later.
+    </p>
+    <video id="video" controls playsinline></video>
+    <p>
+      <button id="start" type="button">Start</button>
+      <button id="mode" type="button">Switch mode</button>
+      <button id="reset" type="button">Reset</button>
+      <button id="stop" type="button">Stop</button>
+    </p>
+    <p id="status">idle</p>
+    <pre id="metrics"></pre>
+    <script type="module" src="/src/debug-page.ts"></script>
+  </body>
+</html>
