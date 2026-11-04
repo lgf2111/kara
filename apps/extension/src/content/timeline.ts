@@ -56,6 +56,22 @@ export function expectedMediaSeconds(from: TimelinePoint, wallMs: number): numbe
  * Whether the video is somewhere nobody played it to, which is what a seek is
  * and what every other reason for a `seeking` event is not.
  *
+ * **The test is directional, and that is the repair.** It used to be the
+ * distance from where the clock should have got to, either way, which made a
+ * buffering stall indistinguishable from a seek: a video that plays for two
+ * seconds of wall time and advances by nothing is two seconds short of
+ * expected, so a connection having a bad minute read as a scrub every time and
+ * cost the whole delay for it. But falling behind and being somewhere else are
+ * not the same thing. A stall can leave the clock anywhere between where it
+ * was and where it was going; it can never put it past where it was going, and
+ * it can never move it backwards. So those two are the seek:
+ *
+ * - ahead of where playing could have taken it, by more than the threshold
+ * - behind where it already was, by more than the threshold
+ *
+ * and everything in between — including a video that moved by nothing at all —
+ * is the page doing what pages do.
+ *
  * With no earlier point to compare against — the first event after a mount —
  * the answer is no. Priming again is the expensive answer, and an unprovoked
  * one at the moment the panel appears is the worst time to pay for it.
@@ -70,5 +86,7 @@ export function isRealSeek(
   }
   const expected = expectedMediaSeconds(from, to.wallMs);
   const threshold = Math.max(0, sane(thresholdSeconds, SEEK_THRESHOLD_SECONDS));
-  return Math.abs(sane(to.mediaSeconds, expected) - expected) > threshold;
+  const now = sane(to.mediaSeconds, expected);
+  const was = sane(from.mediaSeconds, expected);
+  return now > expected + threshold || now < Math.min(was, expected) - threshold;
 }

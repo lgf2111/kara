@@ -23,6 +23,12 @@ export type SeparatorCommand =
       readonly right: Float32Array;
     }
   | { readonly type: 'reset' }
+  /**
+   * Artificial compute time per window, in milliseconds, so that starvation
+   * can be provoked on a machine fast enough never to starve by itself. The
+   * debug harness asks for it; nothing in the packed extension does.
+   */
+  | { readonly type: 'slow'; readonly ms: number }
   | { readonly type: 'close' };
 
 export type SeparatorEvent =
@@ -49,4 +55,5 @@ export type SeparatorEvent =
     }
   /** No WebGPU, or no shader-f16: there is no fallback that could keep up. */
   | { readonly type: 'unsupported'; readonly reason: string }
-  | { readonly type: 'failed'; readonly reason: string };
+  /** The reason is what a person is shown; the stack is for the debug report. */
+  | { readonly type: 'failed'; readonly reason: string; readonly stack?: string };

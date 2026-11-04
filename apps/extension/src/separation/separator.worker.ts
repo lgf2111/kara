@@ -36,15 +36,45 @@ let separator: StreamingSeparator | null = null;
 /** Pushes are chained so windows reach the model in the order they arrived. */
 let pushing: Promise<void> = Promise.resolve();
 let closed = false;
+/** Artificial milliseconds per window. Nought everywhere but the harness. */
+let slowMs = 0;
 
 function post(event: SeparatorEvent, transfer: Transferable[] = []): void {
   scope.postMessage(event, transfer);
 }
 
 function fail(cause: unknown): void {
-  if (!closed) {
-    post({ type: 'failed', reason: reasonText(cause) });
+  if (closed) {
+    return;
   }
+  const stack = cause instanceof Error ? cause.stack : undefined;
+  post({ type: 'failed', reason: reasonText(cause), ...(stack === undefined ? {} : { stack }) });
+}
+
+/**
+ * A runner that takes longer than it has to, for the harness.
+ *
+ * Starvation is the failure this pipeline is hardest to get right about, and
+ * it only happens on a machine slow enough for a window to cost more than the
+ * delay's headroom. Rather than hope for one, the harness asks for the delay:
+ * it is added inside the timed region, so the separator measures it as compute
+ * and the recovery sees exactly what it would see on a slower GPU.
+ */
+function slowed(inner: SegmentRunner): SegmentRunner {
+  return {
+    segmentSamples: inner.segmentSamples,
+    islands: inner.islands,
+    async run(left, right, trace) {
+      const output = await inner.run(left, right, trace);
+      if (slowMs > 0) {
+        await new Promise((wake) => {
+          setTimeout(wake, slowMs);
+        });
+      }
+      return output;
+    },
+    release: () => inner.release(),
+  };
 }
 
 /**
@@ -98,7 +128,7 @@ async function init(command: Extract<SeparatorCommand, { type: 'init' }>): Promi
   });
 
   separator = createStreamingSeparator({
-    runner,
+    runner: slowed(runner),
     sampleRate: command.sampleRate,
     onBlock: sendBlock,
   });
@@ -138,6 +168,10 @@ function handle(command: SeparatorCommand): void {
     case 'reset':
       separator?.reset(0);
       pushing = Promise.resolve();
+      return;
+
+    case 'slow':
+      slowMs = Number.isFinite(command.ms) ? Math.max(0, command.ms) : 0;
       return;
 
     case 'close':

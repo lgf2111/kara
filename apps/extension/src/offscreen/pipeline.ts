@@ -1,5 +1,16 @@
-import { chooseDelaySeconds, createCaptureClock } from '../audio/capture-clock.ts';
+import { createCaptureClock } from '../audio/capture-clock.ts';
+import {
+  grownDelaySeconds,
+  initialDelaySeconds,
+  MAX_DELAY_SECONDS,
+  needsCatchUp,
+  shortfallSeconds,
+  type DelayChange,
+} from '../audio/delay-plan.ts';
+import { createEventLog, stackOf, type EventData, type EventKind } from '../audio/event-log.ts';
 import { clampKey, KEY_DEFAULT } from '../audio/key.ts';
+import { createMediaMap } from '../audio/media-map.ts';
+import { createMediaClock, type MediaSample } from '../audio/media-time.ts';
 import {
   CROSSFADE_SECONDS,
   crossfadeOutCurve,
@@ -20,7 +31,14 @@ import {
   type PrepareProgress,
   type PrepareStage,
 } from '../audio/progress.ts';
-import { IDLE, isRunning, nextStatus, type StatusEvent, type StatusState } from '../audio/status.ts';
+import {
+  IDLE,
+  isAudible,
+  isRunning,
+  nextStatus,
+  type StatusEvent,
+  type StatusState,
+} from '../audio/status.ts';
 import {
   CAPTURE_PROCESSOR,
   INSTRUMENTAL_LEFT,
@@ -33,11 +51,14 @@ import {
 } from '../audio/worklet-messages.ts';
 import type { SeparatorCommand, SeparatorEvent } from '../separation/messages.ts';
 import { SAMPLE_RATE } from '../separation/model.ts';
+import { wallNowMs } from '../picture/wall-clock.ts';
 import { reasonText } from '../reason.ts';
 import { DEFAULT_SETTINGS, type OnReady } from '../settings.ts';
+import type { PipelineDebug } from '../debug-report.ts';
 import {
   NO_METRICS,
   type BlockStat,
+  type CatchUp,
   type Metrics,
   type ResetReason,
   type StatusReport,
@@ -53,38 +74,52 @@ import {
  * absolute sample they belong to; the player reads them out when the delay
  * says their moment has come, mixes them and changes the key on the way out.
  *
- * Four things are worth knowing before reading on.
+ * Six things are worth knowing before reading on.
  *
- * **One clock.** Everything is timed on the `AudioContext`, never on
- * `performance.now()`. A captured chunk is stamped with the context time of
- * the quantum it began in, so every sample index has a capture time, so every
- * sample has a play time: capture time plus the delay. That is also the number
- * step B delays the picture by, which is why it is one subtraction rather than
- * a guess. The pitch shifter at the end of the player adds a fixed latency of
- * its own, which the player corrects for itself and which is the same number
- * whatever the key is — so nothing on this side of it has to know the key
- * exists for the sync to hold.
+ * **The song's own clock is the clock.** Everything inside the audio is timed
+ * on the `AudioContext`, because that is the only clock a worklet has. But
+ * what a sample *is* — which moment of which song — is media time, reported by
+ * the content script four times a second as `{wallMs, mediaSeconds, playing,
+ * rate}`. `audio/media-time.ts` turns those reports into one answer per
+ * captured chunk, and `audio/media-map.ts` keeps the two directions anybody
+ * needs: which audio to keep, and where in the song a processed sample sits.
  *
- * **The delay is measured, not assumed.** The separator reports what its
+ * **Capture taken while the song was not moving is thrown away.** A YouTube
+ * buffering stall leaves `currentTime` standing still while the capture keeps
+ * running, and feeding that to the separator staples a stretch of silence into
+ * the middle of the song — which moved every frame after it out of step with
+ * the words by exactly as long as the stall, with nothing to put it back. So
+ * those chunks never reach the separator, and the processed timeline is
+ * contiguous in media time by construction. Paused, waiting, stalled and an
+ * ad's own timeline are the same case.
+ *
+ * **A reset is a media-time discontinuity and nothing else.** Not a `seeking`
+ * event: the page fires those for buffering, for a quality change, for
+ * adopting a new source and at the start of playback, and obeying them cost
+ * the whole delay for nothing. A jump of more than three quarters of a second
+ * that standing still cannot explain is a seek; everything else carries on.
+ * A rate change, the end, an ad boundary and another video still reset,
+ * because each of those really is another timeline.
+ *
+ * **The delay is measured, and it may grow.** The separator reports what its
  * finalised audio is late by — a window, plus a hop, plus what a window costs
- * to compute on this machine. When the first block arrives the real lag is
- * measured against the capture clock, the larger of the two wins, headroom is
- * added and the result is rounded up to a half second. It then stays put until
- * a reset: a delay that twitches is worse than one slightly too long.
+ * on this machine — and the margin on top is a fraction of that cost rather
+ * than a constant. It never shrinks during a song, because a picture must
+ * never jump forwards, but it grows when the output starts to starve: a window
+ * that cost 2.2 s at the start of a song costs 3.2 s four minutes in, and what
+ * used to happen then was silence for the rest of the song. `catching up` is
+ * that growth being made up, and `audio/delay-plan.ts` is the arithmetic.
  *
  * **Getting ready is four stages, and it reports which one it is in.** There
  * is no countdown: loading the model, hearing the first window, separating it
  * and waiting for its moment are four different waits of four different
  * lengths, and `audio/progress.ts` maps what has measurably happened onto a
- * fraction of a bar. A seconds estimate is offered only once the stages have
- * been timed on this machine.
+ * fraction of a bar. Nothing of it advances while the page is paused, and a
+ * start on a paused video waits rather than separating silence.
  *
  * **A pause is not a reset.** Pausing holds: the capture stops being fed, the
  * player freezes where it is and the epoch moves forward by however long that
  * lasted, so a resume carries on from the same sample with the same delay.
- * Only something that moves the person onto a different timeline — a real
- * seek, the end, a rate change, an ad boundary, another video — throws the
- * buffer away and primes again.
  *
  * **Capture mutes the tab.** Whatever leaves the player is the only thing the
  * person hears. So priming is silence unless passthrough is asked for, and a
@@ -93,10 +128,31 @@ import {
  */
 
 /**
- * Seconds of separated audio the ring holds. A block is only ever a second or
- * two early, so this is slack rather than a requirement.
+ * Seconds of separated audio the ring holds.
+ *
+ * Everything between the real lag and the delay is queued in it, so this has
+ * to cover the largest gap the two can open up — which is the cap on how far
+ * the delay may grow to catch up, plus a hop's worth of sawtooth. A ring
+ * shorter than that would drop the blocks the extra delay was bought to
+ * protect, which is the failure this whole arrangement exists to end.
  */
-const RING_SECONDS = 12;
+const RING_SECONDS = 24;
+
+/**
+ * How often the output's place in the song and the counters go out. Ten times
+ * a second, because the picture is painted from the first of those.
+ */
+const METRICS_TICK_MS = 100;
+
+/** Seconds between drift samples in the event log. Cheap, and bounded. */
+const DRIFT_LOG_SECONDS = 10;
+
+/**
+ * How long a measured shortfall counts for. A block that arrived late four
+ * seconds ago says nothing about now, and the queue is measured ten times a
+ * second anyway.
+ */
+const SHORTFALL_MEMORY_SECONDS = 4;
 
 /** Frames between sparse samples when measuring how loud a block is. */
 const RMS_STEP = 64;
@@ -161,12 +217,26 @@ export interface Pipeline {
    * the tap or there is nothing above the noise floor.
    */
   dominantHz(): number | null;
+  /**
+   * Where the page says it is in the song. Four times a second and on every
+   * media event, from whoever owns the page: the content script, or the debug
+   * harness pretending to be one.
+   */
+  media(sample: MediaSample): void;
   /** Throws away what is buffered and primes again, for a seek or an ad. */
   reset(reason: ResetReason): void;
   /** Freezes the output where it is and keeps everything, for a pause. */
   hold(): void;
   /** And carries on from the same sample, with the same delay. */
   resume(): void;
+  /** The event log and the measurements, for the popup's copy button. */
+  debug(): PipelineDebug;
+  /**
+   * Adds artificial compute time to every window, so that starvation can be
+   * provoked on a machine fast enough never to starve by itself. The harness
+   * asks; the packed extension never does.
+   */
+  slowSeparation(ms: number): void;
   stop(): Promise<void>;
 }
 
@@ -242,7 +312,16 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
   const worker = new Worker(new URL('../separation/separator.worker.ts', import.meta.url), {
     type: 'module',
   });
+  /**
+   * The capture clock counts kept samples only, and is re-anchored on the
+   * first chunk after a discarded stretch. That is what makes a sample index
+   * mean the same thing to it and to the map below: both advance for kept
+   * audio and neither for anything else.
+   */
   const clock = createCaptureClock(context.sampleRate);
+  const media = createMediaClock();
+  const map = createMediaMap(context.sampleRate);
+  const log = createEventLog();
 
   let state: StatusState = nextStatus(IDLE, { type: 'start' });
   let mode: PlayMode = options.mode ?? 'instrumental';
@@ -260,6 +339,28 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
   let liveAt: number | null = null;
   /** Why it is priming again, when it is not the first time. */
   let reprime: ResetReason | null = null;
+
+  /** Every delay this timeline has settled on, for the report and the harness. */
+  let delays: DelayChange[] = [];
+  /** Seconds the delay has grown by since this timeline began. */
+  let addedSeconds = 0;
+  /** Context time the latest growth has been made up by, or null when none is. */
+  let catchUpUntil: number | null = null;
+  /** The growth being made up, so its progress can be reported. */
+  let catchUpSpan = 0;
+  /** Starved frames seen since the last time the delay was reconsidered. */
+  let starvedFrames = 0;
+  let lastUnderrun = 0;
+  /** The worst lateness measured recently, and when, so it can go stale. */
+  let lateSeconds = 0;
+  let lateAt = 0;
+  /** Frames queued ahead of the output, from the player's own count. */
+  let queuedFrames = 0;
+  /** Frames of a discarded stretch so far, so one line is logged per stretch. */
+  let discarding = 0;
+  let discardingStalled = false;
+  let driftLoggedAt = 0;
+  let metricsSentAt = 0;
 
   /** Seconds the output has been frozen by pauses since the last reset. */
   let heldTotal = 0;
@@ -357,6 +458,39 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
     timings[stage] = Math.max(0, seconds);
   };
 
+  /** One line in the ring the popup copies. Never audio, never an address. */
+  const note = (
+    kind: EventKind,
+    what: string,
+    data: EventData | null = null,
+    stack: string | null = null,
+  ): void => {
+    log.add(kind, what, data, stack);
+  };
+
+  /** How far through making the latest growth up, or null when none is. */
+  const catchUp = (): CatchUp | null => {
+    if (addedSeconds <= 0) {
+      return null;
+    }
+    if (catchUpUntil === null || catchUpSpan <= 0) {
+      return { addedSeconds, fraction: 1 };
+    }
+    const left = Math.max(0, catchUpUntil - context.currentTime);
+    return { addedSeconds, fraction: Math.min(1, Math.max(0, 1 - left / catchUpSpan)) };
+  };
+
+  /**
+   * Whether nothing can happen until somebody presses play: a start on a
+   * paused video, which used to capture silence and start the timeline on it.
+   */
+  const waitingForPlay = (): boolean => {
+    if (delaySeconds !== null || clock.samples > 0 || !isRunning(state.status)) {
+      return false;
+    }
+    return held() || media.newest?.playing === false;
+  };
+
   const report = (): StatusReport => ({
     type: 'status',
     status: state.status,
@@ -365,6 +499,8 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
     reprime,
     delaySeconds,
     heldSeconds: heldReported,
+    catchUp: catchUp(),
+    waitingForPlay: waitingForPlay(),
     mode,
     guide,
     semitones,
@@ -376,11 +512,15 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
   };
 
   const tellMetrics = (): void => {
+    metricsSentAt = context.currentTime;
     measured = {
       ...measured,
       delaySeconds,
+      addedDelaySeconds: addedSeconds,
       heldSeconds: heldReported,
       driftMs: clock.driftSeconds * 1000,
+      droppedSeconds: map.droppedSeconds,
+      jumps: map.jumps,
     };
     options.onMetrics(measured);
   };
@@ -556,12 +696,52 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
     fillSeconds = 0;
     progress = null;
     clock.reset();
+    // The mapping belongs to the timeline; the page's own reports do not, so
+    // the media clock keeps everything it has been told.
+    map.reset();
+    delays = [];
+    addedSeconds = 0;
+    catchUpUntil = null;
+    catchUpSpan = 0;
+    starvedFrames = 0;
+    lastUnderrun = 0;
+    lateSeconds = 0;
+    queuedFrames = 0;
+    discarding = 0;
     toCapture({ type: 'flush' });
     toPlayer({ type: 'flush' });
     // Silent until the arrival fades it up, which is what makes the fade a
     // fade rather than a jump into the middle of a waveform.
     toPlayer({ type: 'master', target: 0, seconds: 0, shape: 'linear' });
     sendGain(0);
+  };
+
+  /**
+   * Throws this timeline away and starts getting ready again.
+   *
+   * Called by the page for the things only the page knows — a rate change, the
+   * end, an ad boundary, another video — and by this file itself when media
+   * time jumps, which is the only honest evidence of a seek.
+   */
+  const resetTimeline = (reason: ResetReason, data: EventData | null = null): void => {
+    if (!isRunning(state.status)) {
+      return;
+    }
+    note('reset', `the timeline was thrown away: ${reason}`, data);
+    prime();
+    toSeparator({ type: 'reset' });
+    measured = {
+      ...NO_METRICS,
+      reportedLagMs: measured.reportedLagMs,
+      computeMs: measured.computeMs,
+    };
+    reprime = reason;
+    holdPassthrough();
+    moveTo({ type: 'reset' });
+    // A reset while paused stays paused: the page is not playing, so there is
+    // nothing to prime with until it does.
+    tellStatus();
+    tellMetrics();
   };
 
   /**
@@ -574,9 +754,16 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
     readonly reportedLagMs: number;
     readonly measuredLagMs: number;
   }): number => {
-    // Both numbers describe the same lag; the larger is the one that has to be
-    // survived. Fixed from here until a reset.
-    const delay = chooseDelaySeconds(Math.max(first.reportedLagMs, first.measuredLagMs));
+    // Both numbers describe the same lag and the larger is the one that has to
+    // be survived; the margin on top is a fraction of what a window costs on
+    // this machine rather than a constant. It is fixed from here until either
+    // a reset or the output starting to starve, which is the only thing that
+    // may move it, and only upwards.
+    const delay = initialDelaySeconds({
+      reportedLagMs: first.reportedLagMs,
+      measuredLagMs: first.measuredLagMs,
+      computeMs: measured.computeMs,
+    });
     delaySeconds = delay;
     const epoch = first.captureTime - first.startSample / context.sampleRate + delay;
     liveAt = epoch;
@@ -585,11 +772,102 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
     if (separateMark !== null) {
       timed('separating', since(separateMark));
     }
+    delays = [
+      ...delays,
+      { atMs: wallNowMs(), delaySeconds: delay, reason: 'first-block', addedSeconds: 0 },
+    ];
+    note('delay', 'the delay was chosen', {
+      delaySeconds: delay,
+      reportedLagMs: Math.round(first.reportedLagMs),
+      measuredLagMs: Math.round(first.measuredLagMs),
+      computeMs: Math.round(measured.computeMs ?? 0),
+    });
     toPlayer({ type: 'epoch', epoch });
     sendGain(0);
     armArrival();
     armPrimeTimer();
     return delay;
+  };
+
+  /**
+   * Grows the delay when the output is running out of separated audio, which
+   * is the whole of the starvation repair.
+   *
+   * What this replaces was a delay fixed at the first block and defended as a
+   * virtue. Four minutes into a song a window costs a second more than it did
+   * at the start, the player's read head passes the frontier of finalised
+   * audio, and from that moment every arriving block is for a frame already
+   * read — which the ring refuses, so the output plays nothing for the rest of
+   * the song and the counters climb into the millions. Growing the delay by
+   * the measured shortfall plus a margin puts the head back behind the
+   * frontier and lets those blocks in again.
+   *
+   * It is a short mute and a step backwards in the song rather than a seamless
+   * repair, and there is no seamless repair: the audio that should have played
+   * was never computed in time. The picture steps back with it, because what
+   * the picture follows is where this output says it is.
+   */
+  const considerCatchUp = (): void => {
+    if (delaySeconds === null || liveAt === null || stopped || held()) {
+      return;
+    }
+    if (!isAudible(state.status)) {
+      return;
+    }
+    if (catchUpUntil !== null) {
+      if (context.currentTime < catchUpUntil) {
+        // Still landing. What it starved for on the way down is not evidence
+        // of needing another one.
+        starvedFrames = 0;
+        lateSeconds = 0;
+        return;
+      }
+      catchUpUntil = null;
+      catchUpSpan = 0;
+      moveTo({ type: 'caught-up' });
+    }
+    const stale = context.currentTime - lateAt > SHORTFALL_MEMORY_SECONDS;
+    const shortfall = shortfallSeconds({
+      underrunFrames: starvedFrames,
+      sampleRate: context.sampleRate,
+      blockLateSeconds: stale ? 0 : lateSeconds,
+      queuedFrames,
+    });
+    if (!needsCatchUp(shortfall)) {
+      return;
+    }
+    const next = grownDelaySeconds({
+      delaySeconds,
+      shortfallSeconds: shortfall,
+      computeMs: measured.computeMs,
+    });
+    const added = next - delaySeconds;
+    starvedFrames = 0;
+    lateSeconds = 0;
+    if (added <= 0) {
+      // Already at the cap. Nothing left to give, and saying so once per
+      // timeline is more use than saying it ten times a second.
+      return;
+    }
+    delaySeconds = next;
+    addedSeconds += added;
+    liveAt += added;
+    catchUpSpan = added + 2 * MUTE_SECONDS;
+    catchUpUntil = context.currentTime + catchUpSpan;
+    delays = [
+      ...delays,
+      { atMs: wallNowMs(), delaySeconds: next, reason: 'catch-up', addedSeconds: added },
+    ];
+    note('delay', 'the delay grew to stop the output starving', {
+      addedSeconds: Number(added.toFixed(3)),
+      delaySeconds: next,
+      shortfallSeconds: Number(shortfall.toFixed(3)),
+      queuedSeconds: Number((queuedFrames / context.sampleRate).toFixed(3)),
+      computeMs: Math.round(measured.computeMs ?? 0),
+    });
+    toPlayer({ type: 'shift', seconds: added, fadeSeconds: MUTE_SECONDS });
+    moveTo({ type: 'catch-up' });
+    tellStatus();
   };
 
   const onBlock = (event: Extract<SeparatorEvent, { type: 'block' }>): void => {
@@ -600,6 +878,7 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
     }
     const measuredLagMs =
       (context.currentTime - (captureTime + event.frames / context.sampleRate)) * 1000;
+    measured = { ...measured, computeMs: event.computeMs };
     const delay =
       delaySeconds ??
       onFirstBlock({
@@ -609,6 +888,13 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
         measuredLagMs,
       });
 
+    // Past its own moment, which is the shortfall the delay has to grow by.
+    const lateBySeconds = Math.max(0, context.currentTime - (captureTime + delay));
+    if (lateBySeconds > 0) {
+      lateSeconds = Math.max(lateSeconds, lateBySeconds);
+      lateAt = context.currentTime;
+    }
+
     if (options.onBlock !== undefined) {
       options.onBlock({
         startSample: event.startSample,
@@ -616,6 +902,8 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
         captureTime,
         playTime: captureTime + delay,
         arrivedAt: context.currentTime,
+        mediaSeconds: map.mediaOf(event.startSample),
+        lateBySeconds,
         vocalsRms: sparseRms(event.channels[VOCALS_LEFT]),
         instrumentalRms: sparseRms(event.channels[INSTRUMENTAL_LEFT]),
       });
@@ -630,10 +918,10 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
       ...measured,
       measuredLagMs,
       reportedLagMs: event.lagMs,
-      computeMs: event.computeMs,
       bufferSamples: event.bufferSamples,
       blocks: measured.blocks + 1,
     };
+    considerCatchUp();
     tellMetrics();
   };
 
@@ -662,13 +950,41 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
         // tab's audio. Whatever the tab itself is doing is left alone.
         capturing = false;
         source.disconnect(capture);
+        note('error', 'this machine cannot separate live', { reason: message.reason });
         moveTo({ type: 'unsupported', reason: message.reason });
         return;
       case 'failed':
+        note('error', 'the separator failed', { reason: message.reason }, message.stack ?? null);
         moveTo({ type: 'error', reason: message.reason });
         return;
     }
   });
+
+  /**
+   * The wall instant a context time falls on.
+   *
+   * The two clocks are different clocks — one is the audio device's, one is the
+   * system's — but they run at the same rate to within parts per million, so
+   * one reading of each gives the offset between them, and reading both in the
+   * same turn is enough. It is not exact: a chunk's stamp is the context time
+   * of the quantum it began in, and capture adds a little latency before a
+   * sample reaches the worklet, so the instant this returns is some tens of
+   * milliseconds after the page displayed the frame it belongs with. That is
+   * within a frame or two of kept picture, and it does not accumulate.
+   */
+  const wallMsOfContext = (contextTime: number): number =>
+    wallNowMs() + (contextTime - context.currentTime) * 1000;
+
+  /** One line per discarded stretch rather than one per chunk. */
+  const endDiscarding = (): void => {
+    if (discarding === 0) {
+      return;
+    }
+    note('stall', discardingStalled ? 'the song stood still while playing' : 'the song was paused', {
+      seconds: Number((discarding / context.sampleRate).toFixed(3)),
+    });
+    discarding = 0;
+  };
 
   capture.port.onmessage = (event: MessageEvent<CaptureEvent>): void => {
     if (!ready || !capturing || stopped || held()) {
@@ -677,36 +993,100 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
       return;
     }
     const chunk = event.data;
-    const startSample = clock.stamp(chunk.time, chunk.left.length);
-    const heard = (startSample + chunk.left.length) / context.sampleRate;
-    if (separateMark === null && heard >= windowSeconds) {
+    const frames = chunk.left.length;
+    const wallStart = wallMsOfContext(chunk.time);
+    const verdict = map.offer({
+      startSample: clock.samples,
+      frames,
+      span: media.span(wallStart, wallStart + (frames / context.sampleRate) * 1000),
+      // With nobody reporting — a tab with no content script in it — the
+      // capture's own clock is the timeline, which is what this ran on before
+      // the page was ever asked.
+      fallbackSeconds: chunk.time,
+    });
+
+    if (verdict.kind === 'drop') {
+      // Audio the page was not moving through. Keeping it would staple a
+      // stretch of silence into the middle of the song, which is what used to
+      // put every frame after a buffering stall out of step with the words.
+      // The clock rejoins so that the gap in context time is not read as the
+      // audio thread skipping.
+      clock.rejoin();
+      discarding += frames;
+      discardingStalled = verdict.stalled;
+      return;
+    }
+    if (verdict.kind === 'jump') {
+      endDiscarding();
+      resetTimeline('seek', {
+        fromSeconds: Number(verdict.fromSeconds.toFixed(3)),
+        toSeconds: Number(verdict.toSeconds.toFixed(3)),
+      });
+      return;
+    }
+
+    endDiscarding();
+    clock.stamp(chunk.time, frames);
+    if (separateMark === null && clock.samples / context.sampleRate >= windowSeconds) {
       // A whole window has been heard, so the separator has something to run.
       timed('listening', windowSeconds);
       separateMark = markNow();
     }
-    toSeparator({ type: 'chunk', startSample, left: chunk.left, right: chunk.right }, [
-      chunk.left.buffer as ArrayBuffer,
-      chunk.right.buffer as ArrayBuffer,
-    ]);
+    toSeparator(
+      { type: 'chunk', startSample: verdict.startSample, left: chunk.left, right: chunk.right },
+      [chunk.left.buffer as ArrayBuffer, chunk.right.buffer as ArrayBuffer],
+    );
   };
 
   player.port.onmessage = (event: MessageEvent<PlaybackEvent>): void => {
     const playback = event.data;
     if (playback.heldSeconds !== heldReported) {
       heldReported = playback.heldSeconds;
-      // The picture is shifted by exactly this, so it is worth a report of its
-      // own rather than waiting for the next thing to change: this number only
-      // moves while the page is paused, and once more when it stops being.
+      // The panel quotes this, so it is worth a report of its own rather than
+      // waiting for the next thing to change: it only moves while the page is
+      // paused, and once more when it stops being.
       tellStatus();
     }
+    const starved = Math.max(0, playback.underrunFrames - lastUnderrun);
+    lastUnderrun = playback.underrunFrames;
+    if (starved > 0) {
+      starvedFrames += starved;
+      note('underrun', 'the output asked for audio nothing had written', {
+        frames: starved,
+        queuedFrames: playback.queuedFrames,
+      });
+    }
+    queuedFrames = playback.queuedFrames;
     measured = {
       ...measured,
       underrunFrames: playback.underrunFrames,
       lateFrames: playback.lateFrames + playback.aheadFrames,
       gapFrames: playback.gapFrames,
       queuedFrames: playback.queuedFrames,
+      // Where the output is in the song, which is the one number the picture
+      // needs: the overlay paints the frame stamped with it.
+      mediaSeconds: playback.playFrame < 0 ? null : map.mediaOf(playback.playFrame),
     };
-    tellMetrics();
+    considerCatchUp();
+    if (context.currentTime - driftLoggedAt >= DRIFT_LOG_SECONDS) {
+      driftLoggedAt = context.currentTime;
+      note('drift', 'where everything has got to', {
+        driftMs: Number((clock.driftSeconds * 1000).toFixed(2)),
+        queuedSeconds: Number((playback.queuedFrames / context.sampleRate).toFixed(2)),
+        droppedSeconds: Number(map.droppedSeconds.toFixed(2)),
+        anchors: map.anchors.length,
+        computeMs: Math.round(measured.computeMs ?? 0),
+        delaySeconds: delaySeconds ?? 0,
+        mediaSeconds: Number((measured.mediaSeconds ?? 0).toFixed(2)),
+      });
+    }
+    if (state.status === 'catching-up') {
+      // The bar on the panel is this fraction, and it is only moving now.
+      tellStatus();
+    }
+    if ((context.currentTime - metricsSentAt) * 1000 >= METRICS_TICK_MS - 1) {
+      tellMetrics();
+    }
   };
 
   toSeparator({
@@ -719,6 +1099,7 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
   try {
     await context.resume();
   } catch (cause) {
+    note('error', 'the audio context would not start', { reason: reasonText(cause) }, stackOf(cause));
     moveTo({ type: 'error', reason: reasonText(cause) });
   }
   primeMark = markNow();
@@ -769,24 +1150,38 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
       tellStatus();
     },
 
+    media(sample) {
+      media.add(sample);
+    },
+
     reset(reason) {
-      if (!isRunning(state.status)) {
-        return;
-      }
-      prime();
-      toSeparator({ type: 'reset' });
-      measured = {
-        ...NO_METRICS,
-        reportedLagMs: measured.reportedLagMs,
-        computeMs: measured.computeMs,
-      };
-      reprime = reason;
-      holdPassthrough();
-      moveTo({ type: 'reset' });
-      // A reset while paused stays paused: the page is not playing, so there
-      // is nothing to prime with until it does.
-      tellStatus();
-      tellMetrics();
+      resetTimeline(reason);
+    },
+
+    debug: () => ({
+      atMs: wallNowMs(),
+      status: state.status,
+      reason: state.reason,
+      sampleRate: context.sampleRate,
+      delaySeconds,
+      delays,
+      metrics: measured,
+      media: {
+        anchors: map.anchors.length,
+        keptSeconds: map.keptFrames / context.sampleRate,
+        droppedSeconds: map.droppedSeconds,
+        jumps: map.jumps,
+        positionSeconds: measured.mediaSeconds,
+        playing: media.newest?.playing ?? null,
+        rate: media.newest?.rate ?? null,
+      },
+      events: log.events(),
+      droppedEvents: log.dropped,
+    }),
+
+    slowSeparation(ms) {
+      toSeparator({ type: 'slow', ms });
+      note('note', 'the separator was asked to run slow', { ms });
     },
 
     hold() {
@@ -802,6 +1197,7 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
       // content and keeps paused silence out of the stream.
       toCapture({ type: 'flush' });
       clock.rejoin();
+      endDiscarding();
       clearPrimeTimer();
       moveTo({ type: 'hold' });
     },

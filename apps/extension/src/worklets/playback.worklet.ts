@@ -61,6 +61,16 @@ interface RingOptions {
  * them, and it is the whole of the sync arithmetic: read `shiftSeconds` early,
  * and the sample comes out on time.
  *
+ * **A growing delay is the other reason the epoch moves.** When one window
+ * starts costing more than it did at the start of the song, the read head
+ * eventually passes the frontier of finalised audio — and from then on every
+ * arriving block is for a frame already read, which the ring refuses, so the
+ * output plays nothing for the rest of the song. So the delay grows: `shift`
+ * fades out, moves the epoch forward by the shortfall, rewinds the ring's read
+ * mark to meet it, and fades back in on the audio it had been starving for.
+ * The picture follows by itself, because what it follows is where in the song
+ * this output says it is.
+ *
  * **The hold is why the epoch is a variable rather than a constant.** A page
  * that pauses has not seeked: the audio either side of the pause is the same
  * song with nothing missing between it, and throwing the buffer away would
@@ -89,6 +99,12 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   private holdAt: number | null = null;
   private heldSeconds = 0;
   private quanta = 0;
+  /** Audible time a pending delay growth lands at, or null when there is none. */
+  private shiftAt: number | null = null;
+  private shiftBy = 0;
+  private shiftFade = 0;
+  /** The frame being read now, for the report. -1 while nothing is read. */
+  private playFrame = -1;
 
   constructor(options: AudioWorkletNodeOptions) {
     super();
@@ -159,10 +175,25 @@ class PlaybackProcessor extends AudioWorkletProcessor {
           this.master = rampTo(this.master, 1, from, command.seconds, 'smooth');
         }
         return;
+      case 'shift':
+        if (this.shiftAt === null && this.epoch !== null && command.seconds > 0) {
+          // Faded out first and stepped when the fade lands, for the same
+          // reason a pause is: a step in the read position lands in the middle
+          // of a waveform, and a corner in a waveform is a click.
+          const from = this.heard;
+          this.shiftFade = Math.max(0, command.fadeSeconds);
+          this.shiftAt = from + this.shiftFade;
+          this.shiftBy = command.seconds;
+          this.master = rampTo(this.master, 0, from, this.shiftFade, 'smooth');
+        }
+        return;
       case 'flush':
         this.epoch = null;
         this.holdAt = null;
         this.heldSeconds = 0;
+        this.shiftAt = null;
+        this.shiftBy = 0;
+        this.playFrame = -1;
         this.master = heldGain(1);
         this.ring.reset();
         // The key is the person's choice and a new timeline is not them
@@ -170,6 +201,25 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         this.shifter.reset();
         return;
     }
+  }
+
+  /**
+   * Applies a pending delay growth once its fade has landed: the epoch moves
+   * forward, the read mark goes back to meet it, and the output fades in on
+   * audio it had been starving for.
+   */
+  private land(heard: number): void {
+    const at = this.shiftAt;
+    // Never through a hold: the output is already silent and frozen, and a
+    // fade in landing mid-pause would be audible with nobody listening for it.
+    if (at === null || heard < at || this.epoch === null || this.holdAt !== null) {
+      return;
+    }
+    this.epoch += this.shiftBy;
+    this.shiftAt = null;
+    this.shiftBy = 0;
+    this.ring.rewind(Math.round((heard - this.epoch) * sampleRate));
+    this.master = rampTo(this.master, 1, heard, this.shiftFade, 'smooth');
   }
 
   /** Scratch for a quantum, in case a context ever renders a bigger one. */
@@ -199,11 +249,13 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     voiceRight.fill(0, 0, frames);
 
     const heard = this.heard;
+    this.land(heard);
     const epoch = this.epoch;
     // Frozen: silence, and nothing read, so the ring counts nothing against a
     // stretch the person was not listening to.
     const frozen = this.holdAt !== null && heard >= this.holdAt;
     const frame = epoch === null || frozen ? -1 : Math.round((heard - epoch) * sampleRate);
+    this.playFrame = frame;
     if (frame >= 0) {
       this.ring.read(frame, frames, scratch);
       const vocalsLeft = scratch[VOCALS_LEFT];
@@ -252,6 +304,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     const report: PlaybackReport = {
       type: 'playback',
       readTo: this.ring.readTo,
+      playFrame: this.playFrame,
       underrunFrames: this.ring.underrunFrames,
       lateFrames: this.ring.lateFrames,
       aheadFrames: this.ring.aheadFrames,

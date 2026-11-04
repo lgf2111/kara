@@ -46,6 +46,22 @@ export interface PlayRing {
    * not there. Returns how many of them were real.
    */
   read(startFrame: number, frames: number, into: readonly Float32Array[]): number;
+  /**
+   * Moves the read mark back to `frame`, so blocks for frames past it are
+   * accepted again.
+   *
+   * This exists for one failure and is the whole of its cure. Writes below the
+   * read mark are refused as late, which is right — audio already handed to
+   * the person cannot be changed — but it means that an output which has run
+   * past the frontier of finalised audio refuses every block that follows, and
+   * so plays silence for ever rather than for a moment. The player's answer is
+   * to grow the delay, which steps the read position backwards; this is what
+   * lets the ring believe it.
+   *
+   * Never forwards: a read mark that could be moved on would silently skip
+   * audio nobody heard.
+   */
+  rewind(frame: number): void;
   /** Empties the ring and starts the timeline again at frame zero. */
   reset(): void;
 }
@@ -201,6 +217,13 @@ export function createPlayRing(channels: number, capacity: number): PlayRing {
       underrunFrames += frames - delivered;
       readTo = Math.max(readTo, startFrame + frames);
       return delivered;
+    },
+
+    rewind(frame) {
+      if (!Number.isFinite(frame)) {
+        return;
+      }
+      readTo = Math.max(0, Math.min(readTo, Math.round(frame)));
     },
 
     reset() {

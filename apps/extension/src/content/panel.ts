@@ -57,6 +57,7 @@ const ICON_FOR: Readonly<Record<PanelView['state'], string>> = {
   off: 'mic',
   preparing: 'clock',
   live: 'mic',
+  'catching-up': 'clock',
   paused: 'pause',
   unsupported: 'warn',
   error: 'warn',
@@ -108,6 +109,7 @@ button:focus-visible {
   background: rgba(120, 220, 160, 0.18);
 }
 .toggle[data-state='preparing'],
+.toggle[data-state='catching-up'],
 .toggle[data-state='paused'] {
   border-color: rgba(255, 214, 130, 0.5);
   background: rgba(255, 214, 130, 0.14);

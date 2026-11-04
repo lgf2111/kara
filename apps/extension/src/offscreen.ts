@@ -135,6 +135,21 @@ function accept(command: Command): void {
       onReady = command.onReady;
       pipeline?.setOnReady(command.onReady);
       return;
+    case 'media':
+      // Where the page is in the song. This is the clock the capture, the
+      // discard decision, the reset decision and the picture all read.
+      pipeline?.media(command.sample);
+      return;
+    case 'debug': {
+      const running = pipeline;
+      if (running !== null) {
+        tell({ type: 'debug-log', pipeline: running.debug() });
+      }
+      return;
+    }
+    case 'slow-separation':
+      pipeline?.slowSeparation(command.ms);
+      return;
   }
 }
 

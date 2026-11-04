@@ -19,17 +19,25 @@ import type { ResetReason } from '../protocol.ts';
  * freezes, the picture freezes, and a resume carries on from the same sample
  * with the same delay, with the paused stretch taken out of both.
  *
- * What is left on the reset list is everything that really does move the
- * person onto another timeline: a jump in the video's own clock, a rate
- * change, the end, an ad boundary, another video. `timeline.ts` is what
- * decides whether a `seeking` event was a jump at all, because the page fires
- * them for things that are not.
+ * **A seek is the row that changed next, and it changed by leaving.** The
+ * audio no longer resets because the page said `seeking`. It resets because
+ * media time jumped, which the audio side sees for itself within a chunk of
+ * capture — a jump is the only evidence of a seek that buffering, a quality
+ * change and a new source cannot fake, and all three of those used to cost
+ * the entire delay for nothing. What is left on the audio's reset list here is
+ * what only the page can know: a rate change, the end, an ad boundary and
+ * another video.
+ *
+ * The picture still comes down and goes back up on a seek, because the frames
+ * it is holding are from somewhere else in the song, and `timeline.ts` is
+ * still what judges whether a `seeking` event was a jump at all — by the same
+ * arithmetic on the same clock the audio half uses.
  *
  * The picture half of each row is a choice, and worth being honest about. A
- * frame is stamped with the wall instant it was displayed, so the picture
- * needs no resetting at all: eighteen seconds after a seek it would still be
- * showing exactly what the audio is playing, because both are eighteen seconds
- * behind the same clock. What makes it wrong is that it would be eighteen
+ * frame is stamped with where in the song it belongs, so strictly the picture
+ * needs no resetting: it paints whatever frame matches the place the audio
+ * says it has reached, and after a seek that would be the right frame of the
+ * old stretch of song. What makes it wrong is that it would be eighteen
  * seconds of pre-seek video over silence, which reads as a frozen tab. So the
  * picture comes down when the audio does, the person gets the real video back
  * while there is nothing to sing to, and both go delayed again together.
@@ -86,18 +94,21 @@ export interface PageDecision {
 }
 
 const DECISIONS: Readonly<Record<PageEvent, PageDecision>> = {
-  // A seek is two events. The first throws everything away, the second starts
-  // again, and splitting them that way means a long scrub that fires `seeking`
-  // repeatedly only primes once, at the end.
-  seeking: { audio: 'reset', reset: 'seek', picture: 'clear', passthrough: null },
+  // The audio rows here are deliberately empty. A `seeking` event is not
+  // evidence of a seek — the page fires it for buffering, for a quality
+  // change, for adopting a new source and at the start of playback — and the
+  // audio side has better evidence than any event: whether media time jumped.
+  // So the picture comes down and goes back up, because the frames it holds
+  // are from elsewhere in the song, and the audio decides for itself.
+  seeking: { audio: 'none', reset: null, picture: 'clear', passthrough: null },
   seeked: { audio: 'none', reset: null, picture: 'reprime', passthrough: null },
   // Nothing is thrown away and nothing is primed: see above.
   pause: { audio: 'hold', reset: null, picture: 'freeze', passthrough: null },
   play: { audio: 'resume', reset: null, picture: 'thaw', passthrough: null },
-  // The stamps survive a rate change — they are wall instants, not media
-  // times — but the audio's buffer does not, because every sample after it
-  // arrives at a different rate than the ones before it, and a picture that
-  // keeps running over eighteen seconds of silence looks broken.
+  // The frames survive a rate change — they are stamped with where in the
+  // song they belong — but the audio's buffer does not, because every sample
+  // after it arrives at a different rate than the ones before it, and a
+  // picture running over eighteen seconds of silence looks broken.
   ratechange: { audio: 'reset', reset: 'ratechange', picture: 'clear', passthrough: null },
   ended: { audio: 'reset', reset: 'ended', picture: 'clear', passthrough: null },
   'ad-start': { audio: 'reset', reset: 'ad', picture: 'clear', passthrough: true },

@@ -1,5 +1,11 @@
 import { clampKey, keyLabel } from '../audio/key.ts';
-import { delayNote, prepareDetail, reprimeNote } from '../content/panel-view.ts';
+import {
+  catchUpNote,
+  delayNote,
+  prepareDetail,
+  PRESS_PLAY,
+  reprimeNote,
+} from '../content/panel-view.ts';
 import type { OnReady, StatusReport } from '../protocol.ts';
 
 /**
@@ -24,7 +30,14 @@ import type { OnReady, StatusReport } from '../protocol.ts';
  * Pure, so the mapping is the test. Nothing here touches `chrome`.
  */
 
-export type PopupState = 'idle' | 'preparing' | 'live' | 'paused' | 'unsupported' | 'error';
+export type PopupState =
+  | 'idle'
+  | 'preparing'
+  | 'live'
+  | 'catching-up'
+  | 'paused'
+  | 'unsupported'
+  | 'error';
 
 /** What the button does, which is the only thing in here that acts. */
 export type PopupAction = 'start' | 'stop' | 'none';
@@ -148,8 +161,22 @@ export function popupView(input: PopupInput): PopupView {
     return {
       ...quiet,
       state: 'paused',
-      headline: 'Paused',
-      detail: 'nothing lost; it carries on from here when the video does',
+      headline: report.waitingForPlay ? 'Waiting for the video' : 'Paused',
+      detail: report.waitingForPlay
+        ? PRESS_PLAY
+        : 'nothing lost; it carries on from here when the video does',
+      action: 'stop',
+      actionLabel: 'Stop',
+    };
+  }
+
+  if (report.status === 'catching-up') {
+    return {
+      ...quiet,
+      state: 'catching-up',
+      headline: 'Catching up',
+      progress: report.catchUp?.fraction ?? 0,
+      detail: catchUpNote(report.catchUp),
       action: 'stop',
       actionLabel: 'Stop',
     };

@@ -3,12 +3,11 @@
  * eating the machine.
  *
  * Delaying a picture by eighteen seconds means holding eighteen seconds of it.
- * There is no way around that, so the only question is what it costs: frames
- * are downscaled to about 640 px wide before they get here, which is 640 × 360
- * × 4 bytes each, and at fifteen a second eighteen seconds comes to about
- * 250 MB. That is the whole reason this file has a budget in it rather than a
- * length. A budget is the quantity a person cares about, and the number of
- * frames it buys falls out of the frame size, which depends on the video.
+ * There is no way around that, so the only question is what it costs, and that
+ * is a budget rather than a length: a budget is the quantity a person cares
+ * about, and the number of frames it buys falls out of the frame size, which
+ * depends on the video. `frame-store.ts` is what sets the real one, and its
+ * header is the story of why holding decoded pixels was the wrong answer.
  *
  * When the budget is spent the oldest frame goes. Dropping the oldest is the
  * only sane end to drop from: the newest frame is the one the delay has not
@@ -18,10 +17,9 @@
  * which is visible and measurable, rather than one that stutters.
  *
  * Generic over the frame, and with nothing in it that touches the DOM, so the
- * eviction and the picking can be tested on numbers. The real thing holds
- * `ImageBitmap`s, which have to be closed by hand — they are a handle on
- * memory outside the heap, and letting the garbage collector find them is how
- * an overlay turns into a leak — so the frame type is anything with `close`.
+ * eviction and the picking can be tested on numbers. The frame type is
+ * anything with `close`, because some kinds of frame hold memory outside the
+ * heap and letting the collector find those is how an overlay becomes a leak.
  */
 
 /** An `ImageBitmap`, as far as this file is concerned. */
@@ -38,11 +36,10 @@ export interface Held<T> {
 }
 
 /**
- * Under 300 MB, which is the budget this is allowed. At 640 × 360 it buys
- * about 21 s at 15 fps, which covers the eighteen the audio asks for with a
- * little room to spare.
+ * A backstop, for a caller that names no budget. Everything in this extension
+ * names one: `frame-store.ts` holds the number that matters.
  */
-export const DEFAULT_BUDGET_BYTES = 280 * 1024 * 1024;
+export const DEFAULT_BUDGET_BYTES = 48 * 1024 * 1024;
 
 /** What one decoded frame of this size occupies: four bytes a pixel. */
 export function frameBytes(width: number, height: number): number {
@@ -115,6 +112,12 @@ export interface FrameRing<T extends Closable> {
   push: (frame: T, stamp: number, bytes: number) => void;
   /** The frame to show at `stamp`, or null if none is old enough yet. */
   at: (stamp: number) => Held<T> | null;
+  /**
+   * Every frame held between two stamps, oldest first, including the one
+   * `at(from)` would return. What a decode look-ahead reads: the frames about
+   * to be wanted, which is the only reason to spend memory on a decoded one.
+   */
+  window: (from: number, to: number) => readonly Held<T>[];
   oldest: () => Held<T> | null;
   newest: () => Held<T> | null;
   /**
@@ -175,6 +178,15 @@ export function createFrameRing<T extends Closable>(options: RingOptions = {}): 
 
     at(stamp) {
       return held[indexAtOrBefore(held, stamp)] ?? null;
+    },
+
+    window(from, to) {
+      if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) {
+        return [];
+      }
+      const first = Math.max(0, indexAtOrBefore(held, from));
+      const last = indexAtOrBefore(held, to);
+      return last < first ? [] : held.slice(first, last + 1);
     },
 
     oldest() {

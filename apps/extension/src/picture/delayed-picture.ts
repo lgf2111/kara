@@ -6,86 +6,73 @@ import {
   rampTo,
   type GainRamp,
 } from '../audio/mix-gain.ts';
-import { createFrameRing, frameBytes, type Held } from './frame-ring.ts';
-import { wallMsOf, wallNowMs } from './wall-clock.ts';
+import { createFrameCodec, LOOK_AHEAD_SECONDS, type FrameCodec } from './frame-codec.ts';
+import { createFrameStore, type FrameStore, type StoredFrame } from './frame-store.ts';
+import { correctFollow, followedTo, startFollowing, type FollowState } from './media-follow.ts';
+import { wallNowMs } from './wall-clock.ts';
 
 /**
- * The picture, eighteen seconds late, drawn over the one the page is playing.
+ * The picture, where the audio is, drawn over the one the page is playing.
  *
- * The audio half of this extension cannot be fast. A window of separated
- * audio is only final once the next one has been run, so what comes out of the
+ * The audio half of this extension cannot be fast. A window of separated audio
+ * is only final once the next one has been run, so what comes out of the
  * player is the tab's audio as it was about eighteen seconds ago. Sung over a
  * picture that is live, that is useless: the words arrive after the mouth has
  * finished saying them. So the picture is delayed to meet it.
  *
- * How, in one paragraph. Every displayed frame of the real video is copied
- * into an `ImageBitmap`, downscaled to about 640 px wide, at about fifteen a
- * second, and kept with the instant it was displayed at — `wall-clock.ts` says
- * which instant and why that is the clock. An overlay canvas sits over the
- * video and paints, on every animation frame, the newest frame that was on
- * screen at `now - delay`. The real video is hidden, with opacity rather than
- * by pausing it: it has to keep playing, because it is the thing producing the
- * frames and the audio being captured.
+ * **How it finds the frame, which is the whole of this file.** Every displayed
+ * frame of the real video is compressed to a webp of a few tens of kilobytes
+ * and kept with its `mediaTime` — where in the song it belongs. The audio side
+ * reports where in the song its *output* has reached, about ten times a
+ * second. The overlay paints the frame whose media time matches. That is all.
  *
- * Four decisions in it are worth stating.
+ * What that replaced was two clocks pretending to be one. The audio was
+ * stamped on the `AudioContext`, each frame was stamped with the wall instant
+ * it was displayed at, and the picture was painted from `now - delay - held`,
+ * where `held` was how long the audio had been frozen by pauses. It worked
+ * exactly as long as the page played steadily. A buffering stall — video time
+ * standing still while the capture ran on — moved the audio and the picture
+ * apart by the length of the stall, permanently, with no term in that
+ * subtraction able to notice. Media time has no such hole in it: the song is
+ * where the song is, and both halves name the same place.
  *
- * **The overlay takes no input.** `pointer-events: none`, and it is appended
- * inside the player at a z-index above the video and below everything the page
- * draws on top of it. The page's own controls, keyboard shortcuts and context
- * menu carry on working, because every event still lands on the page's own
- * elements. Hiding the video and showing our canvas changes what is on screen
- * and nothing else.
+ * Which also deletes a whole category of arithmetic. There is no pause shift,
+ * because a pause does not move media time. There is no delay in here at all:
+ * the audio reports its position and the picture goes there, so a delay that
+ * grows to catch up carries the picture with it with nothing to tell it.
+ *
+ * Between reports the position is carried forward on the wall clock and each
+ * report eases it back into line — `media-follow.ts` — because ten corrections
+ * a second cannot drive sixty paints a second without stepping.
+ *
+ * Four more decisions are worth stating.
+ *
+ * **Frames are compressed, not decoded.** Holding eighteen seconds of
+ * `ImageBitmap`s cost about 250 MB of GPU-backed memory on the GPU that runs
+ * the model and decodes the page's own video, and the page went from lagging
+ * to crawling. `frame-store.ts` and `frame-codec.ts` are that repair: tens of
+ * megabytes of webp in the heap, one bitmap decoded just before it is shown
+ * and a handful kept.
+ *
+ * **The overlay takes no input.** `pointer-events: none`, appended inside the
+ * player above the video and below everything the page draws on top of it. The
+ * page's own controls, keyboard shortcuts and context menu carry on working.
  *
  * **It follows the video's displayed rect, not the player's.** A player is
  * usually wider than the picture in it, and the difference is the letterbox.
- * So the canvas is positioned on the video element's rect, and the frame is
- * fitted inside it the way the browser fits a video: contained, centred, black
- * either side. Theatre mode, fullscreen and a window drag all come through a
- * `ResizeObserver`.
+ * Each frame is fitted inside that rect the way a browser fits a video:
+ * contained, centred, black either side. Theatre mode, fullscreen and a window
+ * drag arrive through a `ResizeObserver`.
  *
- * **It has three faces, and which one is up is the `onReady` setting.** While
- * the audio gets ready there is no frame old enough to show, and there is
- * nothing to be done about that; what there is a choice about is what to show
- * instead.
- *
- * - `dimmed` holds one still frame — the one that was on screen at the instant
- *   the audio capture began — behind a progress bar. When the audio arrives,
- *   the dim fades off and the picture carries on from that same frame, so
- *   nothing jumps. This is `restart`.
- * - `hidden` keeps the canvas off the page entirely and lets the person watch
- *   the real video, undelayed, while frames are collected behind it. When the
- *   audio arrives the canvas dissolves in over about eight tenths of a second,
- *   which is a picture jumping back by the delay, and the panel says so. This
- *   is `continue`.
- * - `live` is the delayed picture.
- *
- * Both fades are the tested curves in `audio/mix-gain.ts`, read on the wall
- * clock instead of the audio one.
- *
- * **A pause shifts the delay rather than resetting it.** The page stops
- * producing frames and the audio stops being fed, so when both start again
- * every frame held is still good and the audio is still exactly where it was:
- * what has changed is that the wall clock moved on while neither did. So the
- * frame to paint is the one from `now - delay - held`, where `held` is how
- * long the *audio* was frozen, reported by the player. Its own freeze is a
- * fraction shorter than the page's, by the twenty milliseconds the output
- * spends fading out, and matching the audio is the point.
- *
- * Used by the content script on YouTube and by the debug page on a local
- * fixture. It knows nothing about either: a `<video>`, something to put the
- * canvas in, and a delay.
+ * **It has three faces, and which one is up is the `onReady` setting.**
+ * `dimmed` holds one still frame — the one on screen when the audio capture
+ * began — behind a progress bar, and the dim fades off when the audio arrives.
+ * `hidden` keeps the canvas out of the document entirely so the person watches
+ * the real video, and dissolves in when the audio arrives, which is a picture
+ * jumping back by the delay and the panel says so. `live` is the delayed
+ * picture. Both fades are the tested curves in `audio/mix-gain.ts`, read on the
+ * wall clock instead of the audio one.
  */
-
-/**
- * What to delay by until the audio side reports what it measured. It reports
- * about eighteen; starting on a guess means the first frames are kept from the
- * moment capture starts rather than from the moment the first block arrives,
- * which is eighteen seconds too late to start keeping them.
- */
-export const DEFAULT_DELAY_SECONDS = 18;
-
-/** Frames are downscaled to this width, which is what the budget is for. */
-const MAX_WIDTH = 640;
 
 /** Frames a second kept. Enough to read a face by, cheap enough to hold. */
 const FRAMES_PER_SECOND = 15;
@@ -96,11 +83,15 @@ const OVERLAY_Z_INDEX = 10;
 /** How often the canvas re-checks where the video is, in ms. */
 const GEOMETRY_MS = 250;
 
-/** `createImageBitmap` calls allowed in flight at once. */
-const PENDING_LIMIT = 2;
-
 /** How black the still frame goes while the audio gets ready. */
 const DIM_ALPHA = 0.55;
+
+/**
+ * Seconds of song kept behind the painted frame. The delay may grow to catch
+ * up, which steps the position backwards, and a frame thrown away a moment
+ * before it is wanted again is a black flash.
+ */
+const KEEP_BEHIND_SECONDS = 12;
 
 /** Which face is on screen. */
 export type PictureFace = 'dimmed' | 'hidden' | 'live';
@@ -129,36 +120,41 @@ export interface PictureState {
   readonly active: boolean;
   readonly face: PictureFace;
   readonly frozen: boolean;
-  /** Nothing is old enough to paint yet, so a still frame is showing. */
+  /** Nothing matches the audio's position yet, so a still frame is showing. */
   readonly priming: boolean;
   readonly frames: number;
   readonly bytes: number;
   /** Frames thrown away because the budget was spent. */
   readonly dropped: number;
-  /** The delay being aimed at, which is the audio's. */
-  readonly delaySeconds: number;
-  /** Seconds the audio has been frozen by pauses, which is added to it. */
-  readonly heldSeconds: number;
-  /** When the frame now on the canvas was displayed, on the wall clock. */
-  readonly paintedStampMs: number | null;
+  /** Decoded frames held, which is the only GPU memory this costs. */
+  readonly decoded: number;
+  /** Where in the song the audio says it is, or null before it says. */
+  readonly positionSeconds: number | null;
+  /** Where in the song the frame on the canvas is from. */
+  readonly paintedSeconds: number | null;
   /** The still frame `dimmed` holds, or null before the audio started. */
-  readonly anchorStampMs: number | null;
+  readonly anchorSeconds: number | null;
   /**
-   * How far the painted frame is from where the delay says it should be, in
-   * seconds. Positive means the picture is later than asked, negative means
-   * earlier — which is what a budget too small for the delay looks like. In
-   * the harness, where the real video plays undelayed next to the delayed
-   * audio, this is the picture-to-audio offset.
+   * How far the painted frame is from where the audio is, in seconds. Negative
+   * by up to one frame interval is correct — a frame is painted from at or
+   * before the moment asked for, never after. Anything larger is the picture
+   * being wrong, which is the one number worth asserting on.
    */
   readonly offsetSeconds: number | null;
+  /** Times the position had to be taken in one step rather than eased. */
+  readonly snaps: number;
 }
 
 export interface DelayedPicture {
   /** Starts keeping frames, with the given face on screen. */
-  start: (delaySeconds: number, face?: PictureFace) => void;
-  setDelay: (seconds: number) => void;
-  /** Seconds the audio has spent frozen, which the picture is shifted by. */
-  setHeld: (seconds: number) => void;
+  start: (face?: PictureFace) => void;
+  /**
+   * Where in the song the audio has reached. The one number this file is
+   * driven by; null means the audio is not playing yet.
+   */
+  setPosition: (mediaSeconds: number | null) => void;
+  /** How fast the song is moving, for carrying the position between reports. */
+  setRate: (rate: number) => void;
   /** Swaps the face, fading rather than cutting on the way to `live`. */
   setFace: (face: PictureFace) => void;
   /** What the progress bar on the dimmed face says. */
@@ -180,7 +176,8 @@ export interface DelayedPicture {
 }
 
 interface FrameMetadata {
-  readonly expectedDisplayTime: number;
+  /** Where in the song this frame belongs, in seconds. */
+  readonly mediaTime: number;
 }
 
 /**
@@ -219,11 +216,13 @@ function positive(value: number | undefined, fallback: number): number {
 export function createDelayedPicture(options: DelayedPictureOptions): DelayedPicture {
   const video = options.video;
   const container = options.container;
-  const maxWidth = positive(options.maxWidth, MAX_WIDTH);
   const fps = positive(options.fps, FRAMES_PER_SECOND);
   const clock = options.now ?? wallNowMs;
-  const ring = createFrameRing<ImageBitmap>(
+  const store: FrameStore<Blob> = createFrameStore<Blob>(
     options.budgetBytes === undefined ? {} : { budgetBytes: options.budgetBytes },
+  );
+  const codec: FrameCodec = createFrameCodec(
+    options.maxWidth === undefined ? {} : { maxWidth: options.maxWidth },
   );
 
   const canvas = document.createElement('canvas');
@@ -238,15 +237,15 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
   let frozen = false;
   let priming = true;
   let face: PictureFace = 'dimmed';
-  let delaySeconds = DEFAULT_DELAY_SECONDS;
-  let heldSeconds = 0;
   let preparing: PreparingView | null = null;
-  let painted: Held<ImageBitmap> | null = null;
-  let paintedStamp: number | null = null;
+  /** Where the audio says it is, carried forward between its reports. */
+  let follow: FollowState | null = null;
+  let rate = 1;
+  let snaps = 0;
+  let paintedSeconds: number | null = null;
   /** The still frame the dimmed face holds: where the audio capture began. */
-  let anchorStamp: number | null = null;
-  let lastKept = 0;
-  let pending = 0;
+  let anchorSeconds: number | null = null;
+  let lastKeptMedia = -1;
   let rect: Rect = NOWHERE;
   let measuredAt = 0;
   /** The video's own inline opacity, to put back. Null when not hidden. */
@@ -273,12 +272,12 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
     measure(true);
   };
 
-  /** The instant the painted frame should be from. */
-  function wantedStamp(now: number): number {
-    return now - (delaySeconds + heldSeconds) * 1000;
+  /** Where in the song to paint from, or null before the audio has said. */
+  function wantedSeconds(now: number): number | null {
+    return follow === null ? null : followedTo(follow, now);
   }
 
-  function drawFrame(bitmap: ImageBitmap): void {
+  function drawBitmap(bitmap: ImageBitmap): void {
     if (brush === null) {
       return;
     }
@@ -303,11 +302,11 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
   }
 
   /** The still frame: the anchor if there is one, the newest until there is. */
-  function stillFrame(): Held<ImageBitmap> | null {
-    if (anchorStamp !== null) {
-      return ring.at(anchorStamp) ?? ring.oldest();
+  function stillFrame(): StoredFrame<Blob> | null {
+    if (anchorSeconds !== null) {
+      return store.at(anchorSeconds) ?? store.oldest();
     }
-    return ring.newest();
+    return store.newest();
   }
 
   function drawBar(alpha: number): void {
@@ -348,21 +347,14 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
       return;
     }
     const still = stillFrame();
-    if (still === null) {
+    const bitmap = still === null ? null : codec.bitmapFor(still);
+    if (bitmap === null) {
       brush.fillStyle = '#000';
       brush.fillRect(0, 0, canvas.width, canvas.height);
     } else {
-      drawFrame(still.frame);
+      drawBitmap(bitmap);
     }
     drawBar(dimOver(now));
-  }
-
-  function repaint(now: number): void {
-    if (painted !== null && !priming) {
-      drawFrame(painted.frame);
-      return;
-    }
-    drawWaiting(now);
   }
 
   function measure(force: boolean): void {
@@ -391,48 +383,53 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
     canvas.width = Math.max(1, Math.round(next.width));
     canvas.height = Math.max(1, Math.round(next.height));
     drawnAs = '';
+    paintedSeconds = null;
     repaint(measuredAt);
   }
 
-  function keptSize(): { readonly width: number; readonly height: number } | null {
-    const width = video.videoWidth;
-    const height = video.videoHeight;
-    if (width === 0 || height === 0) {
-      return null;
+  /**
+   * Puts back whatever should be on screen, after a resize cleared it. The
+   * next animation frame will paint properly either way; this is so a drag
+   * does not strobe.
+   */
+  function repaint(now: number): void {
+    const wanted = priming ? null : wantedSeconds(now);
+    const frame = wanted === null ? null : store.at(wanted);
+    const bitmap = frame === null ? null : codec.bitmapFor(frame);
+    if (bitmap !== null) {
+      drawBitmap(bitmap);
+      return;
     }
-    const scale = Math.min(1, maxWidth / width);
-    return {
-      width: Math.max(1, Math.round(width * scale)),
-      height: Math.max(1, Math.round(height * scale)),
-    };
+    if (priming) {
+      drawWaiting(now);
+    }
   }
 
-  function keep(stamp: number): void {
-    if (pending >= PENDING_LIMIT || stamp - lastKept < 1000 / fps - 1) {
+  /**
+   * Keeps the frame the page has just displayed, stamped with where in the
+   * song it belongs.
+   *
+   * One encode at a time, and no faster than the frame rate asked for: a
+   * machine that cannot keep up should keep fewer frames rather than queue
+   * them, because a queue of frames is the memory this was written to avoid.
+   */
+  function keep(mediaSeconds: number): void {
+    if (!Number.isFinite(mediaSeconds) || mediaSeconds - lastKeptMedia < 1 / fps - 0.001) {
       return;
     }
-    const size = keptSize();
-    if (size === null) {
+    const encoding = codec.keep(video);
+    if (encoding === null) {
       return;
     }
-    lastKept = stamp;
-    pending += 1;
-    createImageBitmap(video, {
-      resizeWidth: size.width,
-      resizeHeight: size.height,
-      resizeQuality: 'low',
-    })
-      .then((bitmap) => {
-        pending -= 1;
-        if (!active) {
-          bitmap.close();
-          return;
+    lastKeptMedia = mediaSeconds;
+    encoding
+      .then((blob) => {
+        if (blob !== null && active) {
+          store.push(blob, mediaSeconds, blob.size);
         }
-        ring.push(bitmap, stamp, frameBytes(bitmap.width, bitmap.height));
       })
       .catch(() => {
-        // A frame that would not decode is one frame. The next one will.
-        pending -= 1;
+        // One frame that would not encode is one frame. The next one will.
       });
   }
 
@@ -445,9 +442,9 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
         if (!active || frozen) {
           return;
         }
-        // `expectedDisplayTime` is when the page shows this frame, which is
-        // the instant the picture has to be matched to.
-        keep(wallMsOf(metadata.expectedDisplayTime));
+        // `mediaTime` is where in the song this frame is, which is the only
+        // stamp that survives everything the page does to its own clock.
+        keep(metadata.mediaTime);
         scheduleFrames();
       });
       cancelFrames = () => {
@@ -455,14 +452,15 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
       };
       return;
     }
-    // No `requestVideoFrameCallback`: sample on the animation clock and stamp
-    // with now, which is a frame or so out and still better than nothing.
+    // No `requestVideoFrameCallback`: sample on the animation clock and take
+    // the video's own clock, which is a frame or so out and still better than
+    // nothing.
     const handle = requestAnimationFrame(() => {
       cancelFrames = null;
       if (!active || frozen) {
         return;
       }
-      keep(clock());
+      keep(video.currentTime);
       scheduleFrames();
     });
     cancelFrames = () => {
@@ -523,6 +521,11 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
     videoHidden = false;
   }
 
+  function fadeDone(now: number): boolean {
+    const at = now / 1000;
+    return gainAt(dim, at) === dim.to && gainAt(shown, at) === shown.to;
+  }
+
   function paint(): void {
     paintHandle = requestAnimationFrame(paint);
     const now = clock();
@@ -547,17 +550,25 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
     if (frozen) {
       return;
     }
-    const wanted = wantedStamp(now);
-    if (face === 'live') {
-      ring.trim(wanted);
+
+    const wanted = face === 'live' ? wantedSeconds(now) : null;
+    const frame = wanted === null ? null : store.at(wanted);
+    const bitmap = frame === null ? null : codec.bitmapFor(frame);
+    if (wanted !== null) {
+      // Everything the delay can no longer reach, minus the slack a catch-up
+      // needs, and the next half second decoded before it is wanted.
+      store.trim(wanted - KEEP_BEHIND_SECONDS);
+      codec.prefetch(store.window(wanted, wanted + LOOK_AHEAD_SECONDS));
     }
-    const chosen = face === 'live' ? ring.at(wanted) : null;
-    if (chosen === null) {
+    if (frame === null || bitmap === null) {
       priming = true;
       // Redrawn only when it would say something different: this runs sixty
       // times a second for as long as getting ready takes.
+      const still = stillFrame();
       const fading = !fadeDone(now);
-      const state = `${String(stillFrame()?.stamp ?? 0)}/${String(preparing?.label ?? '')}/${String(
+      const state = `${String(still?.mediaSeconds ?? 0)}/${
+        still !== null && codec.bitmapFor(still) !== null ? 'drawn' : 'blank'
+      }/${String(preparing?.label ?? '')}/${String(
         Math.round((preparing?.fraction ?? 0) * 200),
       )}/${fading ? String(Math.round(now)) : 'still'}`;
       if (state !== drawnAs) {
@@ -567,19 +578,13 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
       return;
     }
     priming = false;
-    if (chosen.stamp !== paintedStamp || !fadeDone(now)) {
-      painted = chosen;
-      paintedStamp = chosen.stamp;
-      drawFrame(chosen.frame);
+    if (frame.mediaSeconds !== paintedSeconds || !fadeDone(now)) {
+      paintedSeconds = frame.mediaSeconds;
+      drawBitmap(bitmap);
       // The dim fades off over the delayed picture rather than over the still
       // frame it was holding: by now the two are the same frame.
       dimOver(now);
     }
-  }
-
-  function fadeDone(now: number): boolean {
-    const at = now / 1000;
-    return gainAt(dim, at) === dim.to && gainAt(shown, at) === shown.to;
   }
 
   function stopPainting(): void {
@@ -636,16 +641,17 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
     stopFrames();
     stopPainting();
     sizes.disconnect();
-    ring.clear();
-    painted = null;
-    paintedStamp = null;
-    anchorStamp = null;
-    heldSeconds = 0;
+    store.clear();
+    codec.clear();
+    follow = null;
+    snaps = 0;
+    paintedSeconds = null;
+    anchorSeconds = null;
     preparing = null;
     dim = heldGain(1);
     shown = heldGain(1);
     canvas.style.opacity = '1';
-    lastKept = 0;
+    lastKeptMedia = -1;
     drawnAs = '';
     unmount();
     showVideo();
@@ -655,8 +661,7 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
   document.addEventListener('fullscreenchange', onViewChange);
 
   return {
-    start(seconds, wanted = 'dimmed') {
-      delaySeconds = positive(seconds, DEFAULT_DELAY_SECONDS);
+    start(wanted = 'dimmed') {
       if (active) {
         frozen = false;
         if (cancelFrames === null) {
@@ -668,7 +673,6 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
       active = true;
       frozen = false;
       priming = true;
-      heldSeconds = 0;
       // The face a start opens on is worn rather than faded into: there is
       // nothing on screen yet for a fade to come from.
       face = wanted;
@@ -684,12 +688,27 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
       paint();
     },
 
-    setDelay(seconds) {
-      delaySeconds = positive(seconds, delaySeconds);
+    setPosition(mediaSeconds) {
+      if (mediaSeconds === null || !Number.isFinite(mediaSeconds)) {
+        return;
+      }
+      const now = clock();
+      if (follow === null) {
+        follow = startFollowing(mediaSeconds, now, rate);
+        return;
+      }
+      const corrected = correctFollow(follow, mediaSeconds, now, { rate });
+      follow = corrected.state;
+      if (corrected.snapped) {
+        snaps += 1;
+      }
     },
 
-    setHeld(seconds) {
-      heldSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : heldSeconds;
+    setRate(next) {
+      rate = Number.isFinite(next) && next > 0 ? next : rate;
+      if (follow !== null) {
+        follow = { ...follow, seconds: followedTo(follow, clock()), atMs: clock(), rate };
+      }
     },
 
     setFace(next) {
@@ -705,8 +724,9 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
     anchor() {
       // Whatever is on screen now. Frames arrive through a promise, so the
       // newest one held may be a frame or two behind the instant asked for,
-      // which is near enough: the ring is picked from by stamp, not by index.
-      anchorStamp = ring.newest()?.stamp ?? clock();
+      // which is near enough: the store is picked from by media time, not by
+      // index.
+      anchorSeconds = store.newest()?.mediaSeconds ?? video.currentTime;
       drawnAs = '';
     },
 
@@ -725,8 +745,8 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
       if (!active || !frozen) {
         return;
       }
-      // Everything held is still good: a stamp is a wall instant and the audio
-      // has been shifted by the same pause, which arrives as `setHeld`.
+      // Everything held is still good: a frame is stamped with where in the
+      // song it belongs, and a pause moved nothing in the song.
       frozen = false;
       if (cancelFrames === null) {
         scheduleFrames();
@@ -744,23 +764,22 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
     },
 
     state() {
-      const now = clock();
+      const position = follow === null ? null : followedTo(follow, clock());
       return {
         active,
         face,
         frozen,
         priming,
-        frames: ring.frames,
-        bytes: ring.bytes,
-        dropped: ring.dropped,
-        delaySeconds,
-        heldSeconds,
-        paintedStampMs: paintedStamp,
-        anchorStampMs: anchorStamp,
+        frames: store.frames,
+        bytes: store.bytes,
+        dropped: store.dropped,
+        decoded: codec.decoded,
+        positionSeconds: position,
+        paintedSeconds,
+        anchorSeconds,
         offsetSeconds:
-          paintedStamp === null
-            ? null
-            : (now - paintedStamp) / 1000 - (delaySeconds + heldSeconds),
+          position === null || paintedSeconds === null ? null : paintedSeconds - position,
+        snaps,
       };
     },
   };

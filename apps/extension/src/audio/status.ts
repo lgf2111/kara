@@ -6,6 +6,11 @@
  *   first windows, and there is nothing yet to play. `progress.ts` is how long
  *   that is and how far along it is.
  * - `live`: separated audio is coming out, delayed by the agreed amount.
+ * - `catching-up`: the delay was not enough — a window started costing more
+ *   than it did at the start of the song — so it has grown, and the output is
+ *   making up the difference. `audio/delay-plan.ts` is the arithmetic and why
+ *   this state exists at all: what it replaced was silence for the rest of the
+ *   song, counted in millions of starved frames and never recovered from.
  * - `paused`: the page is paused, so the output and the picture are frozen
  *   where they are. Nothing has been thrown away, and a resume carries on from
  *   the same sample with the same delay.
@@ -31,7 +36,14 @@
  * Pure, so the table is the test.
  */
 
-export type Status = 'idle' | 'priming' | 'live' | 'paused' | 'unsupported' | 'error';
+export type Status =
+  | 'idle'
+  | 'priming'
+  | 'live'
+  | 'catching-up'
+  | 'paused'
+  | 'unsupported'
+  | 'error';
 
 export interface StatusState {
   readonly status: Status;
@@ -41,12 +53,20 @@ export interface StatusState {
   readonly resumeTo?: 'priming' | 'live';
 }
 
+/** Whether audio is coming out, catching up or not. */
+export function isAudible(status: Status): boolean {
+  return status === 'live' || status === 'catching-up';
+}
+
 export type StatusEvent =
   | { readonly type: 'start' }
   /** The first separated audio reached the player. */
   | { readonly type: 'primed' }
   /** A seek, a rate change or an ad: what is buffered is worthless. */
   | { readonly type: 'reset' }
+  /** The delay has grown and the output is making up the difference. */
+  | { readonly type: 'catch-up' }
+  | { readonly type: 'caught-up' }
   /** The page paused. Everything is kept; nothing moves. */
   | { readonly type: 'hold' }
   | { readonly type: 'resume' }
@@ -58,7 +78,19 @@ export const IDLE: StatusState = { status: 'idle', reason: null };
 
 /** Whether the capture is doing something a pause or a reset could affect. */
 export function isRunning(status: Status): boolean {
-  return status === 'priming' || status === 'live' || status === 'paused';
+  return (
+    status === 'priming' || status === 'live' || status === 'catching-up' || status === 'paused'
+  );
+}
+
+/** What a pause goes back to, which is never the catching up it interrupted. */
+function resumeFor(status: Status): 'priming' | 'live' | null {
+  if (status === 'priming') {
+    return 'priming';
+  }
+  // Catching up is a thing in progress rather than a state to come back to: a
+  // pause gives the output all the time it needed, so a resume is simply live.
+  return isAudible(status) ? 'live' : null;
 }
 
 export function nextStatus(state: StatusState, event: StatusEvent): StatusState {
@@ -81,23 +113,29 @@ export function nextStatus(state: StatusState, event: StatusEvent): StatusState 
         // paused. Nothing is audible yet, but a resume goes to a song now.
         return { status: 'paused', reason: null, resumeTo: 'live' };
       }
-      return state.status === 'priming' || state.status === 'live'
+      return state.status === 'priming' || isAudible(state.status)
         ? { status: 'live', reason: null }
         : state;
+    case 'catch-up':
+      // Only something audible can starve. Priming has not started playing and
+      // has nothing to make up.
+      return isAudible(state.status) ? { status: 'catching-up', reason: null } : state;
+    case 'caught-up':
+      return state.status === 'catching-up' ? { status: 'live', reason: null } : state;
     case 'reset':
       if (state.status === 'paused') {
         return { status: 'paused', reason: null, resumeTo: 'priming' };
       }
-      return state.status === 'priming' || state.status === 'live'
+      return state.status === 'priming' || isAudible(state.status)
         ? { status: 'priming', reason: null }
         : state;
-    case 'hold':
+    case 'hold': {
       if (state.status === 'paused') {
         return state;
       }
-      return state.status === 'priming' || state.status === 'live'
-        ? { status: 'paused', reason: null, resumeTo: state.status }
-        : state;
+      const back = resumeFor(state.status);
+      return back === null ? state : { status: 'paused', reason: null, resumeTo: back };
+    }
     case 'resume':
       return state.status === 'paused'
         ? { status: state.resumeTo ?? 'priming', reason: null }

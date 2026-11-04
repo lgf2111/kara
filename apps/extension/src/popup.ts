@@ -1,11 +1,15 @@
 import { canNudge, KEY_DEFAULT, nudgeKey } from './audio/key.ts';
+import { debugReportText } from './debug-report.ts';
 import { ON_READY_CHOICES, popupView, type PopupView } from './popup/popup-view.ts';
 import {
+  DEBUG_KEY,
   packet,
   STATUS_KEY,
   type Command,
+  type PipelineDebug,
   type Request,
   type StatusReport,
+  type StoredDebug,
   type StoredStatus,
 } from './protocol.ts';
 import { reasonText } from './reason.ts';
@@ -35,6 +39,9 @@ import { mediaStreamId } from './tab-capture.ts';
  * anything.
  */
 
+/** How often the event log is fetched while the popup is open, in ms. */
+const DEBUG_TICK_MS = 2000;
+
 function need<T extends Element>(selector: string): T {
   const found = document.querySelector<T>(selector);
   if (found === null) {
@@ -52,6 +59,9 @@ const keyValue = need<HTMLSpanElement>('#key-value');
 const keyDown = need<HTMLButtonElement>('#key-down');
 const keyUp = need<HTMLButtonElement>('#key-up');
 const keyClear = need<HTMLButtonElement>('#key-clear');
+const copyDebug = need<HTMLButtonElement>('#copy-debug');
+const copyNote = need<HTMLParagraphElement>('#copy-note');
+const debugDump = need<HTMLTextAreaElement>('#debug-dump');
 
 let tabId: number | null = null;
 let url: string | undefined;
@@ -62,6 +72,8 @@ let key = DEFAULT_SETTINGS.key;
 /** A start that has been asked for and not yet answered. */
 let starting = false;
 let failure: string | null = null;
+/** The event log as the offscreen document last sent it, or null for none. */
+let pipeline: PipelineDebug | null = null;
 
 const radios = new Map<OnReady, HTMLInputElement>();
 
@@ -153,6 +165,50 @@ function take(stored: unknown): void {
   report = value !== undefined && value.tabId === tabId ? value.report : null;
 }
 
+function takeDebug(stored: unknown): void {
+  const value = stored as StoredDebug | undefined;
+  pipeline = value !== undefined && value.tabId === tabId ? value.pipeline : null;
+}
+
+/**
+ * Asks the offscreen document for its event log, which comes back through the
+ * service worker into session storage.
+ *
+ * Asked for in advance rather than on the button, because the clipboard is
+ * only granted inside the click that pressed it: a copy that awaited a message
+ * first would have lost the gesture by the time it had anything to copy.
+ */
+function askForDebug(): void {
+  command({ type: 'debug' });
+}
+
+/**
+ * Copies the report, redacted by `debug-report.ts`: an origin and no page
+ * address beyond it, no video title, and nothing that is or was audio.
+ */
+function copyReport(): void {
+  const text = debugReportText(
+    {
+      atMs: Date.now(),
+      url,
+      status: report,
+      pipeline,
+      version: chrome.runtime.getManifest().version,
+    },
+    navigator.userAgent,
+  );
+  copyNote.hidden = false;
+  copyNote.textContent = 'Copied.';
+  navigator.clipboard.writeText(text).catch(() => {
+    // No clipboard, which some Chrome builds and policies answer with. The
+    // text itself is the fallback: selected, so one keystroke takes it.
+    copyNote.textContent = 'Select the text below and copy it.';
+    debugDump.hidden = false;
+    debugDump.value = text;
+    debugDump.select();
+  });
+}
+
 async function start(): Promise<void> {
   if (tabId === null) {
     return;
@@ -195,10 +251,15 @@ action.addEventListener('click', () => {
   void start();
 });
 
+copyDebug.addEventListener('click', copyReport);
+
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'session' && Object.hasOwn(changes, STATUS_KEY)) {
     take(changes[STATUS_KEY]?.newValue);
     draw();
+  }
+  if (area === 'session' && Object.hasOwn(changes, DEBUG_KEY)) {
+    takeDebug(changes[DEBUG_KEY]?.newValue);
   }
   if (area === 'sync' && Object.hasOwn(changes, SETTINGS_KEY)) {
     const settings = parseSettings(changes[SETTINGS_KEY]?.newValue);
@@ -217,7 +278,12 @@ async function open(): Promise<void> {
   onReady = settings.onReady;
   key = settings.key;
   take((await chrome.storage.session.get(STATUS_KEY))[STATUS_KEY]);
+  takeDebug((await chrome.storage.session.get(DEBUG_KEY))[DEBUG_KEY]);
   draw();
+  // And keep it fresh while this window is open, so the button always has
+  // something current to copy.
+  askForDebug();
+  setInterval(askForDebug, DEBUG_TICK_MS);
 }
 
 open().catch((cause: unknown) => {

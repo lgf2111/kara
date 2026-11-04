@@ -1,4 +1,4 @@
-import { isRunning } from './audio/status.ts';
+import { isAudible, isRunning } from './audio/status.ts';
 import { decidePageEvent, shouldReprime, type PageEvent } from './content/page-events.ts';
 import { panelView, prepareDetail, TOOLBAR_HINT } from './content/panel-view.ts';
 import { mountPanel, type Panel } from './content/panel.ts';
@@ -6,14 +6,15 @@ import { isRealSeek, type TimelinePoint } from './content/timeline.ts';
 import { findPlayer, isAdShowing, isAutohidden, watchPlayer } from './content/youtube.ts';
 import {
   createDelayedPicture,
-  DEFAULT_DELAY_SECONDS,
   type DelayedPicture,
   type PictureFace,
 } from './picture/delayed-picture.ts';
+import { wallNowMs } from './picture/wall-clock.ts';
 import {
   packet,
   packetFor,
   type Command,
+  type MediaSample,
   type PlayMode,
   type Report,
   type Request,
@@ -41,20 +42,42 @@ import {
  * that cannot be unit tested and so should be the part with the least
  * thinking in it.
  *
+ * There is a fifth thing now, and it is the most important one: **this is the
+ * only place that can see the page's clock, so it reports it.** Four times a
+ * second and on every media event, `{wallMs, mediaSeconds, playing, rate}`
+ * goes to the offscreen document, and that is what the audio side uses to
+ * decide which capture is real audio, where each processed sample sits in the
+ * song, and whether anything actually jumped. The picture is driven the other
+ * way round, by the audio reporting where in the song its output has reached.
+ * Neither half extrapolates the other's clock any more, which is what used to
+ * let a buffering stall pull them apart for good.
+ *
  * Three shapes of the page are worth knowing about. Media events do not
  * bubble, so the listeners are on the document in the capture phase: that
  * catches them wherever they are targeted, which matters on a site that
  * replaces its video element whenever it feels like it. Because it does that,
  * the panel and the overlay are re-mounted whenever either turns out to have
  * been torn out from under them, which is cheaper and far more reliable than
- * listening for the site's own navigation events. And `currentTime` is
- * sampled as the video plays, because a `seeking` event is not evidence of a
- * seek — the page fires them for buffering and for quality changes too, and
- * priming again costs the whole delay.
+ * listening for the site's own navigation events. And paused is reconciled on
+ * every tick rather than only on the event, because a capture that starts on
+ * an already-paused video never gets a `pause` to listen for.
  */
 
 /** How often the panel is redrawn and the mounting re-checked, in ms. */
 const TICK_MS = 500;
+
+/**
+ * How often the page says where it is in the song.
+ *
+ * Four times a second, plus every media event. This is the clock both halves
+ * of the extension now read: the audio side maps captured samples onto media
+ * time with these, throws away whatever was captured while the song was not
+ * moving, and decides a reset from media time jumping rather than from a
+ * `seeking` event. Four a second is a quarter of a second of extrapolation at
+ * worst, which is well inside the three quarters of a second a jump has to
+ * clear, and eight messages a second between two contexts is nothing.
+ */
+const MEDIA_TICK_MS = 250;
 
 /**
  * How long a page is allowed to have no video in it before that is worth a
@@ -96,12 +119,6 @@ const startedAt = performance.now();
 let lastPoint: TimelinePoint | null = null;
 /** Whether the seek in flight was a real one, which is what `seeked` needs. */
 let seeking = false;
-/** When the page paused, so the picture can be shifted before the audio says. */
-let pausedAt: number | null = null;
-/** What the audio had been frozen for before this pause began. */
-let heldBefore = 0;
-/** Seconds of pause the picture is shifted by, until the report refines it. */
-let heldGuess = 0;
 /** When the picture last jumped back, which the panel explains for a while. */
 let jumpedAt: number | null = null;
 /** Whether the still frame has been pinned to where the audio capture began. */
@@ -121,11 +138,6 @@ function toBackground(body: Request): void {
 /** Whether the audio side is doing anything the picture should match. */
 function running(): boolean {
   return report !== null && isRunning(report.status);
-}
-
-/** The delay to aim at: what was measured, or the guess until it is. */
-function delayNow(): number {
-  return report?.delaySeconds ?? DEFAULT_DELAY_SECONDS;
 }
 
 function refresh(): void {
@@ -156,6 +168,68 @@ function sample(): void {
 }
 
 /**
+ * Whether the page is moving through the song.
+ *
+ * `paused` alone is not it: a video that is buffering, waiting for data or
+ * stalled is not paused and is not moving either, and audio captured through
+ * one of those is silence that must not be stapled into the song.
+ * `HAVE_FUTURE_DATA` is the line the platform draws between a video that can
+ * advance and one that cannot.
+ */
+function playingNow(video: HTMLVideoElement): boolean {
+  return (
+    !video.paused && !video.ended && !video.seeking && video.readyState >= video.HAVE_FUTURE_DATA
+  );
+}
+
+/**
+ * Tells the audio side where the page is in the song.
+ *
+ * Stamped on the clock both contexts share — `performance.timeOrigin +
+ * performance.now()` — because each context measures `performance.now()` from
+ * its own creation, so the two would otherwise be reading different numbers
+ * for the same instant.
+ */
+function tellMedia(): void {
+  const video = mounted?.video;
+  if (video === undefined || !running()) {
+    return;
+  }
+  const sampled: MediaSample = {
+    wallMs: wallNowMs(),
+    mediaSeconds: video.currentTime,
+    playing: playingNow(video),
+    rate: video.playbackRate,
+  };
+  toOffscreen({ type: 'media', sample: sampled });
+}
+
+/**
+ * Keeps the audio's idea of paused and the page's the same.
+ *
+ * A pause and a play are events, and events are missed: a capture that starts
+ * on an already-paused video never gets one, which used to mean the pipeline
+ * separated silence and started its timeline on it. So the two are reconciled
+ * on every tick as well. It is also what makes a page that paused itself —
+ * which YouTube does — behave like one somebody paused.
+ */
+function syncPaused(): void {
+  const video = mounted?.video;
+  if (video === undefined || report === null || !running()) {
+    return;
+  }
+  if (video.paused && report.status !== 'paused') {
+    toOffscreen({ type: 'hold' });
+    mounted?.picture.freeze();
+    return;
+  }
+  if (!video.paused && report.status === 'paused') {
+    toOffscreen({ type: 'resume' });
+    mounted?.picture.thaw();
+  }
+}
+
+/**
  * Which face the overlay should be wearing, or null when it should be down.
  *
  * Down for an ad or for nothing running, because a delayed picture over audio
@@ -168,7 +242,7 @@ function faceWanted(): PictureFace | null {
   if (report === null || inAd || !running()) {
     return null;
   }
-  if (report.status === 'live') {
+  if (isAudible(report.status)) {
     return 'live';
   }
   return report.onReady === 'continue' ? 'hidden' : 'dimmed';
@@ -181,33 +255,22 @@ function apply(event: PageEvent): void {
       if (decision.reset !== null) {
         toOffscreen({ type: 'reset', reason: decision.reset });
       }
-      // A new timeline, so the pause shift and the still frame go with it.
-      heldGuess = 0;
-      heldBefore = 0;
-      pausedAt = null;
+      // A new timeline, so the still frame goes with it.
       anchored = false;
       break;
     case 'hold':
-      pausedAt = performance.now();
-      heldBefore = report?.heldSeconds ?? heldGuess;
       toOffscreen({ type: 'hold' });
       break;
     case 'resume':
-      if (pausedAt !== null) {
-        // Counted from what the audio had been frozen for before this pause,
-        // rather than added to whatever the reports have reached mid-pause, so
-        // that the two cannot be counted twice. The audio's own number lands
-        // in the next report; this is so the picture does not lurch in the
-        // meantime.
-        heldGuess = Math.max(heldGuess, heldBefore + (performance.now() - pausedAt) / 1000);
-        pausedAt = null;
-        mounted?.picture.setHeld(heldGuess);
-      }
       toOffscreen({ type: 'resume' });
       break;
     case 'none':
       break;
   }
+  // Whatever just happened, the audio side should hear about it now rather
+  // than up to a quarter of a second later: a report on an event boundary is
+  // what tells it a stall began or a jump landed.
+  tellMedia();
   if (decision.passthrough !== null) {
     toOffscreen({ type: 'passthrough', enabled: decision.passthrough });
   }
@@ -232,7 +295,7 @@ function apply(event: PageEvent): void {
         // Down and straight back up: the frames held are from before whatever
         // just happened, and the audio has thrown its own away too.
         picture.clear();
-        picture.start(delayNow(), faceWanted() ?? 'dimmed');
+        picture.start(faceWanted() ?? 'dimmed');
       }
       return;
   }
@@ -250,13 +313,6 @@ function onStatus(next: StatusReport): void {
     // until somebody says it was meant.
     jumpedAt = performance.now();
   }
-  // The audio is the authority on how long it was frozen: its own freeze is a
-  // fraction shorter than the page's, by the twenty milliseconds the output
-  // spends fading out, and matching the audio is the point. The guess made at
-  // the resume is only there to bridge the gap until this report arrives.
-  if (next.heldSeconds + 0.1 >= heldGuess) {
-    heldGuess = next.heldSeconds;
-  }
   const picture = mounted?.picture;
   const face = faceWanted();
   if (picture !== undefined) {
@@ -264,8 +320,6 @@ function onStatus(next: StatusReport): void {
       picture.clear();
       anchored = false;
     } else {
-      picture.setDelay(delayNow());
-      picture.setHeld(heldGuess);
       picture.setPreparing(
         next.prepare === null
           ? null
@@ -278,7 +332,7 @@ function onStatus(next: StatusReport): void {
         anchored = true;
       }
       if (!picture.state().active) {
-        picture.start(delayNow(), face);
+        picture.start(face);
       } else if (next.status !== 'paused') {
         // A pause leaves the face alone; everything else follows the report.
         picture.setFace(face);
@@ -286,6 +340,19 @@ function onStatus(next: StatusReport): void {
     }
   }
   refresh();
+}
+
+/**
+ * The metrics carry the one number the picture is driven by: where in the song
+ * the output has reached. Ten times a second, and the overlay paints the frame
+ * that belongs there.
+ */
+function onMetrics(media: number | null): void {
+  const video = mounted?.video;
+  if (video !== undefined) {
+    mounted?.picture.setRate(video.playbackRate);
+  }
+  mounted?.picture.setPosition(media);
 }
 
 /**
@@ -356,8 +423,7 @@ function mount(): void {
   if (face !== null) {
     // The audio was already going: this is a re-mount after the page replaced
     // its player, so the picture starts again from here.
-    picture.setHeld(report?.heldSeconds ?? 0);
-    picture.start(delayNow(), face);
+    picture.start(face);
   }
 }
 
@@ -434,13 +500,22 @@ const MEDIA_EVENTS: readonly MediaEvent[] = [
 ];
 
 /**
+ * Events that say nothing about the timeline and everything about whether the
+ * page is moving through it. They are listened for so that a report goes out
+ * at the moment a stall begins or ends rather than up to a quarter of a second
+ * later, because that quarter second is capture the audio side has to decide
+ * about.
+ */
+const STALL_EVENTS = ['waiting', 'playing', 'stalled', 'canplay', 'suspend'] as const;
+
+/**
  * Whether this event is worth acting on at all.
  *
- * `seeking` is the only one that has to be judged rather than obeyed, and it
- * is judged by arithmetic on the video's own clock: the page fires it for
- * buffering, for adopting a new source and for a quality change, none of which
- * move the person anywhere, and all of which would otherwise cost the whole
- * delay. `seeked` follows whatever its `seeking` was decided to be.
+ * `seeking` is the only one that has to be judged rather than obeyed, and only
+ * the picture now acts on it: the page fires it for buffering, for adopting a
+ * new source and for a quality change, none of which move the person anywhere.
+ * The audio side decides for itself, from whether media time jumped.
+ * `seeked` follows whatever its `seeking` was decided to be.
  */
 function worthActingOn(event: MediaEvent): boolean {
   if (event === 'seeking') {
@@ -488,6 +563,23 @@ document.addEventListener(
   true,
 );
 
+for (const event of STALL_EVENTS) {
+  document.addEventListener(
+    event,
+    (fired) => {
+      if (mounted === null || fired.target !== mounted.video) {
+        return;
+      }
+      // Not a timeline decision: nothing here resets anything. It is a report
+      // on the boundary, so the audio side knows a stall began or ended
+      // within a chunk of capture rather than within a tick.
+      sample();
+      tellMedia();
+    },
+    true,
+  );
+}
+
 chrome.runtime.onMessage.addListener((message: unknown) => {
   const body = packetFor('tab', message)?.body;
   if (body === undefined) {
@@ -499,6 +591,7 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
   }
   if (body.type === 'metrics') {
     (globalThis as unknown as ReportHolder).__karaReport = body;
+    onMetrics(body.metrics.mediaSeconds);
   }
   if (body.type === 'hint') {
     hint = TOOLBAR_HINT;
@@ -510,6 +603,12 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
 setInterval(() => {
   ensure();
   sample();
+  syncPaused();
   refresh();
 }, TICK_MS);
+
+// Faster than the panel, because this one is load-bearing: the audio side
+// throws away capture taken while the song was not moving, and it can only
+// know that from these.
+setInterval(tellMedia, MEDIA_TICK_MS);
 ensure();

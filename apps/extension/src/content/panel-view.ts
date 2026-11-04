@@ -21,7 +21,14 @@ import type { PlayMode, ResetReason, StatusReport } from '../protocol.ts';
  * anything to hear.
  */
 
-export type PanelState = 'off' | 'preparing' | 'live' | 'paused' | 'unsupported' | 'error';
+export type PanelState =
+  | 'off'
+  | 'preparing'
+  | 'live'
+  | 'catching-up'
+  | 'paused'
+  | 'unsupported'
+  | 'error';
 
 export interface PanelView {
   readonly state: PanelState;
@@ -61,6 +68,26 @@ export interface PanelInput {
  * can only point at the one that can.
  */
 export const TOOLBAR_HINT = 'Click the Kara icon in the toolbar to start';
+
+/**
+ * What a start on a paused video says. Nothing can happen until the page
+ * plays — the capture is fed by the page — and the thing this replaced was
+ * separating silence and starting the timeline on it, which looked like
+ * getting ready and ended in an extension that never played anything.
+ */
+export const PRESS_PLAY = 'Press play to begin';
+
+/**
+ * Why the song just stepped back and went quiet for a moment. Worth saying:
+ * the alternative, which is what used to happen, was silence for the rest of
+ * the song with no explanation at all.
+ */
+export function catchUpNote(catchUp: { readonly addedSeconds: number } | null): string | null {
+  if (catchUp === null || !Number.isFinite(catchUp.addedSeconds) || catchUp.addedSeconds <= 0) {
+    return null;
+  }
+  return `separating fell behind; ${String(Math.round(catchUp.addedSeconds))} s more delay`;
+}
 
 /** The slider's position for a gain, and the gain for a position. */
 export function guidePercent(level: number): number {
@@ -158,11 +185,23 @@ export function panelView(input: PanelInput): PanelView {
     return {
       ...quiet,
       state: 'paused',
-      label: 'Paused',
-      // The one thing a person needs to know here, because the old behaviour
-      // was to throw it all away and this one does not.
-      detail: 'nothing lost; it carries on from here',
+      label: report.waitingForPlay ? 'Waiting' : 'Paused',
+      // Two different sentences for two different pauses. One has a song in
+      // it and the other has not started yet, and telling somebody nothing
+      // was lost when nothing has happened reads as a stall.
+      detail: report.waitingForPlay ? PRESS_PLAY : 'nothing lost; it carries on from here',
       controls: report.delaySeconds !== null,
+    };
+  }
+
+  if (report.status === 'catching-up') {
+    return {
+      ...quiet,
+      state: 'catching-up',
+      label: 'Catching up',
+      progress: report.catchUp?.fraction ?? 0,
+      detail: catchUpNote(report.catchUp),
+      controls: true,
     };
   }
 

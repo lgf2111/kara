@@ -122,6 +122,30 @@
         font-size: 11px;
         opacity: 0.65;
       }
+      /* Not a thing anybody needs to find quickly, and not a thing to hide
+         either: the whole point is that it can be sent without being asked
+         for twice. */
+      #copy-debug {
+        margin: 14px 0 0;
+        width: 100%;
+        padding: 5px 10px;
+        font: inherit;
+        font-size: 12px;
+        border: 1px solid rgba(127, 127, 127, 0.4);
+        border-radius: 8px;
+        background: none;
+        opacity: 0.8;
+        cursor: pointer;
+      }
+      #copy-debug:hover {
+        background: rgba(127, 127, 127, 0.12);
+      }
+      #debug-dump {
+        margin: 6px 0 0;
+        width: 100%;
+        box-sizing: border-box;
+        font: 11px/1.3 ui-monospace, monospace;
+      }
       [hidden] {
         display: none !important;
       }
@@ -150,6 +174,12 @@
     <fieldset id="on-ready">
       <legend>When ready</legend>
     </fieldset>
+    <!-- What to send when this goes wrong. The report is an origin, the
+         measurements and a ring of events: no media, no video id, no title.
+         src/debug-report.ts is the one place that redaction happens. -->
+    <button id="copy-debug" type="button">Copy debug report</button>
+    <p id="copy-note" class="hint" hidden></p>
+    <textarea id="debug-dump" rows="4" readonly hidden></textarea>
     <script type="module" src="/src/popup.ts"></script>
   </body>
 </html>

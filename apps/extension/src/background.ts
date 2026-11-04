@@ -1,11 +1,14 @@
 import {
+  DEBUG_KEY,
   IDLE_REPORT,
   packet,
   packetFor,
   STATUS_KEY,
+  type PipelineDebug,
   type Report,
   type Status,
   type StatusReport,
+  type StoredDebug,
   type StoredStatus,
 } from './protocol.ts';
 import { reasonText } from './reason.ts';
@@ -77,6 +80,7 @@ const BADGE: Readonly<Record<Status, string>> = {
   idle: '',
   priming: '...',
   live: 'on',
+  'catching-up': '>>',
   paused: '||',
   unsupported: '!',
   error: '!',
@@ -86,6 +90,7 @@ const TITLE: Readonly<Record<Status, string>> = {
   idle: 'Kara: capture this tab',
   priming: 'Kara: getting ready',
   live: 'Kara: live',
+  'catching-up': 'Kara: catching up',
   paused: 'Kara: paused with the page',
   unsupported: 'Kara: this machine cannot do it live',
   error: 'Kara: something went wrong',
@@ -110,6 +115,11 @@ async function remember(value: Captured | null): Promise<void> {
 function keepStatus(report: StatusReport, tabId: number | null): void {
   const stored: StoredStatus = { tabId, report };
   chrome.storage.session.set({ [STATUS_KEY]: stored }).catch(() => undefined);
+}
+
+function keepDebug(pipeline: PipelineDebug, tabId: number | null): void {
+  const stored: StoredDebug = { tabId, pipeline };
+  chrome.storage.session.set({ [DEBUG_KEY]: stored }).catch(() => undefined);
 }
 
 function send(message: unknown): void {
@@ -234,6 +244,14 @@ function relay(report: Report, tabId: number | null): void {
     void show(report.status, tabId);
     keepStatus(report, tabId);
   }
+  if (report.type === 'debug-log') {
+    // Left where a popup can read it synchronously: its copy button has to
+    // answer inside the click that pressed it, so what it copies has to be
+    // something it already has. Not sent on to the tab — the page has no use
+    // for an event log and no business holding one.
+    keepDebug(report.pipeline, tabId);
+    return;
+  }
   if (tabId !== null) {
     chrome.tabs.sendMessage(tabId, packet('tab', report, tabId)).catch(() => undefined);
   }
@@ -245,7 +263,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender) => {
     return false;
   }
   const body = received.body;
-  if (body.type === 'status' || body.type === 'metrics') {
+  if (body.type === 'status' || body.type === 'metrics' || body.type === 'debug-log') {
     relay(body, received.tabId);
   }
   if (body.type === 'request-start') {
