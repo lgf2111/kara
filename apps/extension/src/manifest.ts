@@ -31,7 +31,15 @@ export interface Manifest {
   readonly minimum_chrome_version: string;
   readonly permissions: readonly string[];
   readonly host_permissions: readonly string[];
-  readonly action: { readonly default_title: string };
+  readonly action: {
+    readonly default_title: string;
+    /**
+     * With this set, `chrome.action.onClicked` never fires: the click opens
+     * this page instead, and the popup is where the tab capture gesture now
+     * lands. There is no other place Chrome will grant one.
+     */
+    readonly default_popup: string;
+  };
   readonly background: { readonly service_worker: string; readonly type: 'module' };
   readonly content_scripts: readonly {
     readonly matches: readonly string[];
@@ -59,7 +67,7 @@ export function buildManifest(options: ManifestOptions = {}): Manifest {
     minimum_chrome_version: '116',
     permissions: ['tabCapture', 'offscreen', 'activeTab', 'scripting', 'storage'],
     host_permissions: matches,
-    action: { default_title: 'Kara: capture this tab' },
+    action: { default_title: 'Kara: capture this tab', default_popup: 'popup.html' },
     background: { service_worker: 'background.js', type: 'module' },
     // Not a module: Chrome runs content scripts as classic scripts, so this
     // one is built as its own self-contained file.

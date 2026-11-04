@@ -53,4 +53,17 @@ describe('buildManifest', () => {
     expect(manifest.background).toEqual({ service_worker: 'background.js', type: 'module' });
     expect(manifest).not.toHaveProperty('web_accessible_resources');
   });
+
+  /**
+   * The popup is not decoration: `chrome.tabCapture.getMediaStreamId` is only
+   * granted off the back of a click in one of the extension's own contexts,
+   * and with this set `chrome.action.onClicked` never fires at all, so this is
+   * where that click has to land.
+   */
+  it('puts a popup on the action, which is where the gesture now lands', () => {
+    expect(buildManifest().action).toEqual({
+      default_title: 'Kara: capture this tab',
+      default_popup: 'popup.html',
+    });
+  });
 });

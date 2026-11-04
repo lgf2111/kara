@@ -1,3 +1,11 @@
+import {
+  CROSSFADE_SECONDS,
+  FADE_IN_SECONDS,
+  gainAt,
+  heldGain,
+  rampTo,
+  type GainRamp,
+} from '../audio/mix-gain.ts';
 import { createFrameRing, frameBytes, type Held } from './frame-ring.ts';
 import { wallMsOf, wallNowMs } from './wall-clock.ts';
 
@@ -19,7 +27,7 @@ import { wallMsOf, wallNowMs } from './wall-clock.ts';
  * by pausing it: it has to keep playing, because it is the thing producing the
  * frames and the audio being captured.
  *
- * Three decisions in it are worth stating.
+ * Four decisions in it are worth stating.
  *
  * **The overlay takes no input.** `pointer-events: none`, and it is appended
  * inside the player at a z-index above the video and below everything the page
@@ -35,13 +43,33 @@ import { wallMsOf, wallNowMs } from './wall-clock.ts';
  * either side. Theatre mode, fullscreen and a window drag all come through a
  * `ResizeObserver`.
  *
- * **While priming it dims rather than freezes.** For the first `delay` seconds
- * there is no frame old enough to show, and there is nothing to be done about
- * that. It shows the newest frame instead, dimmed, with the seconds counting
- * down, so the person can see the video is running and see how long the wait
- * is. When the countdown reaches zero the picture steps back by the delay — at
- * the same moment the audio starts playing from the same instant, which is the
- * point of all of it.
+ * **It has three faces, and which one is up is the `onReady` setting.** While
+ * the audio gets ready there is no frame old enough to show, and there is
+ * nothing to be done about that; what there is a choice about is what to show
+ * instead.
+ *
+ * - `dimmed` holds one still frame — the one that was on screen at the instant
+ *   the audio capture began — behind a progress bar. When the audio arrives,
+ *   the dim fades off and the picture carries on from that same frame, so
+ *   nothing jumps. This is `restart`.
+ * - `hidden` keeps the canvas off the page entirely and lets the person watch
+ *   the real video, undelayed, while frames are collected behind it. When the
+ *   audio arrives the canvas dissolves in over about eight tenths of a second,
+ *   which is a picture jumping back by the delay, and the panel says so. This
+ *   is `continue`.
+ * - `live` is the delayed picture.
+ *
+ * Both fades are the tested curves in `audio/mix-gain.ts`, read on the wall
+ * clock instead of the audio one.
+ *
+ * **A pause shifts the delay rather than resetting it.** The page stops
+ * producing frames and the audio stops being fed, so when both start again
+ * every frame held is still good and the audio is still exactly where it was:
+ * what has changed is that the wall clock moved on while neither did. So the
+ * frame to paint is the one from `now - delay - held`, where `held` is how
+ * long the *audio* was frozen, reported by the player. Its own freeze is a
+ * fraction shorter than the page's, by the twenty milliseconds the output
+ * spends fading out, and matching the audio is the point.
  *
  * Used by the content script on YouTube and by the debug page on a local
  * fixture. It knows nothing about either: a `<video>`, something to put the
@@ -71,7 +99,18 @@ const GEOMETRY_MS = 250;
 /** `createImageBitmap` calls allowed in flight at once. */
 const PENDING_LIMIT = 2;
 
-const DIM = 'rgba(0, 0, 0, 0.55)';
+/** How black the still frame goes while the audio gets ready. */
+const DIM_ALPHA = 0.55;
+
+/** Which face is on screen. */
+export type PictureFace = 'dimmed' | 'hidden' | 'live';
+
+/** What the overlay says while it is waiting, straight from the audio side. */
+export interface PreparingView {
+  /** Nought to one. */
+  readonly fraction: number;
+  readonly label: string;
+}
 
 export interface DelayedPictureOptions {
   /** The page's video. Hidden while the overlay is up, never paused. */
@@ -88,8 +127,9 @@ export interface DelayedPictureOptions {
 
 export interface PictureState {
   readonly active: boolean;
+  readonly face: PictureFace;
   readonly frozen: boolean;
-  /** Nothing is old enough to paint yet, so the dimmed frame is showing. */
+  /** Nothing is old enough to paint yet, so a still frame is showing. */
   readonly priming: boolean;
   readonly frames: number;
   readonly bytes: number;
@@ -97,8 +137,12 @@ export interface PictureState {
   readonly dropped: number;
   /** The delay being aimed at, which is the audio's. */
   readonly delaySeconds: number;
+  /** Seconds the audio has been frozen by pauses, which is added to it. */
+  readonly heldSeconds: number;
   /** When the frame now on the canvas was displayed, on the wall clock. */
   readonly paintedStampMs: number | null;
+  /** The still frame `dimmed` holds, or null before the audio started. */
+  readonly anchorStampMs: number | null;
   /**
    * How far the painted frame is from where the delay says it should be, in
    * seconds. Positive means the picture is later than asked, negative means
@@ -107,15 +151,28 @@ export interface PictureState {
    * audio, this is the picture-to-audio offset.
    */
   readonly offsetSeconds: number | null;
-  readonly secondsLeft: number;
 }
 
 export interface DelayedPicture {
-  /** Hides the video, puts the canvas up, and starts keeping frames. */
-  start: (delaySeconds: number) => void;
+  /** Starts keeping frames, with the given face on screen. */
+  start: (delaySeconds: number, face?: PictureFace) => void;
   setDelay: (seconds: number) => void;
+  /** Seconds the audio has spent frozen, which the picture is shifted by. */
+  setHeld: (seconds: number) => void;
+  /** Swaps the face, fading rather than cutting on the way to `live`. */
+  setFace: (face: PictureFace) => void;
+  /** What the progress bar on the dimmed face says. */
+  setPreparing: (view: PreparingView | null) => void;
+  /**
+   * Pins the still frame to whatever is on screen now, which is the instant
+   * the audio capture began. What `restart` holds, and where it carries on
+   * from.
+   */
+  anchor: () => void;
   /** Holds the frame on screen and stops keeping new ones, for a pause. */
   freeze: () => void;
+  /** Carries on from it, for a resume. */
+  thaw: () => void;
   /** Frames gone, canvas down, the real video visible again. */
   clear: () => void;
   stop: () => void;
@@ -180,25 +237,33 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
   let active = false;
   let frozen = false;
   let priming = true;
+  let face: PictureFace = 'dimmed';
   let delaySeconds = DEFAULT_DELAY_SECONDS;
+  let heldSeconds = 0;
+  let preparing: PreparingView | null = null;
   let painted: Held<ImageBitmap> | null = null;
   let paintedStamp: number | null = null;
-  /** The first frame kept since the last start, which the countdown is from. */
-  let firstStamp: number | null = null;
+  /** The still frame the dimmed face holds: where the audio capture began. */
+  let anchorStamp: number | null = null;
   let lastKept = 0;
   let pending = 0;
   let rect: Rect = NOWHERE;
   let measuredAt = 0;
   /** The video's own inline opacity, to put back. Null when not hidden. */
   let hiddenOpacity: string | null = null;
+  let videoHidden = false;
+  let mounted = false;
   let paintHandle: number | null = null;
   let cancelFrames: (() => void) | null = null;
+  /** How dimmed the still frame is, from one to nought as the audio arrives. */
+  let dim: GainRamp = heldGain(1);
+  /** The canvas's own opacity, for dissolving in over the real video. */
+  let shown: GainRamp = heldGain(1);
   /**
-   * What the dimmed frame is already showing, so that it is not redrawn sixty
+   * What the waiting face is already showing, so that it is not redrawn sixty
    * times a second for eighteen seconds to say the same thing.
    */
-  let shownSecond = -1;
-  let shownNewest: number | null = null;
+  let drawnAs = '';
 
   const sizes = new ResizeObserver(() => {
     measure(true);
@@ -208,11 +273,9 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
     measure(true);
   };
 
-  function secondsLeft(now: number): number {
-    if (firstStamp === null) {
-      return delaySeconds;
-    }
-    return Math.max(0, delaySeconds - (now - firstStamp) / 1000);
+  /** The instant the painted frame should be from. */
+  function wantedStamp(now: number): number {
+    return now - (delaySeconds + heldSeconds) * 1000;
   }
 
   function drawFrame(bitmap: ImageBitmap): void {
@@ -239,29 +302,59 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
     );
   }
 
-  function drawPriming(now: number): void {
-    if (brush === null) {
+  /** The still frame: the anchor if there is one, the newest until there is. */
+  function stillFrame(): Held<ImageBitmap> | null {
+    if (anchorStamp !== null) {
+      return ring.at(anchorStamp) ?? ring.oldest();
+    }
+    return ring.newest();
+  }
+
+  function drawBar(alpha: number): void {
+    const view = preparing;
+    if (brush === null || view === null || alpha <= 0) {
       return;
     }
-    const newest = ring.newest();
-    if (newest === null) {
-      brush.fillStyle = '#000';
-      brush.fillRect(0, 0, canvas.width, canvas.height);
-    } else {
-      drawFrame(newest.frame);
-    }
-    brush.fillStyle = DIM;
-    brush.fillRect(0, 0, canvas.width, canvas.height);
-    const size = Math.max(14, Math.round(canvas.height * 0.055));
+    const width = Math.max(120, Math.round(canvas.width * 0.5));
+    const height = Math.max(4, Math.round(canvas.height * 0.012));
+    const left = Math.round((canvas.width - width) / 2);
+    const top = Math.round(canvas.height / 2);
+    brush.globalAlpha = alpha;
+    brush.fillStyle = 'rgba(255, 255, 255, 0.28)';
+    brush.fillRect(left, top, width, height);
+    brush.fillStyle = '#ffd682';
+    brush.fillRect(left, top, Math.round(width * Math.min(1, Math.max(0, view.fraction))), height);
+    const size = Math.max(13, Math.round(canvas.height * 0.045));
     brush.fillStyle = '#fff';
     brush.font = `600 ${String(size)}px system-ui, -apple-system, sans-serif`;
     brush.textAlign = 'center';
-    brush.textBaseline = 'middle';
-    brush.fillText(
-      `Preparing ${String(Math.ceil(secondsLeft(now)))} s`,
-      canvas.width / 2,
-      canvas.height / 2,
-    );
+    brush.textBaseline = 'bottom';
+    brush.fillText(view.label, canvas.width / 2, top - size * 0.6);
+    brush.globalAlpha = 1;
+  }
+
+  /** The dim, wherever its fade has got to, over whatever was just drawn. */
+  function dimOver(now: number): number {
+    const alpha = gainAt(dim, now / 1000);
+    if (brush !== null && alpha > 0) {
+      brush.fillStyle = `rgba(0, 0, 0, ${String(DIM_ALPHA * alpha)})`;
+      brush.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    return alpha;
+  }
+
+  function drawWaiting(now: number): void {
+    if (brush === null) {
+      return;
+    }
+    const still = stillFrame();
+    if (still === null) {
+      brush.fillStyle = '#000';
+      brush.fillRect(0, 0, canvas.width, canvas.height);
+    } else {
+      drawFrame(still.frame);
+    }
+    drawBar(dimOver(now));
   }
 
   function repaint(now: number): void {
@@ -269,12 +362,12 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
       drawFrame(painted.frame);
       return;
     }
-    drawPriming(now);
+    drawWaiting(now);
   }
 
   function measure(force: boolean): void {
     measuredAt = clock();
-    if (!active) {
+    if (!active || !mounted) {
       return;
     }
     const box = video.getBoundingClientRect();
@@ -297,6 +390,7 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
     // be put back in the same turn or the overlay flashes black on every drag.
     canvas.width = Math.max(1, Math.round(next.width));
     canvas.height = Math.max(1, Math.round(next.height));
+    drawnAs = '';
     repaint(measuredAt);
   }
 
@@ -334,7 +428,6 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
           bitmap.close();
           return;
         }
-        firstStamp ??= stamp;
         ring.push(bitmap, stamp, frameBytes(bitmap.width, bitmap.height));
       })
       .catch(() => {
@@ -382,38 +475,111 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
     cancelFrames = null;
   }
 
+  /**
+   * The canvas is only on the page when it has something to show. While the
+   * real video is what the person is watching it is not in the document at
+   * all, which is cheaper than a transparent canvas over the top and leaves
+   * nothing to get in the way.
+   */
+  function mount(): void {
+    if (mounted) {
+      return;
+    }
+    // A canvas can only be positioned on the player if the player is a
+    // positioning context. YouTube's is; a plain page's may not be.
+    if (getComputedStyle(container).position === 'static') {
+      container.style.position = 'relative';
+    }
+    container.append(canvas);
+    mounted = true;
+    drawnAs = '';
+    measure(true);
+  }
+
+  function unmount(): void {
+    if (!mounted) {
+      return;
+    }
+    canvas.remove();
+    mounted = false;
+    rect = NOWHERE;
+  }
+
+  function hideVideo(): void {
+    if (videoHidden) {
+      return;
+    }
+    hiddenOpacity ??= video.style.opacity;
+    video.style.opacity = '0';
+    videoHidden = true;
+  }
+
+  function showVideo(): void {
+    if (!videoHidden) {
+      return;
+    }
+    video.style.opacity = hiddenOpacity ?? '';
+    hiddenOpacity = null;
+    videoHidden = false;
+  }
+
   function paint(): void {
     paintHandle = requestAnimationFrame(paint);
     const now = clock();
     if (now - measuredAt >= GEOMETRY_MS) {
       measure(false);
     }
+    if (face === 'hidden') {
+      // The real video is what the person is watching; frames are being kept
+      // behind it and nothing is painted.
+      priming = true;
+      return;
+    }
+    // Opacity below one is the dissolve from the real video to the delayed
+    // one, so the video underneath has to stay visible until it lands.
+    const opacity = gainAt(shown, now / 1000);
+    canvas.style.opacity = String(opacity);
+    if (opacity >= 1) {
+      hideVideo();
+    } else {
+      showVideo();
+    }
     if (frozen) {
       return;
     }
-    const wanted = now - delaySeconds * 1000;
-    ring.trim(wanted);
-    // Once the countdown has run out something is always painted: if the
-    // frame the delay asked for has been evicted, the oldest frame held is as
-    // close to it as this budget can get, and `offsetSeconds` says by how far.
-    const chosen = ring.at(wanted) ?? (secondsLeft(now) > 0 ? null : ring.oldest());
+    const wanted = wantedStamp(now);
+    if (face === 'live') {
+      ring.trim(wanted);
+    }
+    const chosen = face === 'live' ? ring.at(wanted) : null;
     if (chosen === null) {
       priming = true;
-      const second = Math.ceil(secondsLeft(now));
-      const newest = ring.newest()?.stamp ?? null;
-      if (second !== shownSecond || newest !== shownNewest) {
-        shownSecond = second;
-        shownNewest = newest;
-        drawPriming(now);
+      // Redrawn only when it would say something different: this runs sixty
+      // times a second for as long as getting ready takes.
+      const fading = !fadeDone(now);
+      const state = `${String(stillFrame()?.stamp ?? 0)}/${String(preparing?.label ?? '')}/${String(
+        Math.round((preparing?.fraction ?? 0) * 200),
+      )}/${fading ? String(Math.round(now)) : 'still'}`;
+      if (state !== drawnAs) {
+        drawnAs = state;
+        drawWaiting(now);
       }
       return;
     }
     priming = false;
-    if (chosen.stamp !== paintedStamp) {
+    if (chosen.stamp !== paintedStamp || !fadeDone(now)) {
       painted = chosen;
       paintedStamp = chosen.stamp;
       drawFrame(chosen.frame);
+      // The dim fades off over the delayed picture rather than over the still
+      // frame it was holding: by now the two are the same frame.
+      dimOver(now);
     }
+  }
+
+  function fadeDone(now: number): boolean {
+    const at = now / 1000;
+    return gainAt(dim, at) === dim.to && gainAt(shown, at) === shown.to;
   }
 
   function stopPainting(): void {
@@ -423,34 +589,65 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
     }
   }
 
-  function hideVideo(): void {
-    hiddenOpacity ??= video.style.opacity;
-    video.style.opacity = '0';
-  }
-
-  function showVideo(): void {
-    if (hiddenOpacity !== null) {
-      video.style.opacity = hiddenOpacity;
-      hiddenOpacity = null;
+  /** The face, and the two fades that are the difference between them. */
+  function wear(next: PictureFace): void {
+    if (next === face) {
+      return;
     }
+    const now = clock() / 1000;
+    const was = face;
+    face = next;
+    if (next === 'hidden') {
+      dim = heldGain(1);
+      shown = heldGain(1);
+      canvas.style.opacity = '1';
+      showVideo();
+      unmount();
+      return;
+    }
+    if (next === 'dimmed') {
+      dim = heldGain(1);
+      shown = heldGain(1);
+      canvas.style.opacity = '1';
+      drawnAs = '';
+      mount();
+      return;
+    }
+    // Going live. From the dimmed still frame, the dim fades off and the
+    // picture carries on from the frame it was holding. From the real video,
+    // the canvas dissolves in over the top of it — and its opacity is set
+    // before it is appended, or the first animation frame is a hard cut.
+    if (was === 'hidden') {
+      shown = rampTo(heldGain(0), 1, now, CROSSFADE_SECONDS, 'power-in');
+      dim = heldGain(0);
+      canvas.style.opacity = '0';
+    } else {
+      dim = rampTo(dim, 0, now, FADE_IN_SECONDS, 'smooth');
+      shown = heldGain(1);
+    }
+    mount();
   }
 
   function down(): void {
     active = false;
     frozen = false;
     priming = true;
+    face = 'dimmed';
     stopFrames();
     stopPainting();
     sizes.disconnect();
     ring.clear();
     painted = null;
     paintedStamp = null;
-    firstStamp = null;
+    anchorStamp = null;
+    heldSeconds = 0;
+    preparing = null;
+    dim = heldGain(1);
+    shown = heldGain(1);
+    canvas.style.opacity = '1';
     lastKept = 0;
-    shownSecond = -1;
-    shownNewest = null;
-    rect = NOWHERE;
-    canvas.remove();
+    drawnAs = '';
+    unmount();
     showVideo();
   }
 
@@ -458,29 +655,29 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
   document.addEventListener('fullscreenchange', onViewChange);
 
   return {
-    start(seconds) {
+    start(seconds, wanted = 'dimmed') {
       delaySeconds = positive(seconds, DEFAULT_DELAY_SECONDS);
       if (active) {
-        // Already up: a start is a thaw, which is what a resume after a pause
-        // is. Nothing held is stale, because a stamp is a wall instant and a
-        // pause does not move it.
         frozen = false;
         if (cancelFrames === null) {
           scheduleFrames();
         }
+        wear(wanted);
         return;
       }
       active = true;
       frozen = false;
       priming = true;
-      // A canvas can only be positioned on the player if the player is a
-      // positioning context. YouTube's is; a plain page's may not be.
-      if (getComputedStyle(container).position === 'static') {
-        container.style.position = 'relative';
+      heldSeconds = 0;
+      // The face a start opens on is worn rather than faded into: there is
+      // nothing on screen yet for a fade to come from.
+      face = wanted;
+      dim = heldGain(wanted === 'live' ? 0 : 1);
+      shown = heldGain(1);
+      canvas.style.opacity = '1';
+      if (face !== 'hidden') {
+        mount();
       }
-      container.append(canvas);
-      hideVideo();
-      measure(true);
       sizes.observe(video);
       sizes.observe(container);
       scheduleFrames();
@@ -489,6 +686,28 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
 
     setDelay(seconds) {
       delaySeconds = positive(seconds, delaySeconds);
+    },
+
+    setHeld(seconds) {
+      heldSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : heldSeconds;
+    },
+
+    setFace(next) {
+      if (active) {
+        wear(next);
+      }
+    },
+
+    setPreparing(view) {
+      preparing = view;
+    },
+
+    anchor() {
+      // Whatever is on screen now. Frames arrive through a promise, so the
+      // newest one held may be a frame or two behind the instant asked for,
+      // which is near enough: the ring is picked from by stamp, not by index.
+      anchorStamp = ring.newest()?.stamp ?? clock();
+      drawnAs = '';
     },
 
     freeze() {
@@ -500,6 +719,18 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
       // while the page stands still.
       frozen = true;
       stopFrames();
+    },
+
+    thaw() {
+      if (!active || !frozen) {
+        return;
+      }
+      // Everything held is still good: a stamp is a wall instant and the audio
+      // has been shifted by the same pause, which arrives as `setHeld`.
+      frozen = false;
+      if (cancelFrames === null) {
+        scheduleFrames();
+      }
     },
 
     clear() {
@@ -516,16 +747,20 @@ export function createDelayedPicture(options: DelayedPictureOptions): DelayedPic
       const now = clock();
       return {
         active,
+        face,
         frozen,
         priming,
         frames: ring.frames,
         bytes: ring.bytes,
         dropped: ring.dropped,
         delaySeconds,
+        heldSeconds,
         paintedStampMs: paintedStamp,
+        anchorStampMs: anchorStamp,
         offsetSeconds:
-          paintedStamp === null ? null : (now - paintedStamp) / 1000 - delaySeconds,
-        secondsLeft: secondsLeft(now),
+          paintedStamp === null
+            ? null
+            : (now - paintedStamp) / 1000 - (delaySeconds + heldSeconds),
       };
     },
   };

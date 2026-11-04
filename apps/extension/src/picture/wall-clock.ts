@@ -14,13 +14,14 @@
  * Unix epoch, with a monotonic clock underneath rather than a wall clock that
  * can be stepped by NTP mid-song. So that is what a frame is stamped with.
  *
- * What the two sides agree on is one sentence, and `delaySeconds` in the
- * status report is the only number that has to cross between them: **a moment
- * of the tab captured at instant T is heard at T + delay.** The audio makes
- * that true on the context clock — the capture worklet stamps a chunk, the
- * player plays it `delay` later — and the picture makes it true on this clock,
- * by painting the frame that was displayed `delay` ago. Neither side has to
- * know the other's epoch.
+ * What the two sides agree on is one sentence, and `delaySeconds` and
+ * `heldSeconds` in the status report are all that have to cross between them:
+ * **a moment of the tab captured at instant T is heard at T + delay + held.**
+ * The audio makes that true on the context clock — the capture worklet stamps
+ * a chunk, the player plays it `delay` later, and a pause pushes its epoch
+ * forward by however long it was frozen for — and the picture makes it true on
+ * this clock, by painting the frame that was displayed `delay + held` ago.
+ * Neither side has to know the other's epoch.
  *
  * It is not exact to the millisecond, and nothing here pretends otherwise.
  * Capture adds a little latency before a sample reaches the worklet, and
