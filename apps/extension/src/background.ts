@@ -1,4 +1,4 @@
-import { packet, packetFor, type Report, type Status } from './protocol.ts';
+import { packet, packetFor, type Report, type Status, type StatusReport } from './protocol.ts';
 import { reasonText } from './reason.ts';
 
 /**
@@ -133,6 +133,21 @@ async function show(status: Status, tabId: number | null): Promise<void> {
   await chrome.action.setBadgeText({ tabId, text });
 }
 
+/**
+ * The last word to a tab whose capture has gone. The offscreen document says
+ * this for itself when it stops cleanly, but it is being closed in the same
+ * breath, so the panel in the page cannot be left waiting to hear it.
+ */
+const IDLE_REPORT: StatusReport = {
+  type: 'status',
+  status: 'idle',
+  reason: null,
+  secondsLeft: null,
+  delaySeconds: null,
+  mode: 'instrumental',
+  guide: 0,
+};
+
 async function stop(): Promise<void> {
   const active = await captured();
   // Best effort, so the tracks are released promptly. Closing the document is
@@ -143,6 +158,11 @@ async function stop(): Promise<void> {
     await chrome.offscreen.closeDocument();
   }
   await show('idle', active?.tabId ?? null);
+  if (active !== null) {
+    chrome.tabs
+      .sendMessage(active.tabId, packet('tab', IDLE_REPORT, active.tabId))
+      .catch(() => undefined);
+  }
 }
 
 async function start(tab: chrome.tabs.Tab): Promise<void> {
@@ -157,6 +177,30 @@ async function start(tab: chrome.tabs.Tab): Promise<void> {
   await remember({ tabId, origin: new URL(tab.url ?? 'about:blank').origin });
   await show('priming', tabId);
   send(packet('offscreen', { type: 'start', streamId, tabId }, tabId));
+}
+
+/**
+ * A start asked for by the panel in the page rather than by the toolbar.
+ *
+ * Chrome grants a stream id off the back of a click on the action and, in
+ * practice, nowhere else: a click inside a page is a gesture for the page, not
+ * for the extension. So this tries anyway and, when it is refused, tells the
+ * tab to point the person at the toolbar. Trying rather than assuming means
+ * the panel's button starts working by itself the day Chrome allows it, and
+ * the refusal costs one rejected promise.
+ */
+async function asked(tab: chrome.tabs.Tab | undefined): Promise<void> {
+  const tabId = tab?.id;
+  if (tab === undefined || tabId === undefined) {
+    return;
+  }
+  try {
+    await start(tab);
+  } catch {
+    chrome.tabs
+      .sendMessage(tabId, packet('tab', { type: 'hint', hint: 'toolbar' }, tabId))
+      .catch(() => undefined);
+  }
 }
 
 async function toggle(tab: chrome.tabs.Tab): Promise<void> {
@@ -188,7 +232,7 @@ chrome.action.onClicked.addListener((tab) => {
   });
 });
 
-chrome.runtime.onMessage.addListener((message: unknown) => {
+chrome.runtime.onMessage.addListener((message: unknown, sender) => {
   const received = packetFor('background', message);
   if (received === null) {
     return false;
@@ -196,6 +240,14 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
   const body = received.body;
   if (body.type === 'status' || body.type === 'metrics') {
     relay(body, received.tabId);
+  }
+  if (body.type === 'request-start') {
+    void asked(sender.tab);
+  }
+  if (body.type === 'request-stop') {
+    stop().catch((cause: unknown) => {
+      console.error('kara:', reasonText(cause));
+    });
   }
   return false;
 });
