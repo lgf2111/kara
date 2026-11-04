@@ -15,9 +15,11 @@ import {
   readPlayRefusal,
   videoRemedy,
 } from './media-failure.ts';
+import type { LyricsRead } from './lyrics-read.ts';
 import type { VocalChoice } from './stem-mix.ts';
 import { seekTo } from './time.ts';
 import { useIdleOverlays } from './useIdleOverlays.ts';
+import { useStageLyrics } from './useStageLyrics.ts';
 import { useStemMix } from './useStemMix.ts';
 import { useTransportControls } from './useTransportControls.ts';
 import { useVolume } from './useVolume.ts';
@@ -35,6 +37,8 @@ export interface MediaSurfaceProps {
   readonly analysis: AnalysisView;
   readonly vocals: VocalChoice;
   readonly onVocals: (choice: VocalChoice) => void;
+  /** Reading the words off this song's picture, when it has one to read. */
+  readonly read: LyricsRead;
   readonly onOpenDrawer: () => void;
   /** Off while the drawer has the room's attention. */
   readonly shortcuts: boolean;
@@ -80,6 +84,7 @@ export function MediaSurface({
   analysis,
   vocals,
   onVocals,
+  read,
   onOpenDrawer,
   shortcuts,
   onCancelAnalysis,
@@ -148,6 +153,7 @@ export function MediaSurface({
   }, []);
 
   const sound = useVolume();
+  const lyrics = useStageLyrics(song);
   const transport = useTransportControls({
     playing,
     currentSeconds,
@@ -155,6 +161,9 @@ export function MediaSurface({
     frame,
     shortcuts,
     volume: sound,
+    // The key does nothing for a song with no words, rather than putting an
+    // empty overlay on the stage.
+    toggleLyrics: lyrics.lines === null ? null : lyrics.toggle,
     toggle,
     skip,
     seek,
@@ -309,6 +318,8 @@ export function MediaSurface({
         onVocals={onVocals}
         toggle={toggleState}
         analysis={analysis}
+        lyrics={lyrics}
+        read={read}
         onOpenDrawer={onOpenDrawer}
         onCancelAnalysis={onCancelAnalysis}
         onResumeAnalysis={onResumeAnalysis}

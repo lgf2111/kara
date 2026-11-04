@@ -3,12 +3,15 @@ import { useEffect, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { useNotices } from '../notices/Notices.tsx';
 import { Controls } from './Controls.tsx';
+import { LyricOverlay } from './LyricOverlay.tsx';
 import { ProgressChip } from './ProgressChip.tsx';
 import { SongsButton } from './SongsButton.tsx';
 import { VocalsControl } from './VocalsControl.tsx';
 import type { AnalysisView, VocalToggle } from './analysis.ts';
+import type { LyricsRead } from './lyrics-read.ts';
 import type { VocalChoice } from './stem-mix.ts';
 import type { Transport } from './transport.ts';
+import type { StageLyrics } from './useStageLyrics.ts';
 
 interface StageOverlaysProps {
   readonly title: string;
@@ -19,6 +22,10 @@ interface StageOverlaysProps {
   readonly onVocals: (choice: VocalChoice) => void;
   readonly toggle: VocalToggle;
   readonly analysis: AnalysisView;
+  /** The song's own words, and whether the room asked for them. */
+  readonly lyrics: StageLyrics;
+  /** Reading them off the picture, for a song that has none yet. */
+  readonly read: LyricsRead;
   readonly onOpenDrawer: () => void;
   readonly onCancelAnalysis: (() => void) | null;
   readonly onResumeAnalysis: (() => void) | null;
@@ -27,12 +34,16 @@ interface StageOverlaysProps {
 
 /**
  * Everything laid over the song: the title and the way back to the songs at
- * the top, the transport and the vocals at the bottom, and the analysis chip
- * in the corner.
+ * the top, the transport and the vocals at the bottom, the analysis chip in
+ * the corner and the words across the lower third.
  *
  * All of it sits on the picture rather than beside it. A KTV room is the
  * picture; the controls are something you reach through when you need them
  * and should not be there when you do not.
+ *
+ * The words are the exception. They are not furniture, they are what the room
+ * is reading, so they stay when the bars leave and only move down into the
+ * space the bars were using.
  */
 export function StageOverlays({
   title,
@@ -42,6 +53,8 @@ export function StageOverlays({
   onVocals,
   toggle,
   analysis,
+  lyrics,
+  read,
   onOpenDrawer,
   onCancelAnalysis,
   onResumeAnalysis,
@@ -67,6 +80,14 @@ export function StageOverlays({
 
   return (
     <>
+      {lyrics.lines !== null && lyrics.on && (
+        <LyricOverlay
+          lines={lyrics.lines}
+          currentSeconds={transport.currentSeconds}
+          raised={shown}
+        />
+      )}
+
       <div
         className={cn(
           bar,
@@ -87,11 +108,12 @@ export function StageOverlays({
       >
         {error !== null && <p className="text-sm text-destructive">{error}</p>}
         <VocalsControl toggle={toggle} analysis={analysis} choice={vocals} onChoice={onVocals} />
-        <Controls transport={transport} />
+        <Controls transport={transport} lyrics={lyrics} read={read} />
       </div>
 
       <ProgressChip
         view={analysis}
+        read={read}
         dim={!shown}
         onCancel={onCancelAnalysis}
         onResume={onResumeAnalysis}

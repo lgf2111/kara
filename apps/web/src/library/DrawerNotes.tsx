@@ -13,7 +13,8 @@ export function DrawerNotes() {
     <footer className="space-y-2 text-xs leading-relaxed text-muted-foreground">
       <p>
         Space plays and pauses, the left and right arrows skip {SKIP_SECONDS} seconds, up and down
-        change the volume, m mutes and f fills the screen.
+        change the volume, m mutes, f fills the screen and l shows the lyrics of a song that has
+        them.
       </p>
       <p>
         Upload only, by design: there is no link import and no downloader. Your file is decoded and

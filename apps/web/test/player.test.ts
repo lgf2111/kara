@@ -75,6 +75,10 @@ describe('commandForKey', () => {
     expect(commandForKey({ key: 'f' })).toEqual({ kind: 'fullscreen' });
   });
 
+  it('shows and hides the lyrics', () => {
+    expect(commandForKey({ key: 'l' })).toEqual({ kind: 'lyrics' });
+  });
+
   it('ignores anything else', () => {
     expect(commandForKey({ key: 'q' })).toBeNull();
     expect(commandForKey({ key: 'Enter' })).toBeNull();
@@ -91,6 +95,15 @@ describe('commandForKey', () => {
     expect(commandForKey({ key: 'ArrowRight', targetTag: 'INPUT' })).toBeNull();
     expect(commandForKey({ key: ' ', targetTag: 'SUMMARY' })).toBeNull();
     expect(commandForKey({ key: 'm', editing: true })).toBeNull();
+  });
+
+  it('still takes the other shortcuts while a button has focus', () => {
+    expect(commandForKey({ key: 'l', targetTag: 'BUTTON' })).toEqual({ kind: 'lyrics' });
+    expect(commandForKey({ key: 'ArrowRight', targetTag: 'BUTTON' })).toEqual({
+      kind: 'skip',
+      seconds: 5,
+    });
+    expect(commandForKey({ key: 'Enter', targetTag: 'BUTTON' })).toBeNull();
   });
 
   it('still works for the page itself', () => {

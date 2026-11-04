@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react';
 import {
   Maximize,
   Minimize,
@@ -10,15 +9,21 @@ import {
   VolumeX,
 } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { sliderNumber } from '@/lib/slider-value';
+import { ControlAction } from './ControlAction.tsx';
+import { LyricsButton } from './LyricsButton.tsx';
 import { SKIP_SECONDS, formatClock } from './time.ts';
+import type { LyricsRead } from './lyrics-read.ts';
 import type { Transport } from './transport.ts';
+import type { StageLyrics } from './useStageLyrics.ts';
 
 interface ControlsProps {
   readonly transport: Transport;
+  /** The words for this song, and whether they are on. */
+  readonly lyrics: StageLyrics;
+  /** Reading them off the picture, for a song that has none yet. */
+  readonly read: LyricsRead;
 }
 
 /**
@@ -30,37 +35,7 @@ interface ControlsProps {
  * Every state it shows comes from the transport, so it holds none of its own
  * and cannot drift out of step with what is playing.
  */
-
-interface ActionProps {
-  /** Both the tooltip and the accessible name: one label, said once. */
-  readonly label: string;
-  readonly children: ReactNode;
-  readonly onClick: () => void;
-}
-
-/** An icon and its name, which a room on a phone reaches for with a thumb. */
-function Action({ label, children, onClick }: ActionProps) {
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <Button
-            variant="ghost"
-            size="icon-lg"
-            aria-label={label}
-            className="size-11 text-white/85 hover:bg-white/10 hover:text-white sm:size-10"
-            onClick={onClick}
-          />
-        }
-      >
-        {children}
-      </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-export function Controls({ transport }: ControlsProps) {
+export function Controls({ transport, lyrics, read }: ControlsProps) {
   const { currentSeconds, durationSeconds, muted, volume } = transport;
   const known = Number.isFinite(durationSeconds) && durationSeconds > 0;
   const at = known ? Math.min(currentSeconds, durationSeconds) : 0;
@@ -96,7 +71,7 @@ export function Controls({ transport }: ControlsProps) {
       </div>
 
       <div className="flex flex-wrap items-center gap-1">
-        <Action
+        <ControlAction
           label={transport.playing ? 'pause' : 'play'}
           onClick={() => {
             transport.toggle();
@@ -107,34 +82,36 @@ export function Controls({ transport }: ControlsProps) {
           ) : (
             <Play className="size-5" aria-hidden="true" />
           )}
-        </Action>
-        <Action
+        </ControlAction>
+        <ControlAction
           label={`back ${String(SKIP_SECONDS)} seconds`}
           onClick={() => {
             transport.skip(-SKIP_SECONDS);
           }}
         >
           <SkipBack aria-hidden="true" />
-        </Action>
-        <Action
+        </ControlAction>
+        <ControlAction
           label={`forward ${String(SKIP_SECONDS)} seconds`}
           onClick={() => {
             transport.skip(SKIP_SECONDS);
           }}
         >
           <SkipForward aria-hidden="true" />
-        </Action>
+        </ControlAction>
+        {/* Nothing at all for a song with no words and no way to get any. */}
+        <LyricsButton lyrics={lyrics} read={read} />
 
         <span className="flex-1" />
 
-        <Action
+        <ControlAction
           label={muted ? 'unmute' : 'mute'}
           onClick={() => {
             transport.toggleMute();
           }}
         >
           {silent ? <VolumeX aria-hidden="true" /> : <Volume2 aria-hidden="true" />}
-        </Action>
+        </ControlAction>
         <div className="w-20 flex-none sm:w-28">
           <Slider
             thumbLabel="volume"
@@ -147,7 +124,7 @@ export function Controls({ transport }: ControlsProps) {
             }}
           />
         </div>
-        <Action
+        <ControlAction
           label={transport.fullscreen ? 'leave fullscreen' : 'fullscreen'}
           onClick={() => {
             transport.toggleFullscreen();
@@ -158,7 +135,7 @@ export function Controls({ transport }: ControlsProps) {
           ) : (
             <Maximize aria-hidden="true" />
           )}
-        </Action>
+        </ControlAction>
       </div>
     </div>
   );
