@@ -9,6 +9,7 @@ import {
   type StoredStatus,
 } from './protocol.ts';
 import { reasonText } from './reason.ts';
+import { readSettings, watchSettings } from './settings-store.ts';
 import { mediaStreamId } from './tab-capture.ts';
 
 /**
@@ -137,13 +138,18 @@ async function ensureOffscreen(): Promise<void> {
 async function show(status: Status, tabId: number | null): Promise<void> {
   const title = TITLE[status];
   const text = BADGE[status];
-  if (tabId === null) {
-    await chrome.action.setTitle({ title });
-    await chrome.action.setBadgeText({ text });
-    return;
+  try {
+    if (tabId === null) {
+      await chrome.action.setTitle({ title });
+      await chrome.action.setBadgeText({ text });
+      return;
+    }
+    await chrome.action.setTitle({ tabId, title });
+    await chrome.action.setBadgeText({ tabId, text });
+  } catch {
+    // The tab closed between the report and the label, so there is no badge to
+    // set; that is not worth an unhandled rejection.
   }
-  await chrome.action.setTitle({ tabId, title });
-  await chrome.action.setBadgeText({ tabId, text });
 }
 
 async function stop(): Promise<void> {
@@ -185,7 +191,10 @@ async function start(tabId: number, offered: string | null): Promise<void> {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   await remember({ tabId, origin: originOf(tab?.url) });
   await show('priming', tabId);
-  send(packet('offscreen', { type: 'start', streamId, tabId }, tabId));
+  // The offscreen document cannot read storage, so it is told the setting.
+  const settings = await readSettings();
+  send(packet('offscreen', { type: 'on-ready', onReady: settings.onReady }, tabId));
+  send(packet('offscreen', { type: 'start', streamId, tabId, key: settings.key }, tabId));
 }
 
 /**
@@ -275,4 +284,14 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
     }
     await stop();
   })();
+});
+
+watchSettings((settings) => {
+  captured()
+    .then((active) => {
+      if (active !== null) {
+        send(packet('offscreen', { type: 'on-ready', onReady: settings.onReady }, active.tabId));
+      }
+    })
+    .catch(() => undefined);
 });

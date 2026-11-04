@@ -39,7 +39,13 @@ export type Side = 'background' | 'offscreen' | 'tab';
 export type ResetReason = 'seek' | 'ratechange' | 'navigation' | 'ended' | 'ad';
 
 export type Command =
-  | { readonly type: 'start'; readonly streamId: string; readonly tabId: number }
+  | {
+      readonly type: 'start';
+      readonly streamId: string;
+      readonly tabId: number;
+      /** The remembered default key. The offscreen document cannot read storage. */
+      readonly key?: number;
+    }
   | { readonly type: 'stop' }
   | { readonly type: 'reset'; readonly reason: ResetReason }
   /** The page paused: freeze the output where it is and keep everything. */
