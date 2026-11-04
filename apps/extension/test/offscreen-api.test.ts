@@ -9,7 +9,10 @@ import { describe, expect, it } from 'vitest';
  * that is not there. The setting reaches the document as a command instead.
  */
 describe('offscreen document', () => {
-  const source = readFileSync(new URL('../src/offscreen.ts', import.meta.url), 'utf8');
+  // Comments are free to say what the document lacks; only code can break.
+  const source = readFileSync(new URL('../src/offscreen.ts', import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//gu, '')
+    .replace(/^\s*\/\/.*$/gmu, '');
 
   it('does not use chrome.storage', () => {
     expect(source).not.toMatch(/chrome\.storage/u);
