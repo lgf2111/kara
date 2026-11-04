@@ -52,6 +52,8 @@
       <button id="picture" type="button">Picture on/off</button>
       <button id="hold" type="button">Pause/play</button>
       <button id="seek" type="button">Seek +30s</button>
+      <button id="key-down" type="button">Key −1</button>
+      <button id="key-up" type="button">Key +1</button>
       <button id="reset" type="button">Reset</button>
       <button id="stop" type="button">Stop</button>
     </p>
@@ -60,6 +62,14 @@
       resume rather than priming again: the delay stays put and
       <code>__karaDebug.primes()</code> does not move. A seek does move it. Add
       <code>?onReady=continue</code> to watch the original play undelayed and then cross over.
+    </p>
+    <p>
+      The key buttons go through the same pitch shifter the extension runs, at the very end of
+      the chain. <code>__karaDebug.dominantHz()</code> reads the loudest frequency coming out of
+      the player off an analyser on its output, so a tone fixture is enough to prove the shift:
+      the ratio of two readings either side of a transpose should be
+      <code>2 ** (semitones / 12)</code>. Its latency does not change with the key, so
+      <code>pictureOffsetSeconds()</code> should not move either.
     </p>
     <p id="status">idle</p>
     <pre id="metrics"></pre>

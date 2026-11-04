@@ -1,3 +1,4 @@
+import { canNudge, KEY_DEFAULT, keyLabel, nudgeKey } from '../audio/key.ts';
 import { progressPercent } from '../audio/progress.ts';
 import type { PlayMode } from '../protocol.ts';
 import { guideFromPercent, type PanelView } from './panel-view.ts';
@@ -23,7 +24,9 @@ import { guideFromPercent, type PanelView } from './panel-view.ts';
  * listener anywhere in this extension: the page keeps every shortcut it had.
  * What does happen is the reverse — an arrow key pressed on the guide slider
  * is stopped before it reaches the page, so adjusting the guide does not also
- * seek the video.
+ * seek the video. The two shortcuts there are, `[` and `]` for the key, are
+ * read only while the focus is already inside this shadow root, so they are
+ * the panel's own rather than the page's.
  *
  * **It hides when the player's controls hide.** The player has already decided
  * when a person is watching rather than fiddling, and it says so by restyling
@@ -173,6 +176,36 @@ button:focus-visible {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+/* Two steppers around the words, because a key is a step rather than a
+   position: a slider would invite a half semitone nobody wants. */
+.key {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.key button {
+  padding: 2px 8px;
+  line-height: 1.2;
+}
+.key .value {
+  flex: 1;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.92);
+  font-variant-numeric: tabular-nums;
+}
+.key .clear {
+  font-size: 10px;
+  padding: 2px 6px;
+  color: rgba(255, 255, 255, 0.72);
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+button:disabled:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
 [hidden] {
   display: none !important;
 }
@@ -184,6 +217,8 @@ export interface PanelHandlers {
   readonly onMode: (mode: PlayMode) => void;
   /** The guide, as a gain between 0 and 1. */
   readonly onGuide: (level: number) => void;
+  /** The key the person has landed on, in whole semitones. */
+  readonly onKey: (semitones: number) => void;
 }
 
 export interface Panel {
@@ -296,12 +331,33 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   guideValue.textContent = '0';
   guide.append(guideName, slider, guideValue);
 
-  controls.append(segmented, guide);
+  const key = document.createElement('div');
+  key.className = 'key';
+  key.setAttribute('role', 'group');
+  key.setAttribute('aria-label', 'Key');
+  const keyDown = button('−', 'step');
+  keyDown.title = 'Down a semitone ([)';
+  const keyValue = document.createElement('span');
+  keyValue.className = 'value';
+  // Polite rather than assertive: the words change under the person's own
+  // button press, so they do not need interrupting to hear about it.
+  keyValue.setAttribute('role', 'status');
+  keyValue.setAttribute('aria-live', 'polite');
+  keyValue.textContent = keyLabel(KEY_DEFAULT);
+  const keyUp = button('+', 'step');
+  keyUp.title = 'Up a semitone (])';
+  const keyClear = button('Reset', 'clear');
+  keyClear.title = 'Back to the original key';
+  key.append(keyDown, keyValue, keyUp, keyClear);
+
+  controls.append(segmented, guide, key);
   panel.append(toggle, note, bar, detail, controls);
   root.append(style, panel);
 
   let autohidden = false;
   let hovering = false;
+  /** The last key drawn, which is what a step or a shortcut moves from. */
+  let semitones = KEY_DEFAULT;
 
   const apply = (): void => {
     const away = autohidden && !hovering;
@@ -332,12 +388,36 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     event.stopPropagation();
   };
 
+  /**
+   * The two shortcuts this extension has, and they are the panel's rather than
+   * the page's.
+   *
+   * There is no document-level key listener anywhere in here: every key the
+   * page handled before, it still handles. `[` and `]` only mean anything
+   * while the focus is already inside the panel, which is what
+   * `root.activeElement` says and the only thing that can say it for a closed
+   * shadow root. So they cost the page nothing, and somebody who has just
+   * pressed a key button can press the next one without aiming.
+   */
+  const onKeydown = (event: KeyboardEvent): void => {
+    keepToSelf(event);
+    if (root.activeElement === null || event.altKey || event.ctrlKey || event.metaKey) {
+      return;
+    }
+    const step = event.key === '[' ? -1 : event.key === ']' ? 1 : 0;
+    if (step === 0) {
+      return;
+    }
+    event.preventDefault();
+    handlers.onKey(nudgeKey(semitones, step));
+  };
+
   for (const kind of ['click', 'pointerdown', 'pointerup', 'dblclick', 'contextmenu']) {
     // The player makes a click anywhere in itself mean play or pause.
     host.addEventListener(kind, keepToSelf);
   }
   // And it reads arrow keys as seeks, which the guide slider also wants.
-  host.addEventListener('keydown', keepToSelf);
+  host.addEventListener('keydown', onKeydown);
   host.addEventListener('keyup', keepToSelf);
   container.addEventListener('pointermove', onPointerMove, { passive: true });
 
@@ -353,6 +433,15 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   slider.addEventListener('input', () => {
     guideValue.textContent = slider.value;
     handlers.onGuide(guideFromPercent(Number(slider.value)));
+  });
+  keyDown.addEventListener('click', () => {
+    handlers.onKey(nudgeKey(semitones, -1));
+  });
+  keyUp.addEventListener('click', () => {
+    handlers.onKey(nudgeKey(semitones, 1));
+  });
+  keyClear.addEventListener('click', () => {
+    handlers.onKey(KEY_DEFAULT);
   });
 
   container.append(host);
@@ -388,6 +477,11 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
         slider.value = String(view.guide);
         guideValue.textContent = slider.value;
       }
+      semitones = view.semitones;
+      keyValue.textContent = view.keyLabel;
+      keyDown.disabled = !canNudge(semitones, -1);
+      keyUp.disabled = !canNudge(semitones, 1);
+      keyClear.hidden = semitones === KEY_DEFAULT;
     },
 
     setAutohidden(hidden) {

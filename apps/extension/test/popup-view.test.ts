@@ -6,6 +6,8 @@ import {
   ON_READY_CHOICES,
   pageNote,
   popupView,
+  type PopupInput,
+  type PopupView,
 } from '../src/popup/popup-view.ts';
 import type { Status, StatusReport } from '../src/protocol.ts';
 
@@ -22,9 +24,15 @@ function reported(status: Status, rest: Partial<StatusReport> = {}): StatusRepor
     heldSeconds: 0,
     mode: 'instrumental',
     guide: 0,
+    semitones: 0,
     onReady: 'restart',
     ...rest,
   };
+}
+
+/** The stored defaults, which a test only mentions when they are the point. */
+function shown(input: Partial<PopupInput>): PopupView {
+  return popupView({ report: null, url: YOUTUBE, onReady: 'restart', key: 0, ...input });
 }
 
 describe('captureBlock', () => {
@@ -54,7 +62,7 @@ describe('pageNote', () => {
 
 describe('popupView', () => {
   it('offers a start on a tab that can be captured', () => {
-    const view = popupView({ report: null, url: YOUTUBE, onReady: 'restart' });
+    const view = shown({});
 
     expect(view.state).toBe('idle');
     expect(view.action).toBe('start');
@@ -63,7 +71,7 @@ describe('popupView', () => {
   });
 
   it('offers nothing on a tab that cannot, and says why', () => {
-    const view = popupView({ report: null, url: 'chrome://newtab', onReady: 'restart' });
+    const view = shown({ url: 'chrome://newtab' });
 
     expect(view.state).toBe('unsupported');
     expect(view.action).toBe('none');
@@ -82,11 +90,7 @@ describe('popupView', () => {
       fillSeconds: 1.5,
       timings: NO_TIMINGS,
     });
-    const view = popupView({
-      report: reported('priming', { prepare }),
-      url: YOUTUBE,
-      onReady: 'restart',
-    });
+    const view = shown({ report: reported('priming', { prepare }) });
 
     expect(view.state).toBe('preparing');
     expect(view.progress).toBeCloseTo(0.15, 9);
@@ -95,21 +99,13 @@ describe('popupView', () => {
   });
 
   it('explains a prime that started over', () => {
-    const view = popupView({
-      report: reported('priming', { reprime: 'seek' }),
-      url: YOUTUBE,
-      onReady: 'restart',
-    });
+    const view = shown({ report: reported('priming', { reprime: 'seek' }) });
 
     expect(view.detail).toBe('You jumped; preparing again.');
   });
 
   it('says it is live and how far behind the picture is', () => {
-    const view = popupView({
-      report: reported('live', { delaySeconds: 17.5 }),
-      url: YOUTUBE,
-      onReady: 'restart',
-    });
+    const view = shown({ report: reported('live', { delaySeconds: 17.5 }) });
 
     expect(view.state).toBe('live');
     expect(view.headline).toBe('Live');
@@ -117,11 +113,7 @@ describe('popupView', () => {
   });
 
   it('says a pause has lost nothing', () => {
-    const view = popupView({
-      report: reported('paused', { delaySeconds: 17.5 }),
-      url: YOUTUBE,
-      onReady: 'restart',
-    });
+    const view = shown({ report: reported('paused', { delaySeconds: 17.5 }) });
 
     expect(view.state).toBe('paused');
     expect(view.detail).toMatch(/nothing lost/u);
@@ -129,11 +121,7 @@ describe('popupView', () => {
   });
 
   it('keeps the reason a machine cannot do it, and still offers a stop', () => {
-    const view = popupView({
-      report: reported('unsupported', { reason: 'no WebGPU adapter' }),
-      url: YOUTUBE,
-      onReady: 'restart',
-    });
+    const view = shown({ report: reported('unsupported', { reason: 'no WebGPU adapter' }) });
 
     expect(view.state).toBe('unsupported');
     expect(view.detail).toBe('no WebGPU adapter');
@@ -141,19 +129,43 @@ describe('popupView', () => {
   });
 
   it('takes the setting from the running capture over the stored one', () => {
-    const view = popupView({
-      report: reported('live', { onReady: 'continue' }),
-      url: YOUTUBE,
-      onReady: 'restart',
-    });
+    const view = shown({ report: reported('live', { onReady: 'continue' }) });
 
     expect(view.onReady).toBe('continue');
   });
 
   it('falls back to the stored setting when nothing is running', () => {
-    expect(popupView({ report: null, url: YOUTUBE, onReady: 'continue' }).onReady).toBe(
-      'continue',
-    );
+    expect(shown({ onReady: 'continue' }).onReady).toBe('continue');
+  });
+});
+
+describe('the key', () => {
+  it('shows the remembered default when nothing is running', () => {
+    const view = shown({ key: -2 });
+
+    expect(view.semitones).toBe(-2);
+    expect(view.keyLabel).toBe('Key −2');
+  });
+
+  /**
+   * Because the panel in the page can move the key without touching the
+   * default, and what a person wants to see in the popup is what they are
+   * listening to rather than what they will be listening to next time.
+   */
+  it('shows what the capture is playing in over the remembered default', () => {
+    const view = shown({ report: reported('live', { semitones: 3 }), key: -2 });
+
+    expect(view.semitones).toBe(3);
+    expect(view.keyLabel).toBe('Key +3');
+  });
+
+  it('says the original key when nothing has moved', () => {
+    expect(shown({}).keyLabel).toBe('Original key');
+  });
+
+  it('stays inside the range, whatever was stored', () => {
+    expect(shown({ key: 40 }).semitones).toBe(6);
+    expect(shown({ key: Number.NaN }).semitones).toBe(0);
   });
 });
 

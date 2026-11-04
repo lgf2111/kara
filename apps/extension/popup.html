@@ -85,6 +85,43 @@
         align-items: start;
         margin-top: 6px;
       }
+      /* Steppers rather than a slider: a key is a step, and half a semitone
+         is not a thing anybody means to ask for. */
+      #key-box .row {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      #key-box button {
+        font: inherit;
+        padding: 3px 9px;
+        border: 1px solid rgba(127, 127, 127, 0.5);
+        border-radius: 6px;
+        background: rgba(127, 127, 127, 0.12);
+        cursor: pointer;
+      }
+      #key-box button:hover:not(:disabled) {
+        background: rgba(127, 127, 127, 0.22);
+      }
+      #key-box button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      #key-value {
+        flex: 1;
+        text-align: center;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+      }
+      #key-box #key-clear {
+        font-size: 11px;
+        font-weight: 400;
+      }
+      .hint {
+        margin: 6px 0 0;
+        font-size: 11px;
+        opacity: 0.65;
+      }
       [hidden] {
         display: none !important;
       }
@@ -100,6 +137,16 @@
       <p id="detail"></p>
     </div>
     <button id="action" type="button" disabled>Start</button>
+    <fieldset id="key-box">
+      <legend>Key</legend>
+      <div class="row">
+        <button id="key-down" type="button" title="Down a semitone">−</button>
+        <span id="key-value" role="status" aria-live="polite">Original key</span>
+        <button id="key-up" type="button" title="Up a semitone">+</button>
+        <button id="key-clear" type="button" title="Back to the original key">Reset</button>
+      </div>
+      <p class="hint">Remembered, and used for the next song too.</p>
+    </fieldset>
     <fieldset id="on-ready">
       <legend>When ready</legend>
     </fieldset>

@@ -10,7 +10,8 @@ the mouth is still saying them.
 Press the toolbar button on a YouTube tab and press Start in the popup. The extension captures
 that tab's audio output with `chrome.tabCapture`, separates it into vocal and instrumental with
 the same htdemucs model the web app uses, and plays `instrumental + guide × vocals` back through
-its own output, delayed. Switching to the original is a thirty millisecond crossfade on one gain.
+its own output, delayed, in whatever key was asked for. Switching to the original is a thirty
+millisecond crossfade on one gain.
 
 Seeking, changing the playback rate, reaching the end, crossing an ad boundary or loading another
 video throws the buffer away and primes again. **Pausing does not.** A pause holds: the capture
@@ -28,12 +29,13 @@ let through whatever the setting says is an advertisement, which is below.
 
 A panel in the bottom left of the player, in a closed shadow root so that none of its styles and
 none of the page's can reach each other. It hides when the player hides its own controls and
-comes back when they do, except while the pointer is resting on it. It adds no keyboard shortcut
-and takes none away: every key the page handled before, it still handles. Pointer and key events
-on the panel itself are stopped there, so nudging the guide slider does not also pause the video
-or seek it.
+comes back when they do, except while the pointer is resting on it. It takes no keyboard shortcut
+away: every key the page handled before, it still handles. The two it adds — `[` and `]` for the
+key — are read only while the focus is already inside the panel, which a closed shadow root can
+answer and nothing else can see. Pointer and key events on the panel itself are stopped there, so
+nudging the guide slider does not also pause the video or seek it.
 
-The panel is one button, a progress bar, and once there is audio, two controls.
+The panel is one button, a progress bar, and once there is audio, three controls.
 
 - **Karaoke** — off, preparing, on, paused, unavailable or failed. Pressed while off it asks the
   service worker to start, and the service worker will almost always answer that it cannot: a
@@ -50,6 +52,10 @@ The panel is one button, a progress bar, and once there is audio, two controls.
 - **Original | Instrumental**, which is the one gain in `mix-gain.ts` crossfading over thirty
   milliseconds.
 - **Guide**, 0 to 100, which is how much of the vocal is left in the instrumental to sing against.
+- **Key**, a minus, a plus and the words — *Key +2*, *Key −3*, or *Original key* at nought — with
+  a reset that only appears when there is something to reset. Six semitones either way, in whole
+  steps, and `[` and `]` do the same without the aiming. *Changing the key* below is what it costs
+  and why it stops at six.
 - And a line saying *picture is 18 s behind YouTube*, because without it the delay reads as a
   broken page rather than as the thing that was asked for. It counts the pauses in: a pause moves
   the picture further behind the page by exactly as long as it lasted.
@@ -70,8 +76,8 @@ because there cannot be one.
 
 It is plain DOM in one small file, with the decisions in `src/popup/popup-view.ts` where they are
 tested. It shows the state of the tab it was opened over — idle, getting ready with the same bar
-the panel draws, live, paused, or unsupported with the reason — a Start or Stop button, and the
-one setting.
+the panel draws, live, paused, or unsupported with the reason — a Start or Stop button, the same
+key control the panel has, and the two settings.
 
 The state comes out of `chrome.storage.session`, where the service worker leaves the last status
 report as it routes it. A popup cannot have been listening when a report went past, because it
@@ -80,8 +86,9 @@ push. The bar moves four times a second with nobody polling anything.
 
 ## When ready
 
-The one setting, in `chrome.storage.sync` under one key, with `src/settings.ts` holding the shape,
-the default and the parse, and `src/settings-store.ts` holding the three calls that touch Chrome.
+The first setting, in `chrome.storage.sync` under one key with the other, with `src/settings.ts`
+holding the shape, the default and the parse, and `src/settings-store.ts` holding the three calls
+that touch Chrome.
 
 There is no way to make the first eighteen seconds free. Something has to give at the moment the
 delayed audio arrives, and which thing gives is a matter of taste:
@@ -104,6 +111,59 @@ clock by the playback worklet and on the wall clock by the overlay. The crossfad
 passing each other linearly are both at a half in the middle, which is three decibels down and
 audible as a hole. The fades in and out of silence are raised cosines, flat at both ends, because
 the corner a short linear ramp leaves is what a speaker ticks at.
+
+## Changing the key
+
+Six semitones either way, in whole steps, applied last of all: after the mixing and before the
+output, so the instrumental, the guide vocal and the original all come out in the same key rather
+than one of them being special. It is a phase vocoder, in `apps/web/src/dsp/pitch-shift.ts`,
+shared with the web app rather than written twice, and the player's worklet is the only thing in
+the extension that calls it.
+
+The person's choice sticks to the capture rather than to the timeline. A seek, a pause, an ad or
+another video throws the audio buffer away and keeps the key: a key is something somebody decided
+about their own voice, and nothing on that list is them changing their mind. Only another press
+moves it, and the popup's copy of the control is also remembered in `chrome.storage.sync`, so the
+next song starts where the last one did. The panel's buttons move the capture and leave that
+default alone, because nudging the key for one song is not a decision about every song after it.
+
+**The latency is the same number at every key, including none.** This is the only part of it that
+had to be designed rather than looked up. The usual arrangement — time-stretch by the ratio, then
+resample back — is two stages at different rates with a buffer between them, and how full that
+buffer is depends on the ratio, so the latency moves when the key moves. The picture is held back
+to meet the audio by a number fixed when the capture started, so audio that slid forwards by
+thirty milliseconds on a key press would slide out of the mouth it was coming from. So the two
+stages are folded into one pass at a constant rate: analyse at a hop of 512, move each partial's
+magnitude to `bin × ratio` and advance its phase by `ratio ×` its measured frequency, synthesise
+at the same hop of 512. Input and output are the same length by construction, and the wait is one
+2048-sample frame whatever the ratio is — about forty-six milliseconds at 44.1 kHz.
+
+At nought semitones the chain is bypassed and still delayed by exactly that one frame, so toggling
+transpose cannot move the audio against the picture by a single sample, and the untouched path is
+bit for bit the input rather than nearly it.
+
+**Where the arithmetic goes.** The worklet reads the ring forty-six milliseconds *early*, because
+that is how long the shifter will hold what it reads. That is the whole of the change to the sync:
+`heard` in `src/worklets/playback.worklet.ts` is `currentTime` plus the shifter's latency, and every
+moment the file reasons about — the epoch, the gain ramps, the instant a hold freezes — is a moment
+on that audible timeline rather than on the clock. Nothing on the other side of the worklet knows
+the key exists. A pause is unaffected: both ends of the freeze move by the same amount, so how long
+it was held is unchanged, and that is the number the picture is shifted by.
+
+**Why it does not sound like a phase vocoder.** Advancing every bin's phase independently is what
+makes one audible: the bins of a single partial drift out of step and a struck note turns to mush.
+So the peaks of the magnitude spectrum are found, each one gets the only phase accumulator in its
+region, and every other bin in that region is put back at the phase it had relative to its peak in
+this frame — identity phase locking. One complex rotation does a whole region, which is why it is
+nearly free: no `atan2` per bin, two multiply-adds, and ten seconds of stereo goes through in a
+fraction of a second.
+
+A happy consequence is that at a ratio of exactly one the whole thing is the identity, because the
+accumulators are started from the first frame's own phases and advance by each peak's measured
+advance. So the shifter can be crossfaded against its own bypass while the ratio glides towards
+one, and neither end of that crossfade is audible. A change takes about an eighth of a second: the
+ratio slides, and when the shift is being switched on the crossfade is held at nothing for a frame
+first, so the part where the overlap is still filling is never mixed in.
 
 ## Getting ready
 
@@ -288,18 +348,25 @@ Five scopes, because Manifest V3 gives each of them different powers.
 
 | Where | File | What it owns |
 | --- | --- | --- |
-| Popup | `popup.html`, `src/popup.ts` | The click that a tab capture is granted off the back of, and the setting |
+| Popup | `popup.html`, `src/popup.ts` | The click that a tab capture is granted off the back of, and the settings |
 | Service worker | `src/background.ts` | The tab, the offscreen document's existence, the last report, and routing |
 | Offscreen document | `src/offscreen.ts`, `src/offscreen/pipeline.ts` | The `AudioContext`, the capture, the delay, the playback |
 | Dedicated worker | `src/separation/separator.worker.ts` | The model, on WebGPU |
-| Audio worklets | `src/worklets/*.worklet.ts` | Stamping captured chunks, and playing blocks at their moment |
+| Audio worklets | `src/worklets/*.worklet.ts` | Stamping captured chunks, and playing blocks at their moment in the key asked for |
 | Content script | `src/content.ts` | The wiring: what is mounted, what each event does, what the panel is told |
 
 The pure files either side of them are where the arguing happens, and they are the ones with
 tests: `audio/progress.ts` for the bar, `audio/status.ts` for the six states and what moves
-between them, `audio/mix-gain.ts` for every gain curve, `content/page-events.ts` for the table
-above, `content/timeline.ts` for whether a seek happened, `content/panel-view.ts` and
-`popup/popup-view.ts` for the words, and `settings.ts` for the shape of the one setting.
+between them, `audio/mix-gain.ts` for every gain curve, `audio/key.ts` for the range of the key
+and the words it wears, `content/page-events.ts` for the table above, `content/timeline.ts` for
+whether a seek happened, `content/panel-view.ts` and `popup/popup-view.ts` for the words, and
+`settings.ts` for the shape of the two settings.
+
+The pitch shifter is the other thing not copied: `apps/web/src/dsp/pitch-shift.ts` is imported
+across the workspace by relative path, built on the same `dsp/fft.ts` the separation host uses,
+and tested in `apps/web/test/pitch-shift.test.ts` against synthetic tones. It bundles into the
+playback worklet, which is a single self-contained file, so nothing it pulls in survives as an
+`import` in the file `addModule` is handed; the build fails if one ever does.
 
 The content script is five files and one of them is load-bearing in a way the others are not.
 `src/content/youtube.ts` is the only place in the extension that knows what YouTube's DOM looks
@@ -363,8 +430,9 @@ Everything in the audio is timed on the `AudioContext`, never on `performance.no
 worklet stamps
 each chunk with the context time of the render quantum it began in, which gives every sample index
 a capture time, which gives every sample a play time: capture time plus the delay. The player works
-out which frame it owes from `(currentTime - epoch) × sampleRate`, so it cannot drift away from the
-ring's contents — both are counted in the same frames by the same clock. The picture is in another
+out which frame it owes from `(heard - epoch) × sampleRate`, where `heard` is the context clock
+plus the pitch shifter's fixed forty-six milliseconds, so it cannot drift away from the ring's
+contents — both are counted in the same frames by the same clock. The picture is in another
 process and cannot read that clock at all, which is what *The picture* above is about: it keeps
 the same delay on a clock both contexts share, and `delaySeconds` and `heldSeconds` are all that
 cross between.
@@ -447,8 +515,13 @@ Then open `http://localhost:5276/test/page.html` and press Start, or drive
 - `__karaDebug.primes()` counts the times it has started getting ready again after having been
   audible, and `.delays()` every delay it has settled on. **A pause and a play must leave both
   alone**: same delay, no new prime. A seek must add to both.
+- `__karaDebug.setTranspose()` changes the key, and `.dominantHz()` reads the loudest frequency
+  coming out of the player off an `AnalyserNode` on its output. Two readings either side of a
+  transpose are enough to prove the shift on the tone fixture: their ratio should be
+  `2 ** (semitones / 12)`, and `pictureOffsetSeconds()` should not have moved, because the
+  shifter's latency is the same at every key.
 
-Which is three Playwright assertions for the three things this step changed:
+Which is four Playwright assertions for the four things these steps changed:
 
 ```js
 // The bar only ever goes forwards, and it gets there.
@@ -468,6 +541,15 @@ expect(await page.evaluate(() => window.__karaDebug.delays())).toHaveLength(1);
 // A seek does.
 await page.evaluate(() => window.__karaDebug.seek(90));
 expect(await page.evaluate(() => window.__karaDebug.primes())).toBe(before + 1);
+
+// And the key moves the pitch by the ratio it claims, without moving the sync.
+const low = await page.evaluate(() => window.__karaDebug.dominantHz());
+const was = await page.evaluate(() => window.__karaDebug.pictureOffsetSeconds());
+await page.evaluate(() => window.__karaDebug.setTranspose(5));
+await page.waitForTimeout(1000);
+const high = await page.evaluate(() => window.__karaDebug.dominantHz());
+expect(high / low).toBeCloseTo(2 ** (5 / 12), 2);
+expect(await page.evaluate(() => window.__karaDebug.pictureOffsetSeconds())).toBeCloseTo(was, 1);
 ```
 
 The fixtures are synthesised: tones and pink noise for the audio, and an ffmpeg test pattern with
@@ -512,6 +594,14 @@ repository ever sees, and they are gitignored.
 - **Ads cost the delay twice.** The extension cannot tell an ad from a song. It hands the ad back
   to the tab undelayed and primes again afterwards, which means the first eighteen seconds of
   whatever follows an ad are silent.
+- **Six semitones of key, and a phase vocoder's worth of quality.** A 2048-sample frame smears a
+  transient across forty-six milliseconds, so a struck piano note or a snare softens; and the
+  further the partials are moved, the more of the synthesis spectrum is gaps the magnitudes were
+  stretched over, which is what large shifts hear as hollow and thin. Identity phase locking is
+  what keeps it listenable at all rather than what makes it transparent. Six either way is where
+  the arithmetic stops being worth offering, not where it stops working — the shifter itself takes
+  two octaves — and a key control with a setting nobody would choose is a worse control. Singing a
+  fifth down is a job for a different algorithm than one that has to run live with a fixed latency.
 - **One tab at a time.** The model only fits on the GPU once, so starting a second capture stops
   the first.
 - **No icons in the toolbar.** The action uses Chrome's default, because the repository holds no

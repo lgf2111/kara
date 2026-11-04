@@ -71,6 +71,12 @@ export type PlaybackCommand =
       readonly at?: number;
     }
   /**
+   * The key, in semitones, applied to everything that leaves: instrumental,
+   * guide vocal and original alike. The shifter's latency is the same at zero
+   * as at anything else, so this never moves the audio against the picture.
+   */
+  | { readonly type: 'transpose'; readonly semitones: number }
+  /**
    * The page paused. Output fades out and then stops moving: nothing is read,
    * so no frame is counted late, missing or early for the time nobody was
    * listening.

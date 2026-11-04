@@ -1,3 +1,4 @@
+import { createPitchShifter, type PitchShifter } from '../../../web/src/dsp/pitch-shift.ts';
 import { gainAt, heldGain, rampTo, type GainRamp } from '../audio/mix-gain.ts';
 import { createPlayRing, type PlayRing } from '../audio/play-ring.ts';
 import {
@@ -16,6 +17,9 @@ import {
 /** Seconds the ring holds, when nothing says otherwise. */
 const DEFAULT_RING_SECONDS = 12;
 
+/** What leaves: a stereo pair, whatever the ring holds. */
+const OUT_CHANNELS = 2;
+
 interface RingOptions {
   readonly ringSeconds?: number;
 }
@@ -31,14 +35,31 @@ interface RingOptions {
  *
  * Where to read is arithmetic rather than a queue position. Each timeline has
  * an epoch — the context time at which its sample zero is due — so the frame
- * owed at this render quantum is `(currentTime - epoch) * sampleRate`, which
- * drifts from the ring's contents by nothing at all, because both are counted
- * in the same frames by the same clock. Before the epoch it plays silence,
- * which is what priming sounds like.
+ * owed at this render quantum is `(heard - epoch) * sampleRate`, which drifts
+ * from the ring's contents by nothing at all, because both are counted in the
+ * same frames by the same clock. Before the epoch it plays silence, which is
+ * what priming sounds like.
  *
- * What it plays is `(instrumental + gain * vocals) * master`. Gain 1 adds the
- * stems back into the audio the tab played, so `original` costs no extra
- * buffer, and the mode switch is a thirty millisecond ramp on that one number.
+ * What it plays is `pitch((instrumental + gain * vocals) * master)`. Gain 1
+ * adds the stems back into the audio the tab played, so `original` costs no
+ * extra buffer, and the mode switch is a thirty millisecond ramp on that one
+ * number.
+ *
+ * **The key is last, after the mixing and before the output**, so it applies
+ * to the instrumental, the guide vocal and the original alike rather than to
+ * one stem. It is `apps/web/src/dsp/pitch-shift.ts`, which is a phase vocoder
+ * whose reported latency is the same at no shift as at any shift; at no shift
+ * it is bypassed but still delayed by exactly that, so pressing a key button
+ * cannot move the audio against the delayed picture.
+ *
+ * **Which means there are two clocks in here and one of them is the only one
+ * that matters.** `currentTime` is when a sample is *computed*; it is heard
+ * `shiftSeconds` later, because that is how long the shifter holds it. Every
+ * moment this file reasons about — the epoch, the gain ramps, the instant a
+ * hold freezes — is a moment on the audible timeline, which is where the
+ * capture clock and the picture both live. `heard` is the one bridge between
+ * them, and it is the whole of the sync arithmetic: read `shiftSeconds` early,
+ * and the sample comes out on time.
  *
  * **The hold is why the epoch is a variable rather than a constant.** A page
  * that pauses has not seeked: the audio either side of the pause is the same
@@ -54,12 +75,17 @@ interface RingOptions {
 class PlaybackProcessor extends AudioWorkletProcessor {
   private readonly ring: PlayRing;
   private scratch: Float32Array[];
+  /** The mixed pair, which the shifter works on in place. */
+  private voice: Float32Array[];
+  private readonly shifter: PitchShifter;
+  /** Seconds between a sample being computed here and being audible. */
+  private readonly shiftSeconds: number;
   /** Context time sample zero of this timeline is due, or null while priming. */
   private epoch: number | null = null;
   private gain: GainRamp = heldGain(0);
   /** Everything leaves through this: the mute, the fade in, the crossfade. */
   private master: GainRamp = heldGain(1);
-  /** Context time the output stops moving at, or null when it is moving. */
+  /** Audible time the output stops moving at, or null when it is moving. */
   private holdAt: number | null = null;
   private heldSeconds = 0;
   private quanta = 0;
@@ -70,9 +96,22 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     const seconds = typeof asked === 'number' && asked > 0 ? asked : DEFAULT_RING_SECONDS;
     this.ring = createPlayRing(BLOCK_CHANNELS, Math.round(seconds * sampleRate));
     this.scratch = Array.from({ length: BLOCK_CHANNELS }, () => new Float32Array(QUANTUM));
+    this.voice = Array.from({ length: OUT_CHANNELS }, () => new Float32Array(QUANTUM));
+    this.shifter = createPitchShifter({ channels: OUT_CHANNELS, sampleRate });
+    this.shiftSeconds = this.shifter.latencySamples / sampleRate;
     this.port.onmessage = (event: MessageEvent<PlaybackCommand>): void => {
       this.accept(event.data);
     };
+  }
+
+  /**
+   * The moment the sample being computed now will actually be heard.
+   *
+   * Everything on the audible timeline is reached `shiftSeconds` earlier here
+   * than on the clock, because the shifter holds each sample for that long.
+   */
+  private get heard(): number {
+    return currentTime + this.shiftSeconds;
   }
 
   private accept(command: PlaybackCommand): void {
@@ -84,35 +123,40 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         this.ring.write(command.startFrame, command.channels);
         return;
       case 'gain':
-        this.gain = rampTo(this.gain, command.target, currentTime, command.seconds);
+        this.gain = rampTo(this.gain, command.target, this.heard, command.seconds);
         return;
       case 'master':
         this.master = rampTo(
           this.master,
           command.target,
-          command.at ?? currentTime,
+          command.at ?? this.heard,
           command.seconds,
           command.shape,
         );
+        return;
+      case 'transpose':
+        this.shifter.setSemitones(command.semitones);
         return;
       case 'hold':
         if (this.holdAt === null) {
           // Faded out first and frozen when the fade lands, so that the hold
           // is silent rather than abrupt and the twenty milliseconds it costs
           // are counted as played.
-          this.holdAt = currentTime + Math.max(0, command.seconds);
-          this.master = rampTo(this.master, 0, currentTime, command.seconds, 'smooth');
+          const from = this.heard;
+          this.holdAt = from + Math.max(0, command.seconds);
+          this.master = rampTo(this.master, 0, from, command.seconds, 'smooth');
         }
         return;
       case 'resume':
         if (this.holdAt !== null) {
-          const held = Math.max(0, currentTime - this.holdAt);
+          const from = this.heard;
+          const held = Math.max(0, from - this.holdAt);
           this.heldSeconds += held;
           if (this.epoch !== null) {
             this.epoch += held;
           }
           this.holdAt = null;
-          this.master = rampTo(this.master, 1, currentTime, command.seconds, 'smooth');
+          this.master = rampTo(this.master, 1, from, command.seconds, 'smooth');
         }
         return;
       case 'flush':
@@ -121,6 +165,9 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         this.heldSeconds = 0;
         this.master = heldGain(1);
         this.ring.reset();
+        // The key is the person's choice and a new timeline is not them
+        // changing their mind, so the shifter keeps it and drops its buffers.
+        this.shifter.reset();
         return;
     }
   }
@@ -129,6 +176,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   private room(frames: number): Float32Array[] {
     if ((this.scratch[0]?.length ?? 0) < frames) {
       this.scratch = Array.from({ length: BLOCK_CHANNELS }, () => new Float32Array(frames));
+      this.voice = Array.from({ length: OUT_CHANNELS }, () => new Float32Array(frames));
     }
     return this.scratch;
   }
@@ -141,16 +189,22 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     }
     const right = out[1];
     const frames = left.length;
-    left.fill(0);
-    right?.fill(0);
+    const scratch = this.room(frames);
+    const voiceLeft = this.voice[0];
+    const voiceRight = this.voice[1];
+    if (voiceLeft === undefined || voiceRight === undefined) {
+      return true;
+    }
+    voiceLeft.fill(0, 0, frames);
+    voiceRight.fill(0, 0, frames);
 
+    const heard = this.heard;
     const epoch = this.epoch;
     // Frozen: silence, and nothing read, so the ring counts nothing against a
     // stretch the person was not listening to.
-    const frozen = this.holdAt !== null && currentTime >= this.holdAt;
-    const frame = epoch === null || frozen ? -1 : Math.round((currentTime - epoch) * sampleRate);
+    const frozen = this.holdAt !== null && heard >= this.holdAt;
+    const frame = epoch === null || frozen ? -1 : Math.round((heard - epoch) * sampleRate);
     if (frame >= 0) {
-      const scratch = this.room(frames);
       this.ring.read(frame, frames, scratch);
       const vocalsLeft = scratch[VOCALS_LEFT];
       const vocalsRight = scratch[VOCALS_RIGHT];
@@ -163,14 +217,26 @@ class PlaybackProcessor extends AudioWorkletProcessor {
         otherRight !== undefined
       ) {
         for (let index = 0; index < frames; index += 1) {
-          const at = currentTime + index / sampleRate;
+          const at = heard + index / sampleRate;
           const gain = gainAt(this.gain, at);
           const master = gainAt(this.master, at);
-          left[index] = master * ((otherLeft[index] ?? 0) + gain * (vocalsLeft[index] ?? 0));
-          if (right !== undefined) {
-            right[index] = master * ((otherRight[index] ?? 0) + gain * (vocalsRight[index] ?? 0));
-          }
+          voiceLeft[index] = master * ((otherLeft[index] ?? 0) + gain * (vocalsLeft[index] ?? 0));
+          voiceRight[index] =
+            master * ((otherRight[index] ?? 0) + gain * (vocalsRight[index] ?? 0));
         }
+      }
+    }
+
+    // Always, even through a freeze. The shifter's delay is what the whole
+    // timeline above is corrected for, so it cannot be skipped when there is
+    // nothing to play: the samples already inside it are the fade out.
+    this.shifter.process(this.voice, this.voice, frames);
+    for (let index = 0; index < frames; index += 1) {
+      left[index] = voiceLeft[index] ?? 0;
+    }
+    if (right !== undefined) {
+      for (let index = 0; index < frames; index += 1) {
+        right[index] = voiceRight[index] ?? 0;
       }
     }
 
@@ -194,8 +260,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
       // Mid-hold, what has been held so far, so the picture can follow
       // without waiting for the resume.
       heldSeconds:
-        this.heldSeconds +
-        (this.holdAt === null ? 0 : Math.max(0, currentTime - this.holdAt)),
+        this.heldSeconds + (this.holdAt === null ? 0 : Math.max(0, this.heard - this.holdAt)),
     };
     this.port.postMessage(report);
   }

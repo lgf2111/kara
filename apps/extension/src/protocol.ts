@@ -1,3 +1,4 @@
+import { KEY_DEFAULT } from './audio/key.ts';
 import type { PlayMode } from './audio/mix-gain.ts';
 import type { PrepareProgress } from './audio/progress.ts';
 import type { Status } from './audio/status.ts';
@@ -48,6 +49,12 @@ export type Command =
   | { readonly type: 'mode'; readonly mode: PlayMode }
   | { readonly type: 'guide'; readonly level: number }
   /**
+   * The key, in semitones. It belongs to the capture rather than to the
+   * timeline, so a seek, a pause or an ad leaves it exactly where the person
+   * put it; only another one of these moves it.
+   */
+  | { readonly type: 'key'; readonly semitones: number }
+  /**
    * Whether to play the tab's own audio, undelayed, while priming. The
    * `continue` setting turns it on for every prime; an ad turns it on for the
    * ad's duration, because capture has muted the tab and the ad would
@@ -69,6 +76,7 @@ const COMMANDS: Readonly<Record<Command['type'], true>> = {
   resume: true,
   mode: true,
   guide: true,
+  key: true,
   passthrough: true,
   'on-ready': true,
 };
@@ -160,6 +168,8 @@ export interface StatusReport {
   readonly heldSeconds: number;
   readonly mode: PlayMode;
   readonly guide: number;
+  /** The key the capture is being played in, in whole semitones. */
+  readonly semitones: number;
   readonly onReady: OnReady;
 }
 
@@ -236,6 +246,7 @@ export const IDLE_REPORT: StatusReport = {
   heldSeconds: 0,
   mode: 'instrumental',
   guide: 0,
+  semitones: KEY_DEFAULT,
   onReady: DEFAULT_SETTINGS.onReady,
 };
 

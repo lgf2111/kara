@@ -1,4 +1,5 @@
 import { chooseDelaySeconds, createCaptureClock } from '../audio/capture-clock.ts';
+import { clampKey, KEY_DEFAULT } from '../audio/key.ts';
 import {
   CROSSFADE_SECONDS,
   crossfadeOutCurve,
@@ -50,7 +51,7 @@ import {
  * chunks go to a worker running the streaming separator on WebGPU; finalised
  * blocks come back and are written into the playback worklet's ring at the
  * absolute sample they belong to; the player reads them out when the delay
- * says their moment has come.
+ * says their moment has come, mixes them and changes the key on the way out.
  *
  * Four things are worth knowing before reading on.
  *
@@ -59,7 +60,10 @@ import {
  * the quantum it began in, so every sample index has a capture time, so every
  * sample has a play time: capture time plus the delay. That is also the number
  * step B delays the picture by, which is why it is one subtraction rather than
- * a guess.
+ * a guess. The pitch shifter at the end of the player adds a fixed latency of
+ * its own, which the player corrects for itself and which is the same number
+ * whatever the key is — so nothing on this side of it has to know the key
+ * exists for the sync to hold.
  *
  * **The delay is measured, not assumed.** The separator reports what its
  * finalised audio is late by — a window, plus a hop, plus what a window costs
@@ -105,6 +109,16 @@ const RMS_STEP = 64;
  */
 const PREPARE_TICK_MS = 250;
 
+/**
+ * How long a transform the dominant-frequency tap uses: about 1.3 Hz a bin at
+ * 44.1 kHz, which is well inside a semitone anywhere it matters. Only built
+ * when something asks for it, which is the debug harness and nothing else.
+ */
+const ANALYSER_FFT = 32768;
+
+/** Below this much, the loudest bin is the noise floor rather than a note. */
+const ANALYSER_FLOOR_DB = -90;
+
 export interface PipelineOptions {
   /** The tab's audio, and the only audio this extension ever touches. */
   readonly stream: MediaStream;
@@ -114,6 +128,8 @@ export interface PipelineOptions {
   readonly playbackWorkletUrl: string;
   readonly mode?: PlayMode;
   readonly guide?: number;
+  /** The key to start in, in semitones. The remembered default, usually. */
+  readonly key?: number;
   /** Play the tab's own audio, undelayed, while priming. Off by default. */
   readonly passthrough?: boolean;
   /** What happens at the moment the delayed audio is ready. */
@@ -122,6 +138,12 @@ export interface PipelineOptions {
   readonly onMetrics: (metrics: Metrics) => void;
   /** Per finalised block, for the debug harness. Costs a sparse scan. */
   readonly onBlock?: (stat: BlockStat) => void;
+  /**
+   * Taps the output with an `AnalyserNode` so `dominantHz` can answer. For the
+   * debug harness, which is the only thing that needs to prove the key moved
+   * the pitch; the packed extension never asks and never builds one.
+   */
+  readonly analyse?: boolean;
 }
 
 export interface Pipeline {
@@ -130,8 +152,15 @@ export interface Pipeline {
   metrics(): Metrics;
   setMode(mode: PlayMode): void;
   setGuide(level: number): void;
+  /** The key, in semitones, which the player's last stage applies. */
+  setKey(semitones: number): void;
   setPassthrough(enabled: boolean): void;
   setOnReady(onReady: OnReady): void;
+  /**
+   * The loudest frequency leaving the player, or null when nothing asked for
+   * the tap or there is nothing above the noise floor.
+   */
+  dominantHz(): number | null;
   /** Throws away what is buffered and primes again, for a seek or an ad. */
   reset(reason: ResetReason): void;
   /** Freezes the output where it is and keeps everything, for a pause. */
@@ -199,6 +228,17 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
   source.connect(passthrough).connect(context.destination);
   player.connect(context.destination);
 
+  // A tap, not a stage: an analyser passes nothing on and needs nothing
+  // downstream, so it cannot colour what is heard even if it is left running.
+  const analyser =
+    options.analyse === true
+      ? new AnalyserNode(context, { fftSize: ANALYSER_FFT, smoothingTimeConstant: 0 })
+      : null;
+  const spectrum = analyser === null ? null : new Float32Array(analyser.frequencyBinCount);
+  if (analyser !== null) {
+    player.connect(analyser);
+  }
+
   const worker = new Worker(new URL('../separation/separator.worker.ts', import.meta.url), {
     type: 'module',
   });
@@ -207,6 +247,7 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
   let state: StatusState = nextStatus(IDLE, { type: 'start' });
   let mode: PlayMode = options.mode ?? 'instrumental';
   let guide = guideLevel(options.guide ?? 0);
+  let semitones = clampKey(options.key ?? KEY_DEFAULT);
   let passing = options.passthrough ?? false;
   let onReady: OnReady = options.onReady ?? DEFAULT_SETTINGS.onReady;
   let measured: Metrics = NO_METRICS;
@@ -326,6 +367,7 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
     heldSeconds: heldReported,
     mode,
     guide,
+    semitones,
     onReady,
   });
 
@@ -379,6 +421,48 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
 
   const sendGain = (seconds: number): void => {
     toPlayer({ type: 'gain', target: vocalGainFor(mode, guide), seconds });
+  };
+
+  /**
+   * The key. Sent once at the start and once per change, and never on a reset:
+   * the player's shifter keeps it across a flush, because a seek is not the
+   * person changing their mind about what key to sing in.
+   */
+  const sendKey = (): void => {
+    toPlayer({ type: 'transpose', semitones });
+  };
+
+  /**
+   * The loudest frequency on the way out, to a fraction of a bin.
+   *
+   * Three decibel readings around the peak are enough to place it inside its
+   * bin: a magnitude peak in decibels is close enough to a parabola near its
+   * top that fitting one is worth about an order of magnitude of resolution.
+   * Only the harness calls this, and only to prove the key moved the pitch by
+   * the ratio it claimed.
+   */
+  const dominantHz = (): number | null => {
+    if (analyser === null || spectrum === null) {
+      return null;
+    }
+    analyser.getFloatFrequencyData(spectrum);
+    let loudest = Number.NEGATIVE_INFINITY;
+    let at = -1;
+    for (let bin = 1; bin < spectrum.length - 1; bin += 1) {
+      const level = spectrum[bin] ?? Number.NEGATIVE_INFINITY;
+      if (level > loudest) {
+        loudest = level;
+        at = bin;
+      }
+    }
+    if (at < 0 || !Number.isFinite(loudest) || loudest < ANALYSER_FLOOR_DB) {
+      return null;
+    }
+    const below = spectrum[at - 1] ?? loudest;
+    const above = spectrum[at + 1] ?? loudest;
+    const curve = below - 2 * loudest + above;
+    const offset = curve === 0 ? 0 : (0.5 * (below - above)) / curve;
+    return ((at + offset) * context.sampleRate) / ANALYSER_FFT;
   };
 
   /** How the delayed mix arrives, which is the whole of the `onReady` setting. */
@@ -641,6 +725,7 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
   toPlayer({ type: 'master', target: 0, seconds: 0, shape: 'linear' });
   holdPassthrough();
   sendGain(0);
+  sendKey();
   watchPrepare();
   tellStatus();
 
@@ -660,6 +745,18 @@ export async function startPipeline(options: PipelineOptions): Promise<Pipeline>
       sendGain(FADE_SECONDS);
       tellStatus();
     },
+
+    setKey(next) {
+      const wanted = clampKey(next);
+      if (wanted === semitones) {
+        return;
+      }
+      semitones = wanted;
+      sendKey();
+      tellStatus();
+    },
+
+    dominantHz,
 
     setPassthrough(enabled) {
       passing = enabled;
