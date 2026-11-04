@@ -1,5 +1,5 @@
 import { startPipeline, type Pipeline } from './offscreen/pipeline.ts';
-import { packet, packetFor, type Command, type Report } from './protocol.ts';
+import { isCommand, packet, packetFor, type Command, type Report } from './protocol.ts';
 import { reasonText } from './reason.ts';
 import { RUNTIME_PATH, WEIGHTS_PATH } from './separation/model.ts';
 
@@ -112,8 +112,8 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
     return false;
   }
   const body = received.body;
-  if (body.type === 'status' || body.type === 'metrics') {
-    // A report addressed to the audio side is nothing to act on.
+  if (!isCommand(body)) {
+    // A report or a request addressed here is nothing to act on.
     return false;
   }
   accept(body);

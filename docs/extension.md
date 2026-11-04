@@ -1,9 +1,9 @@
 # The browser extension: live separation on a tab
 
 A Chrome extension that takes the vocal out of a tab's audio while the tab is playing, on the
-machine it is playing on, and plays the result back about sixteen seconds late. This file covers
-the audio half, which is what exists. The picture half — delaying the video by the same amount so
-the two line up — is step B and is not written yet.
+machine it is playing on, and plays the result back about sixteen seconds late. The picture is
+delayed to meet it, with an overlay drawn over the page's own video, so the words arrive while
+the mouth is still saying them.
 
 ## What it does
 
@@ -13,14 +13,120 @@ app uses, and plays `instrumental + guide × vocals` back through its own output
 to the original is a thirty millisecond crossfade on one gain. Seeking, pausing or changing the
 playback rate throws the buffer away and primes again.
 
-The mode and the guide level are commands the audio side already accepts; there is no control for
-them yet, because the controls belong with the picture in step B. Until then it starts on the
-instrumental with the guide at zero, and the toolbar button is a toggle.
-
 Tab capture mutes the tab for the person, so the extension's output is the only thing they hear.
 During the first sixteen seconds there is nothing to play, so there is silence — or the tab's own
 audio, undelayed, if the passthrough option is turned on. It is off by default, because sixteen
-seconds of undelayed audio followed by a jump into the delayed stream is worse than quiet.
+seconds of undelayed audio followed by a jump into the delayed stream is worse than quiet. The
+one case where it is turned on by itself is an advertisement, which is below.
+
+## What the person sees
+
+A panel in the bottom left of the player, in a closed shadow root so that none of its styles and
+none of the page's can reach each other. It hides when the player hides its own controls and
+comes back when they do, except while the pointer is resting on it. It adds no keyboard shortcut
+and takes none away: every key the page handled before, it still handles. Pointer and key events
+on the panel itself are stopped there, so nudging the guide slider does not also pause the video
+or seek it.
+
+The panel is one button and, once there is audio, two controls.
+
+- **Karaoke** — off, `Preparing 12 s`, on, unavailable or failed. Pressed while off it asks the
+  service worker to start, and the service worker will almost always answer that it cannot: a
+  click inside a page is a gesture for the page, not for the extension, and Chrome grants
+  `chrome.tabCapture` off the back of a click on the extension's own toolbar button and nowhere
+  else. So the panel says *click the Kara icon in the toolbar to start*. Pressed while running it
+  stops, which needs no gesture and so always works. `unavailable` and `failed` carry the reason
+  from the status report — a missing WebGPU adapter, usually.
+- **Original | Instrumental**, which is the one gain in `mix-gain.ts` crossfading over thirty
+  milliseconds.
+- **Guide**, 0 to 100, which is how much of the vocal is left in the instrumental to sing against.
+- And a line saying *picture is 18 s behind YouTube*, because without it the delay reads as a
+  broken page rather than as the thing that was asked for.
+
+The icons are inline SVG assembled with `createElementNS`: the repository holds no binaries, and
+building elements rather than assigning markup keeps the extension clear of the page's HTML sinks.
+
+## The picture
+
+`src/picture/delayed-picture.ts` holds the video back by the same number of seconds the audio is
+held back by. Every displayed frame is copied into an `ImageBitmap` downscaled to 640 px wide, at
+about fifteen a second, and kept with the instant it was displayed at. A canvas over the video
+paints, on every animation frame, the newest frame that was on screen at `now - delay`. The real
+video stays exactly where it was and keeps playing — it is the thing producing the frames and the
+audio being captured — at opacity zero, with the canvas ignoring pointer events, so the player's
+own controls, shortcuts and context menu all still work on the elements they always worked on.
+
+The canvas is positioned on the video element's displayed rect rather than the player's, because a
+player is usually wider than the picture in it, and each frame is fitted inside that rect the way
+a browser fits a video: contained, centred, black either side. Theatre mode, fullscreen and a
+window drag arrive through a `ResizeObserver`.
+
+**Which clock.** The audio times everything on its `AudioContext`, which is in the offscreen
+document; the frames are captured in a content script, which is a different realm in a different
+process. `performance.now()` is measured from each context's own creation, so the two sides read
+different numbers at the same instant. What they both read is `performance.timeOrigin +
+performance.now()`, and that is what a frame is stamped with. The agreement between the two halves
+is one sentence — *a moment of the tab captured at instant T is heard at T + delay* — and
+`delaySeconds` in the status report is the only number that has to cross between them. Neither
+side needs the other's epoch. It is not exact to the millisecond: capture adds a little latency
+before a sample reaches the worklet and `outputLatency` adds a little after the player writes one,
+so the sound is some tens of milliseconds later than the frame drawn for the same instant. That is
+within a frame or two at fifteen a second, it does not accumulate, and the debug harness measures
+what it actually comes to rather than assuming.
+
+**The priming wait.** For the first eighteen seconds there is no frame old enough to paint and
+nothing to be done about it. The overlay shows the newest frame instead, dimmed, with the seconds
+counting down on it, so the person can see the video is running and how long the wait is. When the
+countdown reaches zero the picture steps back by the delay — at the same moment the audio starts
+playing from that same instant, which is the point of the whole arrangement. The panel counts the
+same wait down, from the status report's `secondsLeft`, ticking between reports rather than
+waiting for the next one.
+
+**Memory.** Eighteen seconds of picture has to be held, and the only question is what it costs.
+At 640 × 360 a frame is 640 × 360 × 4 bytes, and at fifteen a second eighteen seconds is about
+250 MB. The ring is given a budget under 300 MB rather than a length, because a budget is the
+quantity that matters and the number of frames it buys depends on the video; at that size it holds
+about 21 s, which covers the delay with a little to spare. When the budget is spent the oldest
+frame goes, which is the only end to drop from: the newest is the one the delay has not reached
+yet. A budget too small for the delay therefore shows a picture that is less delayed than asked
+for, which the harness measures, rather than one that stutters. `ImageBitmap`s are closed by hand
+on every eviction, every trim and every clear — they are handles on memory outside the heap, and
+letting the collector find them is how an overlay becomes a leak.
+
+## Seeking, pausing and ads
+
+What each event means is one table, in `src/content/page-events.ts`, because every row is a
+judgement worth arguing with.
+
+The audio half of each row is forced: a separated block belongs to the timeline it was captured
+on, so a seek, a pause, a resume or a rate change makes every block in flight worthless, and the
+answer is to throw them away and prime again. The picture half is a choice. A frame is stamped
+with a wall instant, so strictly the picture needs no resetting at all — eighteen seconds after a
+seek it would still be showing exactly what the audio was playing. What makes that wrong is that
+it would be eighteen seconds of pre-seek video over silence, which reads as a frozen tab. So the
+picture comes down when the audio does, the person gets the real video back while there is nothing
+to sing to, and both go delayed again together.
+
+| On | The audio | The picture |
+| --- | --- | --- |
+| `seeking` | reset | overlay down, real video back |
+| `seeked` | nothing; the seek already reset it | overlay up again, keeping frames from here |
+| `pause` | reset | frozen where it is |
+| `play` | reset | overlay up again |
+| `ratechange` | reset | overlay down, real video back |
+| `ended` | reset | overlay down, real video back |
+| an ad starting | reset, and passthrough on | overlay down, real video back |
+| an ad ending | reset, and passthrough off | overlay up again |
+
+A seek is two rows on purpose: the first throws everything away and the second starts again, so a
+long scrub that fires `seeking` a hundred times primes once, at the end.
+
+Ads are the only row that changes what is audible. The extension cannot tell an ad from a song,
+and eighteen seconds of separated advertisement is not worth having, so an ad turns the whole
+thing off for its duration: the real video comes back and passthrough lets the tab's own audio
+through undelayed, which it has to, because capture has muted the tab and the ad would otherwise
+be silent. When it is over, both halves prime again — which does mean eighteen seconds of quiet
+over the start of the song.
 
 ## The one audio source
 
@@ -54,7 +160,26 @@ Four scopes, because Manifest V3 gives each of them different powers.
 | Offscreen document | `src/offscreen.ts`, `src/offscreen/pipeline.ts` | The `AudioContext`, the capture, the delay, the playback |
 | Dedicated worker | `src/separation/separator.worker.ts` | The model, on WebGPU |
 | Audio worklets | `src/worklets/*.worklet.ts` | Stamping captured chunks, and playing blocks at their moment |
-| Content script | `src/content.ts` | Telling the audio side about seeks and pauses. Step B's half of the file |
+| Content script | `src/content.ts` | The wiring: what is mounted, what each event does, what the panel is told |
+
+The content script is four files and one of them is load-bearing in a way the others are not.
+`src/content/youtube.ts` is the only place in the extension that knows what YouTube's DOM looks
+like — the player, the main video, the class the player wears while an ad is on screen, the class
+it wears when it has hidden its controls — and every one of them fails to null or false, logged
+once, rather than throwing. When the page changes, that file changes and nothing else does. The
+audio half reads none of it at all, because media events are a web platform contract rather than a
+YouTube one, so a broken selector costs the picture and the panel and never the sound.
+
+The other three are deliberately dull: `src/content/panel.ts` draws, `src/content/panel-view.ts`
+works out what it should say, `src/content/page-events.ts` is the table above. The last two are
+pure and tested; the two that touch the DOM have no decisions left in them.
+
+One message was added to the protocol for the panel. Starting is a `request-start` to the service
+worker rather than a command, because the page cannot grant a tab capture and can only ask: the
+service worker tries it anyway and, when Chrome refuses, sends back the hint that points at the
+toolbar. Trying rather than assuming means the panel's button starts working by itself on the day
+Chrome allows it, and the refusal costs one rejected promise. `request-stop` needs no gesture and
+always works.
 
 The service worker exists where it does because `chrome.tabCapture.getMediaStreamId` is only
 granted off the back of a user gesture and `chrome.action.onClicked` is where one arrives. It has no
@@ -89,14 +214,18 @@ window.
 The extension does not assume the number, it measures it. The separator reports its own lag; when
 the first block arrives the real lag is measured against the capture clock; the larger of the two
 wins, headroom is added, and the result is rounded up to a half second. It then stays put until a
-reset, because step B delays the picture by exactly this and a delay that twitches is worse than
-one slightly too long.
+reset, because the picture is delayed by exactly this and a delay that twitches is worse than one
+slightly too long. With the headroom added it comes out at about eighteen seconds in practice,
+which is the number the panel quotes.
 
-Everything is timed on the `AudioContext`, never on `performance.now()`. The capture worklet stamps
+Everything in the audio is timed on the `AudioContext`, never on `performance.now()`. The capture
+worklet stamps
 each chunk with the context time of the render quantum it began in, which gives every sample index
 a capture time, which gives every sample a play time: capture time plus the delay. The player works
 out which frame it owes from `(currentTime - epoch) × sampleRate`, so it cannot drift away from the
-ring's contents — both are counted in the same frames by the same clock.
+ring's contents — both are counted in the same frames by the same clock. The picture is in another
+process and cannot read that clock at all, which is what *The picture* above is about: it keeps
+the same delay on a clock both contexts share, and `delaySeconds` is all that crosses between.
 
 ## Build and load it
 
@@ -131,12 +260,13 @@ classic scripts. `apps/extension/vite.config.ts` has the detail, and
 Tab capture needs a browser profile with an unpacked extension in it, a YouTube tab and a click,
 none of which a test can have. None of that is the part that can be wrong, though. The parts that
 can be wrong are whether the delay is what the separator said, whether blocks come back in order
-and tile the timeline, and whether the instrumental has anything in it — and all three only need a
-stream.
+and tile the timeline, whether the instrumental has anything in it, and whether the frame on
+screen is the one the audio is playing — and all four only need a video and a stream.
 
 So `apps/extension/test/page.html` plays a local fixture in a `<video>`, hands
-`video.captureStream()` to the same `startPipeline` the offscreen document calls, with the same
-worklets and the same worker, and puts the status, the metrics and every block on
+`video.captureStream()` to the same `startPipeline` the offscreen document calls and the video to
+the same `createDelayedPicture` the content script calls, with the same worklets and the same
+worker, and puts the status, the metrics, every block and the overlay's own state on
 `window.__karaDebug`.
 
 ```sh
@@ -147,10 +277,22 @@ pnpm --filter @kara/extension run preview                    # http://localhost:
 
 Then open `http://localhost:5276/test/page.html` and press Start, or drive
 `/test/page.html?autoplay=1` in Playwright with `--autoplay-policy=no-user-gesture-required`.
-`window.__karaDebug.blocks()` gives each block's start sample, capture time, play time, arrival
-time and the loudness of each pair, which is enough to assert the lag, the ordering and that the
-instrumental is not silence. The fixtures are synthesised tones and noise and are the only media
-this repository ever sees.
+
+- `__karaDebug.blocks()` gives each block's start sample, capture time, play time, arrival time
+  and the loudness of each pair, which is enough to assert the lag, the ordering and that the
+  instrumental is not silence.
+- `__karaDebug.picture()` gives the overlay's state: frames held, what they cost, the stamp of the
+  frame on the canvas, the delay being aimed at, and how far from it the painted frame is.
+- `__karaDebug.pictureOffsetSeconds()` is the one number worth asserting on. The fixture's own
+  audio plays undelayed, so the separated audio is `delaySeconds` behind it and the painted frame
+  is however far behind it the overlay managed; the difference between the two is this, and it
+  should sit near zero once both halves are live.
+- `__karaDebug.seek()` moves the fixture, for testing what a seek does to both halves at once.
+
+The fixtures are synthesised: tones and pink noise for the audio, and an ffmpeg test pattern with
+its own timestamp burnt into every frame for the picture, so a test that would rather read the
+screen than trust a number can read the delay straight off it. They are the only media this
+repository ever sees, and they are gitignored.
 
 ## Limits
 
@@ -163,12 +305,19 @@ this repository ever sees.
   `streaming.ts` has the trade in full.
 - **The first prime is slower than later ones**, because twenty-one graph pieces have to be loaded
   and compiled before the first window can run.
-- **YouTube's DOM is not a contract.** The content script finds media events by listening on the
-  document in the capture phase, which survives the video element being replaced, but anything that
-  reads the page's own structure is fragile by nature. Step B will depend on more of it than this.
-- **Ads are audio like any other.** The extension separates whatever the tab plays, and an ad
-  arriving mid-song is a discontinuity it has no way to know about: expect sixteen seconds of
-  nonsense around one unless the page reports a seek.
+- **YouTube's DOM is not a contract.** Media events are found by listening on the document in the
+  capture phase, which survives the video element being replaced, but the player, the ad class and
+  the autohide class are somebody else's markup and will change. They are in one file, they fail
+  quietly, and the panel and the picture are what is lost when they do.
+- **A quarter of a gigabyte of frames.** That is what eighteen seconds of 640 px picture costs, and
+  it is the price of the delay rather than an implementation detail to be optimised away. A
+  smaller cap would show a softer picture; a shorter delay would cost separation quality.
+- **The panel cannot start a capture.** Chrome grants `chrome.tabCapture` from a click on the
+  extension's toolbar button and nowhere else, so the panel's own button can only point at it.
+- **Ads cost the delay twice.** The extension cannot tell an ad from a song. It hands the ad back
+  to the tab undelayed and primes again afterwards, which means the first eighteen seconds of
+  whatever follows an ad are silent.
 - **One tab at a time.** The model only fits on the GPU once, so starting a second capture stops
   the first.
-- **No icons.** The action uses Chrome's default, because the repository holds no binaries.
+- **No icons in the toolbar.** The action uses Chrome's default, because the repository holds no
+  binaries. The panel's own icons are inline SVG.

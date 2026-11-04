@@ -10,6 +10,14 @@
         max-width: 48rem;
         font: 14px/1.5 system-ui, sans-serif;
       }
+      /* The overlay is positioned on this, the way it is positioned on the
+         player in a page. Without a positioning context it would land
+         wherever the document felt like putting it. */
+      #stage {
+        position: relative;
+        background: #111;
+        line-height: 0;
+      }
       video {
         width: 100%;
         background: #111;
@@ -24,16 +32,23 @@
   <body>
     <h1>Kara extension debug</h1>
     <p>
-      The same audio pipeline the offscreen document runs, fed from a local fixture instead of
-      from <code>chrome.tabCapture</code>. Synthesise one with
+      The same audio pipeline the offscreen document runs and the same delayed picture the
+      content script draws, fed from a local fixture instead of from
+      <code>chrome.tabCapture</code>. Synthesise one with
       <code>node scripts/spike/make-fixtures.mjs</code>; nothing is fetched and nothing leaves
-      this machine. The fixture plays undelayed, so the separated output arrives on top of it
-      about sixteen seconds later.
+      this machine. The fixture's audio plays undelayed, so the separated output arrives on top
+      of it about eighteen seconds later — and the picture on screen is the overlay's, delayed
+      to match, with the real video underneath it at opacity zero. Every fixture frame has its
+      own timestamp burnt into it, so the delay can be read off the screen.
     </p>
-    <video id="video" controls playsinline></video>
+    <div id="stage">
+      <video id="video" controls playsinline></video>
+    </div>
     <p>
       <button id="start" type="button">Start</button>
       <button id="mode" type="button">Switch mode</button>
+      <button id="picture" type="button">Picture on/off</button>
+      <button id="seek" type="button">Seek +30s</button>
       <button id="reset" type="button">Reset</button>
       <button id="stop" type="button">Stop</button>
     </p>

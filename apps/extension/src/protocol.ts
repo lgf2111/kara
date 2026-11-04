@@ -10,7 +10,8 @@ import type { Status } from './audio/status.ts';
  * every message is wrapped in an envelope that names who it is for and which
  * tab it belongs to. The service worker is the only one that routes.
  *
- * Commands travel towards the audio, reports travel back. Nothing in here
+ * Commands travel towards the audio, reports travel back, and requests go to
+ * the service worker for the two things only it can do. Nothing in here
  * carries audio: the stems never leave the offscreen document.
  */
 
@@ -34,6 +35,37 @@ export type Command =
    * delayed stream is worse than sixteen seconds of quiet.
    */
   | { readonly type: 'passthrough'; readonly enabled: boolean };
+
+/**
+ * Every command's name, as a record rather than a list so that adding one to
+ * the union above and forgetting it here fails the build.
+ */
+const COMMANDS: Readonly<Record<Command['type'], true>> = {
+  start: true,
+  stop: true,
+  reset: true,
+  mode: true,
+  guide: true,
+  passthrough: true,
+};
+
+/** Whether a body is for the audio side, which is the only side that acts. */
+export function isCommand(body: Body): body is Command {
+  return Object.hasOwn(COMMANDS, body.type);
+}
+
+/**
+ * What the page asks of the service worker, which owns the click and the tab.
+ *
+ * Starting is a request rather than a command because the page cannot grant
+ * it: `chrome.tabCapture` is only given off the back of a click on the
+ * extension's own button, so a button inside the page can do no more than ask,
+ * and be told to point the person at the toolbar. Stopping needs no gesture,
+ * so that one always works.
+ */
+export type Request =
+  | { readonly type: 'request-start' }
+  | { readonly type: 'request-stop' };
 
 export interface Metrics {
   /** The delay the player settled on, or null while priming. */
@@ -85,9 +117,18 @@ export interface MetricsReport {
   readonly metrics: Metrics;
 }
 
-export type Report = StatusReport | MetricsReport;
+/**
+ * Something only the person can do. There is one of these, and it exists
+ * because of where Chrome puts the user gesture for a tab capture.
+ */
+export interface HintReport {
+  readonly type: 'hint';
+  readonly hint: 'toolbar';
+}
 
-export type Body = Command | Report;
+export type Report = StatusReport | MetricsReport | HintReport;
+
+export type Body = Command | Report | Request;
 
 /** Tags a message as ours, so another extension's chatter is ignored. */
 const TAG = 'kara/1';
