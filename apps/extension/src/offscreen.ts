@@ -9,7 +9,7 @@ import {
 } from './protocol.ts';
 import { reasonText } from './reason.ts';
 import { RUNTIME_PATH, WEIGHTS_PATH } from './separation/model.ts';
-import { readSettings, watchSettings } from './settings-store.ts';
+import { DEFAULT_SETTINGS, type OnReady } from './settings.ts';
 
 /**
  * The offscreen document: where the audio lives.
@@ -34,6 +34,11 @@ import { readSettings, watchSettings } from './settings-store.ts';
  */
 
 let pipeline: Pipeline | null = null;
+/**
+ * The setting as the service worker last said it. An offscreen document has
+ * no `chrome.storage` (only `chrome.runtime`), so it is told, not asked.
+ */
+let onReady: OnReady = DEFAULT_SETTINGS.onReady;
 let tabId: number | null = null;
 /** Serialises start and stop, which both take a while and must not interleave. */
 let turn: Promise<void> = Promise.resolve();
@@ -66,7 +71,6 @@ async function tabAudio(streamId: string): Promise<MediaStream> {
 async function start(command: Extract<Command, { type: 'start' }>): Promise<void> {
   await stop();
   tabId = command.tabId;
-  const settings = await readSettings();
   const stream = await tabAudio(command.streamId);
   pipeline = await startPipeline({
     stream,
@@ -74,7 +78,7 @@ async function start(command: Extract<Command, { type: 'start' }>): Promise<void
     runtimePath: chrome.runtime.getURL(RUNTIME_PATH),
     captureWorkletUrl: chrome.runtime.getURL('capture-worklet.js'),
     playbackWorkletUrl: chrome.runtime.getURL('playback-worklet.js'),
-    onReady: settings.onReady,
+    onReady,
     onStatus: (report) => {
       tell(report);
     },
@@ -119,6 +123,7 @@ function accept(command: Command): void {
       pipeline?.setPassthrough(command.enabled);
       return;
     case 'on-ready':
+      onReady = command.onReady;
       pipeline?.setOnReady(command.onReady);
       return;
   }
@@ -136,8 +141,4 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
   }
   accept(body);
   return false;
-});
-
-watchSettings((settings) => {
-  pipeline?.setOnReady(settings.onReady);
 });
