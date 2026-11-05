@@ -33,6 +33,35 @@ uv pip install -r requirements.txt
 imports from the vendored copy, and downloads the ECAPA speaker model used by
 the voice map into `.cache/ecapa`.
 
+## Package layout
+
+```text
+kara_duet/
+  config.py        sample rates and chunk defaults
+  runner.py        UNMIXX loading and one-chunk inference
+  embeddings.py    lazy ECAPA singer embeddings
+  voicemap.py      solo/both/unison segments, anchors and rendering
+  anchors.py       calibration parsing and validation
+  pipeline.py      one full analysis + render
+  cli.py           helper command line
+  bridge.py        loopback HTTP bridge
+helper.py          CLI wrapper
+bridge.py          bridge wrapper
+tests/             pure tests; no UNMIXX, torch or remote model
+```
+
+The unit tests need only the light test dependencies:
+
+```bash
+uv pip install -r requirements-test.txt
+python -m ruff check kara_duet tests helper.py bridge.py
+python -m ruff format --check kara_duet tests helper.py bridge.py
+python -m pytest
+```
+
+They use synthetic arrays and fake embedders, so they do not download UNMIXX,
+torch, or ECAPA. The CI `helper` job runs the same commands.
+
 ## Start the bridge
 
 ```bash
@@ -138,8 +167,9 @@ The bridge uses the same path for the panel's **Fix line** button.
 4. **Both** lines are rendered from the two separated streams. The map chooses
    which stream is Voice 1 by comparing each stream against the anchor set, and
    falls back to pitch continuity when the anchors are weak.
-5. **Unison** lines are copied to both voices, because they cannot be split;
-   the panel reports them as low confidence.
+5. **Unison** lines — two active streams at nearly the same pitch and comparable
+   loudness — are copied to both voices, because they cannot be split; the
+   panel reports them as low confidence.
 6. The first two long solo lines are the default anchors. The first is Voice 1,
    the second is Voice 2. **Fix line** adds a user anchor, which takes priority
    over the defaults through a best-match score.

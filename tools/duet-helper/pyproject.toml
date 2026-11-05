@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kara-duet-helper"
+version = "0.1.0"
+description = "Native UNMIXX + calibrated voice map for Kara's duet mode"
+requires-python = ">=3.12"
+# Runtime dependencies stay in requirements.txt because torch pins are platform-specific.
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+  "numpy>=1.26,<3",
+  "librosa>=0.10,<1.1",
+  "soundfile>=0.12",
+  "pytest==9.2.0",
+  "ruff==0.17.3",
+]
+
+[project.scripts]
+kara-duet = "kara_duet.cli:main"
+kara-duet-bridge = "kara_duet.bridge:main"
+
+[tool.setuptools]
+packages = ["kara_duet"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]

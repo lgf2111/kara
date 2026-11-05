@@ -20,16 +20,17 @@ re-rendered in seconds without running UNMIXX again.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
 
 import librosa
 import numpy as np
 import soundfile as sf
 
-MODEL_SAMPLE_RATE = 24_000
-OUTPUT_SAMPLE_RATE = 44_100
+from .config import MODEL_SAMPLE_RATE, OUTPUT_SAMPLE_RATE
+from .embeddings import Embedder
+
 WINDOW_SECONDS = 1.0
 MIN_RMS = 0.008
 BOTH_RMS = 0.015
@@ -67,44 +68,25 @@ class Anchor:
     embedding: np.ndarray | None = None
 
 
-class Embedder:
-    """A small wrapper around the speechbrain ECAPA model."""
-
-    def __init__(self, model_dir: Path | None = None, device: str = "cpu") -> None:
-        self._device = device
-        self._model = None
-        self._model_dir = model_dir
-
-    def _load(self):
-        if self._model is not None:
-            return self._model
-        from speechbrain.inference.speaker import EncoderClassifier  # noqa: PLC0415
-
-        kwargs = {"source": "speechbrain/spkrec-ecapa-voxceleb", "run_opts": {"device": self._device}}
-        if self._model_dir is not None:
-            kwargs["savedir"] = str(self._model_dir)
-        self._model = EncoderClassifier.from_hparams(**kwargs)
-        return self._model
-
-    def embed(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
-        import torch  # noqa: PLC0415
-
-        x = librosa.resample(audio, orig_sr=sample_rate, target_sr=16_000)
-        with torch.no_grad():
-            e = self._load().encode_batch(torch.from_numpy(x).float().unsqueeze(0)).squeeze().cpu().numpy()
-        return e / (np.linalg.norm(e) + 1e-12)
-
-
 def classify(window: Window) -> tuple[str, int | None]:
     if max(window.rms) < MIN_RMS:
         return "none", None
     if min(window.rms) > BOTH_RMS and window.f0[0] is not None and window.f0[1] is not None:
         if abs(window.f0[0] - window.f0[1]) > BOTH_GAP_HZ:
             return "both", None
+        total = window.rms[0] ** 2 + window.rms[1] ** 2
+        share = window.rms[0] ** 2 / total if total > 0 else 0.5
+        # Two streams at the same pitch and comparable loudness are a unison
+        # line, not two separable singers. Keep it shared rather than guessing
+        # which side owns it.
+        if 0.35 <= share <= 0.65:
+            return "unison", None
     return "solo", 0 if window.rms[0] >= window.rms[1] else 1
 
 
-def build_segments(windows: Sequence[Window], phrase_edges: Sequence[float] | None = None) -> list[Segment]:
+def build_segments(
+    windows: Sequence[Window], phrase_edges: Sequence[float] | None = None
+) -> list[Segment]:
     regions: list[Segment] = []
     last_f0: dict[int, float | None] = {0: None, 1: None}
     for window in windows:
@@ -120,11 +102,13 @@ def build_segments(windows: Sequence[Window], phrase_edges: Sequence[float] | No
                 if window.time - previous.end > 1.5:
                     split = True
             if phrase_edges and any(
-                previous.end - 0.6 <= edge <= window.time + 0.6 for edge in phrase_edges
+                previous.end <= edge < window.time + WINDOW_SECONDS for edge in phrase_edges
             ):
                 split = True
         if split or not regions or regions[-1].kind != kind or regions[-1].slot != slot:
-            regions.append(Segment(kind=kind, start=window.time, end=window.time + WINDOW_SECONDS, slot=slot))
+            regions.append(
+                Segment(kind=kind, start=window.time, end=window.time + WINDOW_SECONDS, slot=slot)
+            )
         else:
             regions[-1].end = window.time + WINDOW_SECONDS
         if kind == "solo":
@@ -148,14 +132,24 @@ def build_segments(windows: Sequence[Window], phrase_edges: Sequence[float] | No
                 next_lower = 0 if window.f0[0] <= window.f0[1] else 1
             if current is None or next_lower == lower:
                 if current is None:
-                    current = Segment(kind="both", start=window.time, end=window.time + WINDOW_SECONDS, lower=next_lower)
+                    current = Segment(
+                        kind="both",
+                        start=window.time,
+                        end=window.time + WINDOW_SECONDS,
+                        lower=next_lower,
+                    )
                 else:
                     current.end = window.time + WINDOW_SECONDS
                     current.lower = next_lower
                 lower = next_lower
             else:
                 split.append(current)
-                current = Segment(kind="both", start=window.time, end=window.time + WINDOW_SECONDS, lower=next_lower)
+                current = Segment(
+                    kind="both",
+                    start=window.time,
+                    end=window.time + WINDOW_SECONDS,
+                    lower=next_lower,
+                )
                 lower = next_lower
         if current is not None:
             split.append(current)
@@ -184,7 +178,9 @@ def vocal_phrase_edges(vocal: np.ndarray, sample_rate: int) -> list[float]:
     happens at a breath, not at a pitch jump.
     """
     rms = librosa.feature.rms(y=vocal, frame_length=1024, hop_length=max(1, sample_rate // 50))[0]
-    times = librosa.frames_to_time(np.arange(len(rms)), sr=sample_rate, hop_length=max(1, sample_rate // 50))
+    times = librosa.frames_to_time(
+        np.arange(len(rms)), sr=sample_rate, hop_length=max(1, sample_rate // 50)
+    )
     if len(rms) == 0:
         return []
     threshold = max(0.01, float(np.percentile(rms, 85)) * 0.12)
@@ -234,7 +230,9 @@ def default_anchors(
             second = candidate
             break
     if second is None:
-        second = next((candidate for candidate in solos[1:] if candidate.start - first.end > 1.5), solos[1])
+        second = next(
+            (candidate for candidate in solos[1:] if candidate.start - first.end > 1.5), solos[1]
+        )
     selected = [first, second][:count]
     anchors: list[Anchor] = []
     for voice, segment in enumerate(selected, start=1):
@@ -276,7 +274,15 @@ def add_anchor(
         end=end,
         embedding=embedder.embed(vocal[a:b], sample_rate),
     )
-    return [anchor for anchor in anchors if not (anchor.voice == voice and abs(anchor.start - start) < 0.5 and abs(anchor.end - end) < 0.5)] + [fresh]
+    return [
+        anchor
+        for anchor in anchors
+        if not (
+            anchor.voice == voice
+            and abs(anchor.start - start) < 0.5
+            and abs(anchor.end - end) < 0.5
+        )
+    ] + [fresh]
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
@@ -284,7 +290,11 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _best_anchor(embedding: np.ndarray, anchors: Sequence[Anchor], voice: int) -> float:
-    values = [_cosine(embedding, anchor.embedding) for anchor in anchors if anchor.voice == voice and anchor.embedding is not None]
+    values = [
+        _cosine(embedding, anchor.embedding)
+        for anchor in anchors
+        if anchor.voice == voice and anchor.embedding is not None
+    ]
     return max(values) if values else -1.0
 
 
@@ -327,7 +337,7 @@ def label_segments(
         solo_scores.append((segment, s1, s2, s2 - s1))
 
     # First pass: strong anchor matches.
-    for segment, s1, s2, margin in solo_scores:
+    for segment, _s1, _s2, margin in solo_scores:
         if margin > ANCHOR_MARGIN:
             segment.voice = 2
             segment.confidence = min(1.0, margin)
@@ -382,7 +392,7 @@ def label_segments(
 
     # Third pass: the remaining weak lines use the nearest duet section's
     # pitch placement. This is the only place where register alone decides.
-    for segment, s1, s2, margin in solo_scores:
+    for segment, _s1, _s2, margin in solo_scores:
         if segment.voice is not None:
             continue
         nearest = _nearest_both(segments, segment)
@@ -449,7 +459,9 @@ def _nearest_both(segments: Sequence[Segment], segment: Segment) -> Segment | No
     )
 
 
-def stitch_streams(chunks: Sequence[tuple[float, np.ndarray]], frames: int) -> tuple[np.ndarray, np.ndarray]:
+def stitch_streams(
+    chunks: Sequence[tuple[float, np.ndarray]], frames: int
+) -> tuple[np.ndarray, np.ndarray]:
     """Crossfade the raw chunk outputs into two continuous streams."""
     streams = [np.zeros(frames, dtype=np.float32), np.zeros(frames, dtype=np.float32)]
     previous_end = 0

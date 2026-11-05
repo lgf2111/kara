@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -54,3 +55,52 @@ jobs:
 
       - name: No tool attribution in commits or files
         run: node scripts/check-attribution.mjs
+
+  helper:
+    name: duet helper
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/duet-helper
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/duet-helper/requirements-test.txt
+      - name: libsndfile for soundfile
+        run: sudo apt-get update && sudo apt-get install -y libsndfile1
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements-test.txt
+      - run: python -m ruff check kara_duet tests helper.py bridge.py
+      - run: python -m ruff format --check kara_duet tests helper.py bridge.py
+      - run: python -m pytest
+
+  package-extension:
+    name: package extension
+    needs: [verify, guards, helper]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Fetch the separation weights
+        run: node scripts/spike/models.mjs fetch htdemucs-web
+      - name: Build an unpacked extension with weights
+        run: pnpm --filter @kara/extension build:unpacked
+      - name: Zip the extension
+        run: cd apps/extension/dist && zip -r ../../../kara-extension.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kara-extension
+          path: kara-extension.zip
+          if-no-files-found: error
+          retention-days: 14

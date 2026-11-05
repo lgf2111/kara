@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
-import sys
 import time
 from pathlib import Path
 
@@ -19,19 +17,17 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 
-from runner import (
-    DEFAULT_CHUNK_SECONDS,
-    DEFAULT_OVERLAP_SECONDS,
-    MODEL_SAMPLE_RATE,
+from . import voicemap
+from .anchors import parse_anchors, validate_anchor
+from .config import MODEL_SAMPLE_RATE, OUTPUT_SAMPLE_RATE
+from .embeddings import Embedder
+from .runner import (
     choose_device,
     install_mps_pool_fallback,
     load_audio,
     load_model,
     separate_chunk,
 )
-import voicemap
-
-OUTPUT_SAMPLE_RATE = 44_100
 
 
 def load_vocal_44(path: Path) -> np.ndarray:
@@ -119,34 +115,6 @@ def load_saved_chunks(output_dir: Path, meta: dict) -> list[tuple[float, np.ndar
     return chunks
 
 
-def parse_anchors(raw: str | None) -> list[dict]:
-    if raw is None or raw.strip() == "":
-        return []
-    path = Path(raw)
-    text = path.read_text() if path.is_file() else raw
-    value = json.loads(text)
-    if not isinstance(value, list):
-        raise ValueError("anchors must be a list")
-    anchors = []
-    for item in value:
-        if not isinstance(item, dict):
-            raise ValueError("each anchor must be an object")
-        voice = int(item.get("voice", 0))
-        start = float(item.get("start", -1))
-        end = float(item.get("end", -1))
-        if voice not in (1, 2) or start < 0 or end <= start:
-            raise ValueError("anchors need voice 1/2 and a positive time range")
-        anchors.append({"voice": voice, "start": start, "end": end})
-    return anchors
-
-
-def anchor_segment(segments: list[voicemap.Segment], middle: float) -> voicemap.Segment | None:
-    for segment in segments:
-        if segment.start <= middle < segment.end:
-            return segment
-    return None
-
-
 def run(
     input_path: Path,
     output_dir: Path,
@@ -200,25 +168,24 @@ def run(
         windows = voicemap.measure_windows(
             streams,
             len(vocal24) / MODEL_SAMPLE_RATE,
-            on_progress=lambda done, total: print(
-                json.dumps({"stage": "map-window", "done": done, "total": total}),
-                flush=True,
-            )
-            if done % 10 == 0 or done == total
-            else None,
+            on_progress=lambda done, total: (
+                print(
+                    json.dumps({"stage": "map-window", "done": done, "total": total}),
+                    flush=True,
+                )
+                if done % 10 == 0 or done == total
+                else None
+            ),
         )
         cache.write_text(
             json.dumps(
-                [
-                    {"time": row.time, "rms": list(row.rms), "f0": list(row.f0)}
-                    for row in windows
-                ]
+                [{"time": row.time, "rms": list(row.rms), "f0": list(row.f0)} for row in windows]
             )
         )
     edges = voicemap.vocal_phrase_edges(vocal44, OUTPUT_SAMPLE_RATE)
     segments = voicemap.build_segments(windows, edges)
 
-    embedder = voicemap.Embedder(model_dir=Path(__file__).parent / ".cache/ecapa")
+    embedder = Embedder(model_dir=Path(__file__).resolve().parent.parent / ".cache/ecapa")
     anchors = voicemap.default_anchors(
         segments,
         vocal44,
@@ -228,15 +195,12 @@ def run(
     )
     requested = parse_anchors(anchors_raw)
     for item in requested:
-        middle = (item["start"] + item["end"]) / 2
-        segment = anchor_segment(segments, middle)
-        if segment is None or segment.kind != "solo":
-            raise ValueError("choose a moment where only one singer is singing")
+        validate_anchor(segments, int(item["voice"]), float(item["start"]), float(item["end"]))
         anchors = voicemap.add_anchor(
             anchors,
-            item["voice"],
-            item["start"],
-            item["end"],
+            int(item["voice"]),
+            float(item["start"]),
+            float(item["end"]),
             vocal44,
             OUTPUT_SAMPLE_RATE,
             embedder,
@@ -265,8 +229,7 @@ def run(
         "sampleRate": OUTPUT_SAMPLE_RATE,
         "durationSeconds": len(vocal44) / OUTPUT_SAMPLE_RATE,
         "anchors": [
-            {"voice": anchor.voice, "start": anchor.start, "end": anchor.end}
-            for anchor in anchors
+            {"voice": anchor.voice, "start": anchor.start, "end": anchor.end} for anchor in anchors
         ],
         "segments": [
             {
@@ -294,44 +257,3 @@ def run(
         ),
         flush=True,
     )
-
-
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Split a vocal stem into two calibrated voices.")
-    parser.add_argument("--input", type=Path, help="vocal WAV; omitted with --reuse")
-    parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--unmixx", type=Path, default=Path(__file__).parent / ".vendor/unmixx")
-    parser.add_argument("--device", default="auto", choices=["auto", "mps", "cuda", "cpu"])
-    parser.add_argument("--chunk-seconds", type=float, default=DEFAULT_CHUNK_SECONDS)
-    parser.add_argument("--overlap-seconds", type=float, default=DEFAULT_OVERLAP_SECONDS)
-    parser.add_argument("--anchors", default=None, help="JSON list or path to a JSON list")
-    parser.add_argument("--reuse", action="store_true", help="re-render from saved chunks")
-    args = parser.parse_args(argv)
-
-    if args.reuse:
-        if not args.output_dir.is_dir():
-            parser.error(f"no saved analysis at {args.output_dir}")
-    else:
-        if args.input is None or not args.input.is_file():
-            parser.error("--input is required unless --reuse is used")
-        if not (args.unmixx / "ckpt/best.ckpt").is_file():
-            parser.error(f"UNMIXX checkpoint not found under {args.unmixx}; run setup.sh first")
-
-    try:
-        run(
-            args.input or Path(""),
-            args.output_dir,
-            args.unmixx,
-            args.device,
-            args.chunk_seconds,
-            args.overlap_seconds,
-            args.anchors,
-            args.reuse,
-        )
-    except Exception as cause:  # noqa: BLE001 - the CLI reports the reason
-        print(json.dumps({"stage": "error", "reason": str(cause)}), flush=True)
-        raise SystemExit(1) from cause
-
-
-if __name__ == "__main__":
-    main()

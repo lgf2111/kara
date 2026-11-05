@@ -166,6 +166,19 @@ export function duetPercent(value: number): number {
   return Math.min(100, Math.max(0, Math.round(value * 100)));
 }
 
+/** Normalise a bridge phase string into the four phases the panel knows. */
+export function duetPhaseOf(value: unknown): DuetPhase {
+  switch (value) {
+    case 'starting':
+    case 'separating':
+    case 'mapping':
+    case 'calibrating':
+      return value;
+    default:
+      return 'starting';
+  }
+}
+
 /** The caption for a job phase, which is also what the panel shows. */
 export function duetPhaseLabel(phase: DuetPhase | null): string {
   switch (phase) {

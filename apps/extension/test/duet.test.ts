@@ -6,6 +6,7 @@ import {
   duetGains,
   duetPercent,
   duetPhaseLabel,
+  duetPhaseOf,
   normaliseDuetConfig,
   normaliseDuetMix,
   withDuetLevel,
@@ -69,6 +70,14 @@ describe('the duet desk', () => {
 });
 
 describe('the duet words', () => {
+  it('normalises a bridge phase', () => {
+    expect(duetPhaseOf('mapping')).toBe('mapping');
+    expect(duetPhaseOf('separating')).toBe('separating');
+    expect(duetPhaseOf('calibrating')).toBe('calibrating');
+    expect(duetPhaseOf('done')).toBe('starting');
+    expect(duetPhaseOf(null)).toBe('starting');
+  });
+
   it('names every stage', () => {
     expect(duetPhaseLabel('separating')).toBe('Splitting the two voices');
     expect(duetPhaseLabel('mapping')).toBe('Mapping who sings when');

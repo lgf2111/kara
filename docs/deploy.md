@@ -13,3 +13,21 @@ pnpm dlx wrangler pages deploy apps/web/dist --project-name kara
 Pages refuses any asset over 25 MiB. The runtime's wasm is 27 MiB, so it ships gzipped (`ort-wasm-simd-threaded.asyncify.wasm.gz`) and the separation worker unzips it before handing the bytes to the runtime. The script fails if any file is still over the limit.
 
 Headers (cross-origin isolation, CSP) come from `apps/web/public/_headers`.
+
+## The extension artifact
+
+The Chrome extension is built separately. The CI `package-extension` job runs on every push to
+`main` (and on manual dispatch), fetches the htdemucs weights, builds the unpacked extension, and
+uploads `kara-extension.zip` as an artifact.
+
+To build the same thing locally:
+
+```sh
+node scripts/spike/models.mjs fetch htdemucs-web
+pnpm --filter @kara/extension build:unpacked
+cd apps/extension/dist && zip -r ../../../kara-extension.zip .
+```
+
+Load `apps/extension/dist` as an unpacked extension, or unzip the artifact and load the folder.
+`pnpm --filter @kara/extension build` without weights is useful for checking the shell, but it
+cannot separate audio.

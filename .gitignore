@@ -42,3 +42,6 @@ fixtures/generated/
 # Local design-review artifacts: screenshots and generated logo candidates.
 # They stay on this machine; the product tree holds no review binaries.
 .taste-skill/
+
+# Local packaged extension artifact from the packaging command.
+kara-extension.zip

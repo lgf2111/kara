@@ -4,13 +4,16 @@ _Kara_ as in "empty", as in karaoke. Upload a song or music video you own and ge
 the original, an instrumental, synced lyrics and a vocal switch. Build a library, share it with
 a friend.
 
-Everything runs in your browser. There is no server that sees your music.
+Everything runs on your machine. The web app and extension do their work in the browser; the
+opt-in duet helper is a local loopback process. There is no remote server that sees your music.
 
 ## Where we stand
 
-M0: the foundation only. Workspace, strict TypeScript, lint, tests, CI and this design. No ingest,
-no separation, no lyrics, no player yet. See [docs/DESIGN.md](docs/DESIGN.md) for the plan and
-[the milestones](docs/DESIGN.md#milestones) for the order.
+The web app has library ingest, htdemucs separation, a four-stem player, timed lyrics, a live key
+change and a self-contained Pages deployment. The Chrome extension reads the audio of the video in
+the tab, separates it locally and puts the same mixer over YouTube. **Duet (beta)** is an opt-in
+second pass: a native local helper splits the vocal stem into two voices, with panel calibration
+for the hard lines.
 
 ## The rules this project holds itself to
 
@@ -21,8 +24,9 @@ These are not preferences. They are enforced in code, in tests and in CI.
    watching. Either way it is processed locally: nothing is uploaded anywhere, and nothing is
    redistributed.
 2. **Your audio never leaves your device.** Decoding, separation, transcription and playback all
-   happen in the browser. The page may only talk to its own origin: `connect-src 'self'` in the
-   Content-Security-Policy, with no code that uploads audio anywhere.
+   happen in the browser. The opt-in duet helper is a loopback process on `127.0.0.1`; no audio is
+   uploaded to a remote origin. The page may only talk to its own origin: `connect-src 'self'` in
+   the Content-Security-Policy, with no code that uploads audio anywhere.
 3. **No copyrighted material in this repository**, on the deployed site, or in the relay. Test
    fixtures are synthesised with ffmpeg, or carry a clear licence. A CI guard fails the build if
    audio, video or model weights are ever committed.
@@ -46,6 +50,9 @@ pnpm run hooks:install   # commit-msg hook, see below
 pnpm run dev             # http://localhost:5173
 ```
 
+The opt-in duet helper is separate and needs Python 3.12; see
+[tools/duet-helper/README.md](tools/duet-helper/README.md).
+
 ## Commands
 
 | Command                  | What it does                                               |
@@ -58,16 +65,25 @@ pnpm run dev             # http://localhost:5173
 | `pnpm run check:media`   | Fails if the index tracks media, weights or anything big    |
 | `pnpm run check:attribution` | Fails if commits or files name the tools behind them    |
 | `pnpm run verify`        | All of the above, in CI order                              |
+| `pnpm --filter @kara/extension build` | Unpacked extension shell; weights if `models/` is present |
+| `pnpm --filter @kara/extension build:unpacked` | Extension with weights; fails if they are missing |
+| `cd tools/duet-helper && python -m pytest` | Duet helper unit tests                    |
+| `cd tools/duet-helper && python -m ruff check kara_duet tests` | Duet helper lint |
+| `python tools/duet-helper/bridge.py` | Local duet bridge; see `tools/duet-helper/README.md` |
 
 ## Repository layout
 
 ```
 apps/web          static site: the KTV app, all processing in the browser
+apps/extension    Chrome extension: stream read, separation, mixer, duet UI
+tools/duet-helper native UNMIXX + calibrated voice map + local bridge
 workers/relay     Cloudflare Worker: WebRTC signalling and room codes only
 scripts           repo guards, run locally and in CI
 docs/DESIGN.md    architecture, data model, recipe format, legal rationale
 docs/lyrics-ocr.md  reading lyrics off a video you own
 docs/browser-support.md  what runs in which browser, and the Safari workarounds
+docs/deploy.md    the Pages bundle and the extension artifact
+.github/workflows CI: web/extension checks, guards, helper tests, packaged extension
 .githooks         tracked git hooks
 ```
 
@@ -78,4 +94,6 @@ in messages or in code. `pnpm run hooks:install` points `core.hooksPath` at `.gi
 rejects such a message before it is written, and the `guards` job in CI checks the whole pull
 request range.
 
-Branch per pull request, conventional commits, never commit to `main`.
+Branch per change, conventional commits, never commit directly to `main`. Before merging, run
+`pnpm verify` and the helper checks (`ruff` and `pytest` under `tools/duet-helper`). Squash merge
+into `main`, push, delete the branch, and leave `main` green and checked out.

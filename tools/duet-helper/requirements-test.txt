@@ -1,0 +1,5 @@
+numpy>=1.26,<3
+librosa>=0.10,<1.1
+soundfile>=0.12
+pytest==9.2.0
+ruff==0.17.3

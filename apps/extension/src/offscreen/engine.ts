@@ -6,6 +6,8 @@ import {
 import SignalsmithStretch, { type StretchNode } from 'signalsmith-stretch';
 
 import { clampKey, KEY_DEFAULT } from '../audio/key.ts';
+import { decodeStereo } from '../audio/decode.ts';
+import { DuetClient } from '../audio/duet-client.ts';
 import { projectMediaSeconds, tidySample, type MediaSample } from '../audio/media-time.ts';
 import { FADE_SECONDS, type PlayMode } from '../audio/mix-gain.ts';
 import {
@@ -17,7 +19,6 @@ import {
   normaliseDuetMix,
   type DuetConfig,
   type DuetMix,
-  type DuetPhase,
   type DuetStatus,
 } from '../audio/duet.ts';
 import { encodeWavMono } from '../audio/wav.ts';
@@ -139,25 +140,6 @@ export interface Engine {
   peakLevel(): number | null;
   debug(): PipelineDebug;
   stop(): Promise<void>;
-}
-
-/** Decodes bytes to a stereo pair at the model's rate, mono made stereo. */
-async function decodeStereo(bytes: ArrayBuffer): Promise<[Float32Array, Float32Array]> {
-  const context = new OfflineAudioContext({
-    numberOfChannels: 2,
-    length: 1,
-    sampleRate: SAMPLE_RATE,
-  });
-  // decodeAudioData takes ownership of the buffer and detaches it; nothing
-  // here reads `bytes` afterwards.
-  const buffer = await context.decodeAudioData(bytes);
-  const left = new Float32Array(buffer.length);
-  left.set(buffer.getChannelData(0));
-  const right = buffer.numberOfChannels > 1 ? new Float32Array(buffer.length) : left;
-  if (buffer.numberOfChannels > 1) {
-    right.set(buffer.getChannelData(1));
-  }
-  return [left, right];
 }
 
 /** One range attempt, then the next: never a tight loop against a bad server. */
@@ -375,7 +357,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
   let duet: DuetStatus = IDLE_DUET;
   let duetActive = false;
   let duetJobId: string | null = null;
-  let duetConfig: DuetConfig | null = null;
+  let duetClient: DuetClient | null = null;
   let duetTimer: ReturnType<typeof setTimeout> | null = null;
   /** The vocal stem, kept as mono so it can be uploaded for the second pass. */
   let vocalsMono: Float32Array | null = null;
@@ -576,57 +558,16 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     }
   };
 
-  const duetPhase = (value: unknown): DuetPhase => {
-    return value === 'separating' ||
-      value === 'mapping' ||
-      value === 'calibrating' ||
-      value === 'starting'
-      ? value
-      : 'starting';
-  };
-
-  const errorText = async (response: Response): Promise<string> => {
-    try {
-      const body = (await response.json()) as { error?: unknown };
-      if (typeof body.error === 'string' && body.error.length > 0) {
-        return body.error;
-      }
-    } catch {
-      // A non-JSON error body is still an error; the status is enough.
-    }
-    return `the helper returned ${String(response.status)}`;
-  };
-
   const loadDuetConfig = async (): Promise<DuetConfig> => {
     const stored = await chrome.storage.local.get(DUET_CONFIG_KEY);
     return normaliseDuetConfig(stored[DUET_CONFIG_KEY]);
   };
 
   const loadDuetResult = async (): Promise<void> => {
-    if (duetJobId === null || duetConfig === null) {
+    if (duetJobId === null || duetClient === null) {
       throw new Error('the helper job is gone');
     }
-    const headers = { 'X-Kara-Token': duetConfig.token };
-    const [first, second, map] = await Promise.all([
-      fetch(`${duetConfig.url}/v1/jobs/${duetJobId}/voice1.wav`, { headers }),
-      fetch(`${duetConfig.url}/v1/jobs/${duetJobId}/voice2.wav`, { headers }),
-      fetch(`${duetConfig.url}/v1/jobs/${duetJobId}/map.json`, { headers }).catch(() => null),
-    ]);
-    if (!first.ok || !second.ok) {
-      throw new Error(await errorText(first.ok ? second : first));
-    }
-    const [firstBytes, secondBytes] = await Promise.all([
-      first.arrayBuffer(),
-      second.arrayBuffer(),
-    ]);
-    const [firstLeft] = await decodeStereo(firstBytes);
-    const [secondLeft] = await decodeStereo(secondBytes);
-    const length = Math.min(firstLeft.length, secondLeft.length, sampleCount);
-    if (length <= 0) {
-      throw new Error('the helper returned empty voices');
-    }
-    const voice1 = firstLeft.slice(0, length);
-    const voice2 = secondLeft.slice(0, length);
+    const [voice1, voice2] = await duetClient.voices(duetJobId, sampleCount);
     toPlayer({ type: 'duet', voice1, voice2 }, [
       voice1.buffer as ArrayBuffer,
       voice2.buffer as ArrayBuffer,
@@ -638,16 +579,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       gains: duetGains(duet.mix),
       seconds: FADE_SECONDS,
     });
-    let low: number | null = null;
-    if (map !== null && map.ok) {
-      try {
-        const body = (await map.json()) as { quality?: { lowConfidence?: unknown } };
-        const value = body.quality?.lowConfidence;
-        low = typeof value === 'number' && Number.isFinite(value) ? value : null;
-      } catch {
-        // The map is a diagnostic; a missing one must not fail the split.
-      }
-    }
+    const low = await duetClient.lowConfidence(duetJobId);
     setDuet({
       state: 'ready',
       progress: null,
@@ -658,37 +590,22 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
   };
 
   const pollDuet = async (): Promise<void> => {
-    if (stopped || duetJobId === null || duetConfig === null) {
+    if (stopped || duetJobId === null || duetClient === null) {
       return;
     }
     try {
-      const response = await fetch(`${duetConfig.url}/v1/jobs/${duetJobId}`, {
-        headers: { 'X-Kara-Token': duetConfig.token },
-      });
-      if (!response.ok) {
-        throw new Error(await errorText(response));
-      }
-      const status = (await response.json()) as {
-        state?: unknown;
-        phase?: unknown;
-        done?: unknown;
-        total?: unknown;
-        error?: unknown;
-      };
+      const status = await duetClient.status(duetJobId);
       if (status.state === 'error') {
-        throw new Error(typeof status.error === 'string' ? status.error : 'the helper stopped');
+        throw new Error(status.error ?? 'the helper stopped');
       }
       if (status.state === 'done') {
         await loadDuetResult();
         return;
       }
-      const phase = duetPhase(status.phase);
-      const done = typeof status.done === 'number' ? status.done : 0;
-      const total = typeof status.total === 'number' ? status.total : 0;
       setDuet({
         state: 'preparing',
-        progress: { phase, done, total },
-        detail: duetPhaseLabel(phase),
+        progress: { phase: status.phase, done: status.done, total: status.total },
+        detail: duetPhaseLabel(status.phase),
       });
       scheduleDuetPoll(1000);
     } catch (cause) {
@@ -714,14 +631,15 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
         return;
       }
       try {
-        duetConfig = await loadDuetConfig();
-        if (duetConfig.token.length === 0) {
+        const config = await loadDuetConfig();
+        if (config.token.length === 0) {
           setDuet({
             state: 'error',
             detail: 'Paste the Duet helper token in the Kara popup.',
           });
           return;
         }
+        duetClient = new DuetClient(config, decodeStereo);
         setDuet({
           state: 'preparing',
           progress: { phase: 'starting', done: 0, total: 0 },
@@ -730,22 +648,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
           lowConfidenceSeconds: null,
         });
         const wav = encodeWavMono(vocalsMono, context.sampleRate);
-        const response = await fetch(`${duetConfig.url}/v1/jobs`, {
-          method: 'POST',
-          headers: {
-            'X-Kara-Token': duetConfig.token,
-            'Content-Type': 'audio/wav',
-          },
-          body: wav,
-        });
-        if (!response.ok) {
-          throw new Error(await errorText(response));
-        }
-        const body = (await response.json()) as { jobId?: unknown };
-        if (typeof body.jobId !== 'string') {
-          throw new Error('the helper did not return a job');
-        }
-        duetJobId = body.jobId;
+        duetJobId = await duetClient.start(wav);
         scheduleDuetPoll(300);
       } catch (cause) {
         setDuet({ state: 'error', progress: null, detail: reasonText(cause) });
@@ -771,7 +674,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
 
   const anchorDuet = (voice: 1 | 2, seconds: number): void => {
     void (async () => {
-      if (duetJobId === null || duetConfig === null || duet.state !== 'ready') {
+      if (duetJobId === null || duetClient === null || duet.state !== 'ready') {
         setDuet({ detail: 'Start Duet before teaching a line.' });
         return;
       }
@@ -783,17 +686,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
           progress: { phase: 'calibrating', done: 0, total: 0 },
           detail: 'Learning this line',
         });
-        const response = await fetch(`${duetConfig.url}/v1/jobs/${duetJobId}/anchors`, {
-          method: 'POST',
-          headers: {
-            'X-Kara-Token': duetConfig.token,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ voice, start, end }),
-        });
-        if (!response.ok) {
-          throw new Error(await errorText(response));
-        }
+        await duetClient.anchor(duetJobId, voice, start, end);
         scheduleDuetPoll(500);
       } catch (cause) {
         setDuet({ state: 'ready', progress: null, detail: reasonText(cause) });
@@ -804,13 +697,11 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
 
   const clearDuet = (): void => {
     stopDuetPolling();
-    if (duetJobId !== null && duetConfig !== null) {
-      void fetch(`${duetConfig.url}/v1/jobs/${duetJobId}/cancel`, {
-        method: 'POST',
-        headers: { 'X-Kara-Token': duetConfig.token },
-      }).catch(() => undefined);
+    if (duetJobId !== null && duetClient !== null) {
+      void duetClient.cancel(duetJobId).catch(() => undefined);
     }
     duetJobId = null;
+    duetClient = null;
     duetActive = false;
     toPlayer({ type: 'duet-clear' });
     duet = IDLE_DUET;
@@ -1169,14 +1060,11 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       }
       stopped = true;
       stopDuetPolling();
-      if (duetJobId !== null && duetConfig !== null) {
-        void fetch(`${duetConfig.url}/v1/jobs/${duetJobId}/cancel`, {
-          method: 'POST',
-          headers: { 'X-Kara-Token': duetConfig.token },
-        }).catch(() => undefined);
+      if (duetJobId !== null && duetClient !== null) {
+        void duetClient.cancel(duetJobId).catch(() => undefined);
       }
       duetJobId = null;
-      duetConfig = null;
+      duetClient = null;
       duetActive = false;
       vocalsMono = null;
       toPlayer({ type: 'stop' });
