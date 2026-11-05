@@ -1,6 +1,14 @@
 import { clampKey, KEY_DEFAULT, keyLabel } from '../audio/key.ts';
 import { aboutText, prepareLabel } from '../audio/progress.ts';
-import type { PlayMode, ResetReason, StatusReport } from '../protocol.ts';
+import { DEFAULT_MIX, normaliseMix, type StemMix } from '../audio/stems.ts';
+import {
+  IDLE_DUET,
+  duetPhaseLabel,
+  normaliseDuetMix,
+  type DuetMix,
+  type DuetState,
+} from '../audio/duet.ts';
+import type { PlayMode, StatusReport } from '../protocol.ts';
 
 /**
  * What the panel says, worked out from the last status report and nothing
@@ -11,106 +19,55 @@ import type { PlayMode, ResetReason, StatusReport } from '../protocol.ts';
  * offered before there is anything to control, a wait with no explanation.
  * Pure, so the mapping is the test.
  *
- * There used to be a countdown here, walked down between reports with the
- * same function the audio side counted with. It is gone, and so is the
- * extrapolation: the preparing state is a bar and a line of words, both of
- * them straight out of the report, and the report now arrives four times a
- * second while there is something to say. A number this panel works out for
- * itself is a number that can disagree with the audio, and that is exactly
- * what the countdown did — it reached zero twelve seconds before there was
- * anything to hear.
+ * The old panel had a countdown to walk down and a delay to explain and a
+ * reason for every reset. All three are gone with the delay: preparing is a
+ * bar and a line of words straight out of the report, the toggle appears once
+ * the separated audio covers the playhead — which can be before the bar is
+ * full — and paused is one honest sentence.
+ *
+ * The mix is four levels and two switches each, not one guide: the player
+ * holds drums, bass, other and vocals apart, so the panel can offer each of
+ * them without a second separation. `audio/stems.ts` owns the values; this
+ * file only passes them through, normalised, to the controls.
  */
 
-export type PanelState = 'off' | 'preparing' | 'live' | 'paused' | 'unsupported' | 'error';
+export type PanelState = 'off' | 'preparing' | 'ready' | 'paused' | 'unsupported' | 'error';
 
 export interface PanelView {
   readonly state: PanelState;
-  /** The button's words. */
+  /** The words for the primary action, or the status while preparing. */
   readonly label: string;
   /** Where the bar is, nought to one, or null when there is no bar. */
   readonly progress: number | null;
   /** The one line under the bar: what is being waited for, and for how long. */
   readonly detail: string | null;
-  /** Something that happened, which the bar starting over needs explaining by. */
+  /** A line under the controls while the rest of the song is still arriving. */
   readonly note: string | null;
-  /** Whether the mode switch, the guide and the key belong on screen. */
+  /** Whether the mode switch, the mix and the key belong on screen. */
   readonly controls: boolean;
   readonly mode: PlayMode;
-  /** Where the guide slider sits, 0 to 100. */
-  readonly guide: number;
+  /**
+   * Each stem's slider position and its mute and solo switches, normalised
+   * for the controls.
+   */
+  readonly mix: StemMix;
   /** The key, in whole semitones, and the words the control wears. */
   readonly semitones: number;
   readonly keyLabel: string;
+  /** The opt-in Voice 1 / Voice 2 pair. */
+  readonly duetState: DuetState;
+  readonly duetLabel: string;
+  readonly duetDetail: string | null;
+  /** Done over total while a job is running, or null when it is not. */
+  readonly duetProgress: number | null;
+  readonly duetMix: DuetMix;
+  readonly duetCanStart: boolean;
+  readonly duetHasVoices: boolean;
+  readonly duetLowConfidenceSeconds: number | null;
 }
 
 export interface PanelInput {
   readonly report: StatusReport | null;
-  /** Something only the person can do. Shown while nothing is running. */
-  readonly hint?: string | null;
-  /**
-   * Whether the picture has just jumped back, which is what the `continue`
-   * setting does at the moment it crosses over. Worth saying for a few
-   * seconds, because a video that leaps backwards looks like a fault.
-   */
-  readonly jumped?: boolean;
-}
-
-/**
- * Chrome grants `tabCapture` off the back of a click in one of the extension's
- * own pages and nowhere else, so a button inside the page cannot start one. It
- * can only point at the one that can.
- */
-export const TOOLBAR_HINT = 'Click the Kara icon in the toolbar to start';
-
-/** The slider's position for a gain, and the gain for a position. */
-export function guidePercent(level: number): number {
-  if (!Number.isFinite(level)) {
-    return 0;
-  }
-  return Math.min(100, Math.max(0, Math.round(level * 100)));
-}
-
-export function guideFromPercent(percent: number): number {
-  if (!Number.isFinite(percent)) {
-    return 0;
-  }
-  return Math.min(1, Math.max(0, percent / 100));
-}
-
-/**
- * The note that explains why the video looks wrong. Without it the delay reads
- * as a bug, which it is not: it is the price of separating audio live.
- */
-export function delayNote(delaySeconds: number | null, heldSeconds = 0): string | null {
-  if (delaySeconds === null || !Number.isFinite(delaySeconds) || delaySeconds <= 0) {
-    return null;
-  }
-  const held = Number.isFinite(heldSeconds) ? Math.max(0, heldSeconds) : 0;
-  return `picture is ${String(Math.round(delaySeconds + held))} s behind YouTube`;
-}
-
-/** What the `continue` setting does when it crosses over, in words. */
-export function jumpedBackNote(delaySeconds: number | null): string | null {
-  if (delaySeconds === null || !Number.isFinite(delaySeconds) || delaySeconds <= 0) {
-    return null;
-  }
-  return `jumped back ${String(Math.round(delaySeconds))} s`;
-}
-
-/**
- * Why it is getting ready again. A bar that starts over on its own reads as a
- * crash, so every reason that can throw the buffer away has a sentence.
- */
-const REPRIME_NOTES: Readonly<Record<ResetReason, string>> = {
-  seek: 'You jumped; preparing again',
-  ratechange: 'The speed changed; preparing again',
-  ended: 'The video ended; preparing again',
-  navigation: 'Another video; preparing again',
-  ad: 'An ad; preparing again after it',
-};
-
-export function reprimeNote(reason: ResetReason | null): string | null {
-  return reason === null ? null : REPRIME_NOTES[reason];
 }
 
 /** The stage and the estimate on one line, which is all there is room for. */
@@ -126,31 +83,71 @@ export function prepareDetail(report: StatusReport): string | null {
 
 export function panelView(input: PanelInput): PanelView {
   const report = input.report;
-  const mode: PlayMode = report?.mode ?? 'instrumental';
-  const guide = guidePercent(report?.guide ?? 0);
+  const mode: PlayMode = report?.mode ?? 'original';
+  const mix = normaliseMix(report?.mix ?? DEFAULT_MIX);
   const semitones = clampKey(report?.semitones ?? KEY_DEFAULT);
+  const duet = report?.duet ?? IDLE_DUET;
+  const duetMix = normaliseDuetMix(duet.mix);
+  const duetProgress =
+    duet.progress !== null && duet.progress.total > 0
+      ? duet.progress.done / duet.progress.total
+      : null;
+  const duetLabel =
+    duet.state === 'ready'
+      ? 'Duet ready'
+      : duet.state === 'preparing'
+        ? duetPhaseLabel(duet.progress?.phase ?? null)
+        : duet.state === 'error'
+          ? 'Duet stopped'
+          : 'Duet (beta)';
+  const duetDetail =
+    duet.state === 'error'
+      ? (duet.detail ?? 'the helper stopped')
+      : duet.state === 'ready'
+        ? duet.lowConfidenceSeconds !== null && duet.lowConfidenceSeconds > 10
+          ? 'Some lines are uncertain. Use Fix line if a voice is wrong.'
+          : null
+        : duet.state === 'preparing'
+          ? duet.hasVoices
+            ? 'The current pair keeps playing while it re-renders.'
+            : 'The normal vocal controls still work while this runs.'
+          : null;
   const quiet = {
     progress: null,
+    detail: null,
     note: null,
     controls: false,
     mode,
-    guide,
+    mix,
     semitones,
     keyLabel: keyLabel(semitones),
+    duetState: duet.state,
+    duetLabel,
+    duetDetail,
+    duetProgress,
+    duetMix,
+    duetCanStart:
+      report !== null && (report.status === 'ready' || report.status === 'paused'),
+    duetHasVoices: duet.hasVoices,
+    duetLowConfidenceSeconds: duet.lowConfidenceSeconds,
   };
 
   if (report === null || report.status === 'idle') {
-    return { ...quiet, state: 'off', label: 'Karaoke', detail: input.hint ?? null };
+    return { ...quiet, state: 'off', label: 'Start karaoke' };
   }
 
-  if (report.status === 'priming') {
+  if (report.status === 'preparing') {
     return {
       ...quiet,
       state: 'preparing',
-      label: 'Preparing',
+      // Once the separated audio has caught up to the playhead the vocal
+      // switch is usable, even though the rest of the track is still being
+      // prepared behind it.
+      label: 'Preparing karaoke',
       progress: report.prepare?.fraction ?? 0,
       detail: prepareDetail(report),
-      note: reprimeNote(report.reprime),
+      note: report.covered ? 'the rest is still being prepared' : null,
+      controls: report.covered,
     };
   }
 
@@ -158,21 +155,18 @@ export function panelView(input: PanelInput): PanelView {
     return {
       ...quiet,
       state: 'paused',
+      // The video already says paused. The panel keeps every control usable
+      // and says nothing about a state the person can see.
       label: 'Paused',
-      // The one thing a person needs to know here, because the old behaviour
-      // was to throw it all away and this one does not.
-      detail: 'nothing lost; it carries on from here',
-      controls: report.delaySeconds !== null,
+      controls: true,
     };
   }
 
-  if (report.status === 'live') {
+  if (report.status === 'ready') {
     return {
       ...quiet,
-      state: 'live',
+      state: 'ready',
       label: 'Karaoke on',
-      detail: delayNote(report.delaySeconds, report.heldSeconds),
-      note: input.jumped === true ? jumpedBackNote(report.delaySeconds) : null,
       controls: true,
     };
   }
@@ -180,7 +174,7 @@ export function panelView(input: PanelInput): PanelView {
   return {
     ...quiet,
     state: report.status === 'unsupported' ? 'unsupported' : 'error',
-    label: report.status === 'unsupported' ? 'Unavailable' : 'Failed',
+    label: report.status === 'unsupported' ? 'Not available here' : 'Karaoke stopped',
     detail: report.reason ?? 'no reason given',
   };
 }

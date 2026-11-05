@@ -13,13 +13,16 @@ import { buildManifest } from './src/manifest.ts';
  * - `pages` is the ordinary one: the offscreen document, the toolbar popup,
  *   the service worker, the debug page and the separation worker, as ES
  *   modules with shared chunks, plus the manifest.
- * - `capture-worklet` and `playback-worklet` are one file each, on purpose. A
- *   worklet is handed to `addModule` as a module script, and static imports
- *   inside one are not something to rely on, so each is built from a single
- *   entry: rollup then has nothing to split and the output cannot contain an
- *   import. A guard below fails the build if one ever does.
- * - `content` is an IIFE, because Chrome runs content scripts as classic
- *   scripts and a module would not load at all.
+ * - `stem-player` is one file, on purpose. A worklet is handed to `addModule`
+ *   as a module script, and static imports inside one are not something to
+ *   rely on, so it is built from a single entry: rollup then has nothing to
+ *   split and the output cannot contain an import. A guard below fails the
+ *   build if one ever does.
+ * - `content` and `stream-info` are IIFEs, because Chrome runs content scripts
+ *   as classic scripts and a module would not load at all. They are two builds
+ *   rather than one because the IIFE format refuses a second input, and
+ *   because the two are different worlds anyway: `content` is isolated code
+ *   with the Chrome API, `stream-info` is the page's own world with neither.
  *
  * `scripts/build-extension.mjs` runs all four and then fills in the weights
  * and the ONNX runtime. The target comes from the environment rather than from
@@ -28,9 +31,9 @@ import { buildManifest } from './src/manifest.ts';
  * custom mode would quietly turn that off.
  */
 
-type Target = 'pages' | 'capture-worklet' | 'playback-worklet' | 'content';
+type Target = 'pages' | 'stem-player' | 'content' | 'stream-info';
 
-const TARGETS: readonly Target[] = ['pages', 'capture-worklet', 'playback-worklet', 'content'];
+const TARGETS: readonly Target[] = ['pages', 'stem-player', 'content', 'stream-info'];
 
 function target(): Target {
   const asked = process.env['KARA_EXT_TARGET'] ?? 'pages';
@@ -89,8 +92,30 @@ function serveFixtures(): Plugin {
     }
     const extension = path.slice(path.lastIndexOf('.'));
     response.setHeader('content-type', CONTENT_TYPES.get(extension) ?? 'application/octet-stream');
-    response.setHeader('content-length', String(size));
     response.setHeader('cache-control', 'no-cache');
+    // Range requests, because a media element that cannot seek is not a
+    // fixture anybody can test a seek with. Chrome asks for bytes; without
+    // this it reports `seekable` as [0, 0] and a `currentTime` write snaps
+    // back to the start.
+    response.setHeader('accept-ranges', 'bytes');
+    const range = request.headers.range;
+    const ranged = range === undefined ? null : /^bytes=(\d*)-(\d*)$/u.exec(range);
+    if (ranged !== null) {
+      const start = ranged[1] === '' ? 0 : Number(ranged[1]);
+      const end = ranged[2] === '' ? size - 1 : Math.min(Number(ranged[2]), size - 1);
+      if (!Number.isFinite(start) || start < 0 || start > end) {
+        response.statusCode = 416;
+        response.setHeader('content-range', `bytes */${String(size)}`);
+        response.end();
+        return;
+      }
+      response.statusCode = 206;
+      response.setHeader('content-range', `bytes ${String(start)}-${String(end)}/${String(size)}`);
+      response.setHeader('content-length', String(end - start + 1));
+      createReadStream(path, { start, end }).pipe(response);
+      return;
+    }
+    response.setHeader('content-length', String(size));
     createReadStream(path).pipe(response);
   };
 
@@ -173,7 +198,12 @@ export default defineConfig(() => {
     };
   }
 
-  if (which === 'content') {
+  if (which === 'content' || which === 'stream-info') {
+    // Two classic scripts into two files. They cannot share one build: the
+    // IIFE format refuses a second input, and they must not share a file
+    // anyway — `content.js` is isolated-world code with the Chrome API, and
+    // `stream-info.js` is the page's own world with neither.
+    const entry = which === 'content' ? 'src/content.ts' : 'src/stream/stream-info.ts';
     return {
       ...shared,
       build: {
@@ -181,17 +211,14 @@ export default defineConfig(() => {
         outDir: 'dist',
         emptyOutDir: false,
         rollupOptions: {
-          input: here('src/content.ts'),
-          output: { format: 'iife' as const, entryFileNames: 'content.js' },
+          input: here(entry),
+          output: { format: 'iife' as const, entryFileNames: `${which}.js` },
         },
       },
     };
   }
 
-  const entry =
-    which === 'capture-worklet'
-      ? 'src/worklets/capture.worklet.ts'
-      : 'src/worklets/playback.worklet.ts';
+  const entry = 'src/worklets/stem-player.worklet.ts';
   return {
     ...shared,
     plugins: [selfContained()],
@@ -201,7 +228,7 @@ export default defineConfig(() => {
       emptyOutDir: false,
       rollupOptions: {
         input: here(entry),
-        output: { format: 'es' as const, entryFileNames: `${which}.js` },
+        output: { format: 'es' as const, entryFileNames: 'stem-player.js' },
       },
     },
   };

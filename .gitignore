@@ -38,3 +38,7 @@ fixtures/generated/
 *.avi
 *.wmv
 *.flv
+
+# Local design-review artifacts: screenshots and generated logo candidates.
+# They stay on this machine; the product tree holds no review binaries.
+.taste-skill/

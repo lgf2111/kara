@@ -9,20 +9,11 @@ import {
   keyLabel,
   nudgeKey,
 } from '../src/audio/key.ts';
-import { MAX_SEMITONES, QUALITY_SEMITONES } from '../../web/src/dsp/pitch-shift.ts';
 
 describe('the range', () => {
-  /**
-   * The control's limit is written down twice — here and in the shifter — so
-   * that neither the panel nor the popup has to import a Fourier transform to
-   * find out what a button should say. This is what stops the two drifting.
-   */
-  it('is the same number the shifter says is worth offering', () => {
-    expect(KEY_MAX).toBe(QUALITY_SEMITONES);
-    expect(KEY_MIN).toBe(-QUALITY_SEMITONES);
-    // And well inside what the arithmetic will take, so the control can never
-    // ask the shifter for something it has to clamp.
-    expect(KEY_MAX).toBeLessThan(MAX_SEMITONES);
+  it('is six semitones either way, in whole steps', () => {
+    expect(KEY_MIN).toBe(-6);
+    expect(KEY_MAX).toBe(6);
   });
 
   it('starts at the original key', () => {

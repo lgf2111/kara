@@ -17,7 +17,7 @@ Non-goals: acquiring music, hosting music, a catalogue, accounts, any server tha
 
 | Rule | Enforcement |
 | --- | --- |
-| Upload only, no fetching of media | No network code reads media; `connect-src 'self'` in `apps/web/public/_headers`, pinned by a test |
+| Media comes from the user's own machine | Web app: upload only, no fetching of media, `connect-src 'self'` in `apps/web/public/_headers`, pinned by a test. Extension: reads the audio of the video in the tab it is watching, fetched to the device; nothing is uploaded or redistributed |
 | Audio never leaves the device | Same CSP; the relay refuses request bodies (`workers/relay/src/index.ts`), covered by tests |
 | No copyrighted material in the repo | `scripts/check-no-media.mjs` fails CI on tracked audio, video, weights or any file over 2 MiB; `.gitignore` lists the same extensions |
 | Fixtures are synthesised | ffmpeg writes tones and noise into `fixtures/generated/`, which stays untracked |

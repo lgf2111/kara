@@ -1,60 +1,62 @@
-import { decidePageEvent, type PageEvent } from './content/page-events.ts';
-import { prepareDetail } from './content/panel-view.ts';
-import { isRealSeek, type TimelinePoint } from './content/timeline.ts';
-import { startPipeline, type Pipeline } from './offscreen/pipeline.ts';
+import type { MediaSample } from './audio/media-time.ts';
 import {
-  createDelayedPicture,
-  DEFAULT_DELAY_SECONDS,
-  type DelayedPicture,
-  type PictureFace,
-  type PictureState,
-} from './picture/delayed-picture.ts';
+  DEFAULT_MIX,
+  type Stem,
+  type StemMix,
+  withMute,
+  withSolo,
+  withStem,
+} from './audio/stems.ts';
+import { prepareDetail } from './content/panel-view.ts';
+import { startEngine, type Engine } from './offscreen/engine.ts';
 import { wallNowMs } from './picture/wall-clock.ts';
 import { reasonText } from './reason.ts';
-import { isOnReady, type OnReady } from './settings.ts';
-import type { BlockStat, Metrics, PlayMode, PrepareStage, StatusReport } from './protocol.ts';
+import type {
+  Metrics,
+  PipelineDebug,
+  PlayMode,
+  PrepareStage,
+  StatusReport,
+} from './protocol.ts';
 
 /**
- * The audio pipeline with the extension taken away.
+ * The audio engine with the extension taken away.
  *
- * Everything about tab capture needs a browser profile with an unpacked
- * extension in it, a YouTube tab, and a click on a toolbar button, none of
- * which a test can have. But none of it is the part that can be wrong. The
- * parts that can be wrong are whether the delay is what the separator said,
- * whether blocks come back in order and tile the timeline, whether the
- * instrumental actually has anything in it, whether the progress bar moves
- * forwards, whether a pause leaves the delay alone, and whether the key
- * control moves the pitch by the ratio it claims. All of them only need a
- * video and a stream.
+ * Everything about the extension needs a browser profile with an unpacked
+ * extension in it, a YouTube tab, and a click, none of which a test can have.
+ * But none of it is the part that can be wrong. The parts that can be wrong
+ * are whether the audio is read, separated and played where the video is —
+ * and those only need a video and a file.
  *
- * So this page plays a local fixture in a `<video>`, takes
- * `video.captureStream()` as the pipeline's input, and puts the status, the
- * metrics and every block on `window.__karaDebug` for Playwright to read.
- * `startPipeline` is the same function the offscreen document calls, with the
- * same worklets and the same worker: the only difference is where the stream
- * came from and that `chrome.runtime.getURL` is a path on the preview server.
+ * So this page plays a local fixture in a `<video>`, hands the same fixture's
+ * audio to `startEngine` as the stream, and reports the video's clock the way
+ * the content script does. `startEngine` is the same function the offscreen
+ * document calls, with the same worklet and the same worker: the only
+ * difference is that the stream URL is a path on the preview server rather
+ * than one the page reported, and `chrome.runtime.getURL` is the same path by
+ * another name.
  *
- * The same argument applies to the picture and to the page events. The
- * overlay here is the same `delayed-picture.ts` the content script draws, over
- * the fixture instead of over YouTube, and the fixture's own `pause`, `play`
- * and `seeking` events go through the same `page-events.ts` table and the same
- * `timeline.ts` judgement the content script uses. That is what makes the two
- * UX promises testable without a browser profile: that a pause and a play keep
- * the same delay and never prime again, and that a real seek does.
+ * What is worth asserting on has shrunk with the delay:
+ *
+ * - {@link KaraDebug.progress} never goes backwards and reaches `ready`.
+ * - {@link KaraDebug.mediaSeconds} sits on the fixture's own clock once the
+ *   toggle is on, and a seek moves it to the new place.
+ * - {@link KaraDebug.dominantHz} proves the key moved the pitch by
+ *   `2 ** (semitones / 12)`, and that nothing about the timing moved with it.
  */
 
-/** The pattern fixture: the tones, with a timestamped picture over them. */
-const DEFAULT_FIXTURE = '/fixtures/pattern-240s.mp4';
+/** The tone fixture: a known frequency, so the key can be measured off it. */
+const DEFAULT_FIXTURE = '/fixtures/tone-15s.wav';
 const WEIGHTS_BASE = '/weights/htdemucs-web';
 const RUNTIME_PATH = '/ort/';
-const CAPTURE_WORKLET = '/capture-worklet.js';
-const PLAYBACK_WORKLET = '/playback-worklet.js';
+const PLAYBACK_WORKLET = '/stem-player.js';
+const PITCH_WORKLET = '/signalsmith-stretch.js';
 
-/** Blocks kept, which is more than any assertion needs. */
-const BLOCK_HISTORY = 64;
+/** Progress samples kept, more than any assertion needs. */
+const PROGRESS_HISTORY = 2400;
 
-/** Progress samples kept: at four a second, five minutes of them. */
-const PROGRESS_HISTORY = 1200;
+/** How often the page tells the engine where the video is. */
+const MEDIA_TICK_MS = 250;
 
 export interface ProgressSample {
   readonly atMs: number;
@@ -67,55 +69,43 @@ export interface ProgressTrace {
   /** Whether the bar ever went backwards, which it must not. */
   readonly monotonic: boolean;
   readonly max: number;
-  /** Whether it got all the way to audible. */
-  readonly live: boolean;
+  /** Whether it got all the way to ready. */
+  readonly ready: boolean;
 }
 
 export interface KaraDebug {
   status: () => StatusReport | null;
   metrics: () => Metrics | null;
-  blocks: () => readonly BlockStat[];
+  /** The engine's own debug state, including which backend it ran on. */
+  pipeline: () => PipelineDebug | null;
   failure: () => string | null;
-  /** Frames held, what they cost, which one is painted, and how late it is. */
-  picture: () => PictureState | null;
-  /**
-   * Seconds between where the picture is and where the audio is. The fixture
-   * plays undelayed, so the audio is `delaySeconds` behind it and the painted
-   * frame is however far behind it the overlay has managed; the difference is
-   * this. Positive means the picture is later than the sound. Null until both
-   * a frame has been painted and a delay has been settled on.
-   */
-  pictureOffsetSeconds: () => number | null;
-  /** Every fraction the bar has been at, and whether it only went forwards. */
   progress: () => ProgressTrace;
-  /**
-   * How many times it has started getting ready again after being audible. A
-   * pause and a play must not add to this; a seek must.
-   */
-  primes: () => number;
-  /** Every delay it has settled on. A pause must not add to this either. */
-  delays: () => readonly number[];
+  /** Where the stems are playing in the song, or null while silent. */
+  mediaSeconds: () => number | null;
   start: (fixture?: string) => Promise<void>;
   setMode: (mode: PlayMode) => void;
+  /** The whole mixer in one call. */
+  setMix: (mix: StemMix) => void;
+  /** One stem, which is the convenient shape for a test. */
+  setStem: (stem: Stem, level: number) => void;
+  /** One stem's mute switch. */
+  setMute: (stem: Stem, muted: boolean) => void;
+  /** One stem's solo switch. */
+  setSolo: (stem: Stem, soloed: boolean) => void;
+  /** The old name for the vocal stem, kept so a familiar console line works. */
   setGuide: (level: number) => void;
   /** The key, in semitones, which the player applies last of all. */
   setTranspose: (semitones: number) => void;
-  /**
-   * The loudest frequency coming out of the player, off an `AnalyserNode` on
-   * its output, or null before there is anything above the noise floor.
-   *
-   * The one number that can prove the key control did what it said: play the
-   * tone fixture, read this, transpose, read it again, and the ratio of the
-   * two is `2 ** (semitones / 12)` or the shifter is wrong.
-   */
+  /** The loudest frequency coming out of the player, off an analyser. */
   dominantHz: () => number | null;
-  setOnReady: (onReady: OnReady) => void;
-  /** Seconds along the fixture, for testing what a seek does to both halves. */
+  /** The loudest frequency near `hz`, where a known partial should have gone. */
+  peakHz: (hz: number, spread?: number) => number | null;
+  /** The largest absolute sample leaving the player, or null without an analyser. */
+  peakLevel: () => number | null;
+  /** Seconds along the fixture, for testing what a seek does. */
   seek: (seconds: number) => void;
-  /** The fixture's own pause and play, through the same table the page uses. */
   pause: () => void;
   play: () => Promise<void>;
-  reset: () => void;
   stop: () => Promise<void>;
 }
 
@@ -123,11 +113,6 @@ declare global {
   interface Window {
     __karaDebug?: KaraDebug;
   }
-}
-
-/** A media element that can hand its own output over as a stream. */
-interface Capturable {
-  captureStream?: () => MediaStream;
 }
 
 function need<T extends Element>(selector: string): T {
@@ -139,67 +124,47 @@ function need<T extends Element>(selector: string): T {
 }
 
 const video = need<HTMLVideoElement>('#video');
-const stage = need<HTMLDivElement>('#stage');
 const statusLine = need<HTMLParagraphElement>('#status');
 const metricsBlock = need<HTMLPreElement>('#metrics');
 
 const asked = new URLSearchParams(location.search);
-const wantedOnReady = asked.get('onReady');
 
-let pipeline: Pipeline | null = null;
-let picture: DelayedPicture | null = null;
+let engine: Engine | null = null;
 let status: StatusReport | null = null;
 let metrics: Metrics | null = null;
 let failure: string | null = null;
-let onReady: OnReady = isOnReady(wantedOnReady) ? wantedOnReady : 'restart';
-const blocks: BlockStat[] = [];
+let mediaTicker: ReturnType<typeof setInterval> | null = null;
+let muted = false;
 
 const progressSamples: ProgressSample[] = [];
 let monotonic = true;
 let maxFraction = 0;
-let primes = 0;
-const delays: number[] = [];
 
-/** Where the fixture's clock was, so a real seek can be told from playing. */
-let lastPoint: TimelinePoint | null = null;
-let seeking = false;
-let anchored = false;
+function playingNow(): boolean {
+  return (
+    !video.paused && !video.ended && !video.seeking && video.readyState >= video.HAVE_FUTURE_DATA
+  );
+}
 
-function point(): TimelinePoint {
+function mediaSample(): MediaSample {
   return {
+    wallMs: wallNowMs(),
     mediaSeconds: video.currentTime,
-    wallMs: performance.now(),
+    playing: playingNow(),
     rate: video.playbackRate,
-    paused: video.paused,
+    inAd: false,
   };
 }
 
-/**
- * How far the picture is behind the audio, in seconds, or null while either
- * half has nothing to say. Measured against the delay the audio settled on
- * rather than the one the overlay was asked for, so a picture aiming at the
- * wrong number shows up here rather than cancelling itself out.
- */
-function pictureOffsetSeconds(): number | null {
-  const state = picture?.state() ?? null;
-  const delay = status?.delaySeconds ?? null;
-  if (state === null || state.paintedStampMs === null || delay === null) {
-    return null;
-  }
-  return (wallNowMs() - state.paintedStampMs) / 1000 - (delay + state.heldSeconds);
+function tellMedia(): void {
+  engine?.media(mediaSample());
 }
 
-function faceWanted(): PictureFace | null {
-  if (status === null || status.status === 'idle') {
-    return null;
-  }
-  if (status.status === 'live') {
-    return 'live';
-  }
-  if (status.status === 'unsupported' || status.status === 'error') {
-    return null;
-  }
-  return status.onReady === 'continue' ? 'hidden' : 'dimmed';
+/** The video's mute is the page's half of the switch, as in the content script. */
+function syncMute(): void {
+  const wanted = status?.mode === 'instrumental' && status.status === 'ready' && playingNow();
+  muted = wanted === true;
+  video.muted = muted;
 }
 
 function draw(): void {
@@ -216,26 +181,21 @@ function draw(): void {
   metricsBlock.textContent = JSON.stringify(
     {
       metrics,
+      mode: status?.mode ?? 'original',
+      mix: status?.mix ?? DEFAULT_MIX,
       semitones: status?.semitones ?? 0,
-      dominantHz: pipeline?.dominantHz() ?? null,
-      picture: picture?.state() ?? null,
-      pictureOffsetSeconds: pictureOffsetSeconds(),
+      dominantHz: engine?.dominantHz() ?? null,
+      muted,
       progress: { monotonic, max: maxFraction, samples: progressSamples.length },
-      primes,
-      delays,
-      blocks: blocks.slice(-3),
     },
     null,
     2,
   );
 }
 
-/** Everything the content script does with a report, minus the panel. */
 function onStatus(next: StatusReport): void {
-  const was = status;
   status = next;
-  onReady = next.onReady;
-
+  syncMute();
   const prepare = next.prepare;
   if (prepare !== null) {
     if (prepare.fraction < maxFraction - 1e-9) {
@@ -251,168 +211,56 @@ function onStatus(next: StatusReport): void {
       progressSamples.shift();
     }
   }
-  if (next.status === 'priming' && (was?.status === 'live' || was?.status === 'paused')) {
-    // Getting ready again after having been audible, which only a real seek,
-    // a rate change, an ad, the end or another video should ever cause.
-    primes += 1;
-    maxFraction = 0;
-  }
-  if (next.delaySeconds !== null && !delays.includes(next.delaySeconds)) {
-    delays.push(next.delaySeconds);
-  }
-
-  const face = faceWanted();
-  if (picture !== null) {
-    if (face === null) {
-      picture.clear();
-      anchored = false;
-    } else {
-      picture.setDelay(next.delaySeconds ?? DEFAULT_DELAY_SECONDS);
-      picture.setHeld(next.heldSeconds);
-      picture.setPreparing(
-        prepare === null
-          ? null
-          : { fraction: prepare.fraction, label: prepareDetail(next) ?? 'Preparing' },
-      );
-      if (!anchored && prepare !== null && prepare.stage !== 'loading') {
-        picture.anchor();
-        anchored = true;
-      }
-      if (!picture.state().active) {
-        picture.start(next.delaySeconds ?? DEFAULT_DELAY_SECONDS, face);
-      } else if (next.status !== 'paused') {
-        picture.setFace(face);
-      }
-    }
-  }
   draw();
 }
 
-/** The same table the content script reads, against the same judgement. */
-function apply(event: PageEvent): void {
-  const decision = decidePageEvent(event);
-  switch (decision.audio) {
-    case 'reset':
-      if (decision.reset !== null) {
-        pipeline?.reset(decision.reset);
-      }
-      anchored = false;
-      break;
-    case 'hold':
-      pipeline?.hold();
-      break;
-    case 'resume':
-      pipeline?.resume();
-      break;
-    case 'none':
-      break;
-  }
-  if (decision.passthrough !== null) {
-    pipeline?.setPassthrough(decision.passthrough);
-  }
-  switch (decision.picture) {
-    case 'freeze':
-      picture?.freeze();
-      return;
-    case 'thaw':
-      picture?.thaw();
-      return;
-    case 'clear':
-      picture?.clear();
-      return;
-    case 'reprime':
-      picture?.clear();
-      picture?.start(status?.delaySeconds ?? DEFAULT_DELAY_SECONDS, faceWanted() ?? 'dimmed');
-      return;
-    case 'none':
-      return;
-  }
+function onMetrics(next: Metrics): void {
+  metrics = next;
+  draw();
 }
 
-for (const event of ['seeking', 'seeked', 'pause', 'play', 'ratechange', 'ended'] as const) {
-  video.addEventListener(event, () => {
-    if (event === 'seeking') {
-      seeking = isRealSeek(lastPoint, point());
-      if (seeking) {
-        apply(event);
-      }
-    } else if (event === 'seeked') {
-      if (seeking) {
-        apply(event);
-      }
-      seeking = false;
-    } else {
-      apply(event);
-    }
-    lastPoint = point();
-  });
-}
-video.addEventListener('timeupdate', () => {
-  lastPoint = point();
-});
-
-async function start(fixture = DEFAULT_FIXTURE): Promise<void> {
+async function start(fixture: string): Promise<void> {
   await stop();
   failure = null;
-  blocks.length = 0;
   progressSamples.length = 0;
-  delays.length = 0;
   monotonic = true;
   maxFraction = 0;
-  primes = 0;
-  anchored = false;
   video.src = fixture;
-  // Deliberately not muted: `captureStream` on a muted element is not a thing
-  // to rely on, and hearing the fixture undelayed next to the delayed output
-  // is the cheapest way for a person to check the delay by ear.
+  // The fixture plays audibly while the engine prepares, which is the point:
+  // the video carries on while the analysis happens, and the toggle takes
+  // over when it is ready.
+  video.muted = false;
   await video.play();
-  lastPoint = point();
-
-  const capture = (video as unknown as Capturable).captureStream;
-  if (capture === undefined) {
-    throw new Error('this browser cannot capture a media element');
-  }
-  const stream = capture.call(video);
-  if (stream.getAudioTracks().length === 0) {
-    throw new Error(`${fixture} gave no audio track`);
-  }
-
-  // Up before the first block arrives, because the frame the picture will
-  // want in eighteen seconds is the one on screen now.
-  picture ??= createDelayedPicture({ video, container: stage });
-  picture.start(DEFAULT_DELAY_SECONDS, onReady === 'continue' ? 'hidden' : 'dimmed');
-
-  pipeline = await startPipeline({
-    stream,
+  engine = await startEngine({
+    stream: { videoId: 'fixture', url: fixture, mimeType: 'audio/wav' },
     weightsBase: WEIGHTS_BASE,
     runtimePath: RUNTIME_PATH,
-    captureWorkletUrl: CAPTURE_WORKLET,
     playbackWorkletUrl: PLAYBACK_WORKLET,
-    onReady,
+    pitchWorkletUrl: PITCH_WORKLET,
     // So `dominantHz` has something to read. The packed extension never asks.
     analyse: true,
     onStatus,
-    onMetrics: (next) => {
-      metrics = next;
-      draw();
-    },
-    onBlock: (stat) => {
-      blocks.push(stat);
-      if (blocks.length > BLOCK_HISTORY) {
-        blocks.shift();
-      }
-    },
+    onMetrics,
   });
+  tellMedia();
+  mediaTicker = setInterval(tellMedia, MEDIA_TICK_MS);
+  syncMute();
+  draw();
 }
 
 async function stop(): Promise<void> {
-  const running = pipeline;
-  pipeline = null;
-  picture?.clear();
+  const running = engine;
+  engine = null;
+  if (mediaTicker !== null) {
+    clearInterval(mediaTicker);
+    mediaTicker = null;
+  }
+  video.pause();
+  video.muted = false;
+  muted = false;
   if (running !== null) {
     await running.stop();
   }
-  video.pause();
 }
 
 function report(cause: unknown): void {
@@ -420,35 +268,67 @@ function report(cause: unknown): void {
   draw();
 }
 
-function seek(seconds: number): void {
-  video.currentTime = Math.max(0, seconds);
-}
+window.__karaDebug = {
+  status: () => status,
+  metrics: () => metrics,
+  pipeline: () => engine?.debug() ?? null,
+  failure: () => failure,
+  progress: () => ({
+    samples: progressSamples,
+    monotonic,
+    max: maxFraction,
+    ready: status?.status === 'ready' || status?.status === 'paused',
+  }),
+  mediaSeconds: () => metrics?.mediaSeconds ?? null,
+  start: async (fixture) => {
+    await start(fixture ?? DEFAULT_FIXTURE).catch(report);
+  },
+  setMode: (mode) => {
+    engine?.setMode(mode);
+  },
+  setMix: (mix) => {
+    engine?.setMix(mix);
+  },
+  setStem: (stem, level) => {
+    engine?.setMix(withStem(status?.mix ?? DEFAULT_MIX, stem, level));
+  },
+  setMute: (stem, muted) => {
+    engine?.setMix(withMute(status?.mix ?? DEFAULT_MIX, stem, muted));
+  },
+  setSolo: (stem, soloed) => {
+    engine?.setMix(withSolo(status?.mix ?? DEFAULT_MIX, stem, soloed));
+  },
+  setGuide: (level) => {
+    engine?.setMix(withStem(status?.mix ?? DEFAULT_MIX, 'vocals', level));
+  },
+  setTranspose: (semitones) => {
+    engine?.setKey(semitones);
+  },
+  dominantHz: () => engine?.dominantHz() ?? null,
+  peakHz: (hz, spread) => engine?.peakHz(hz, spread) ?? null,
+  peakLevel: () => engine?.peakLevel() ?? null,
+  seek: (seconds) => {
+    video.currentTime = Math.max(0, seconds);
+  },
+  pause: () => {
+    video.pause();
+  },
+  play: async () => {
+    await video.play();
+  },
+  stop,
+};
 
 need<HTMLButtonElement>('#start').addEventListener('click', () => {
-  start().catch(report);
+  void start(DEFAULT_FIXTURE).catch(report);
 });
 
 need<HTMLButtonElement>('#mode').addEventListener('click', () => {
-  pipeline?.setMode(status?.mode === 'original' ? 'instrumental' : 'original');
-});
-
-need<HTMLButtonElement>('#reset').addEventListener('click', () => {
-  // What a seek does, without moving the fixture.
-  pipeline?.reset('seek');
-  picture?.clear();
-  picture?.start(status?.delaySeconds ?? DEFAULT_DELAY_SECONDS, faceWanted() ?? 'dimmed');
+  engine?.setMode(status?.mode === 'original' ? 'instrumental' : 'original');
 });
 
 need<HTMLButtonElement>('#seek').addEventListener('click', () => {
-  seek(video.currentTime + 30);
-});
-
-need<HTMLButtonElement>('#key-down').addEventListener('click', () => {
-  pipeline?.setKey((status?.semitones ?? 0) - 1);
-});
-
-need<HTMLButtonElement>('#key-up').addEventListener('click', () => {
-  pipeline?.setKey((status?.semitones ?? 0) + 1);
+  video.currentTime += 5;
 });
 
 need<HTMLButtonElement>('#hold').addEventListener('click', () => {
@@ -459,72 +339,22 @@ need<HTMLButtonElement>('#hold').addEventListener('click', () => {
   video.pause();
 });
 
-need<HTMLButtonElement>('#picture').addEventListener('click', () => {
-  if (picture?.state().active === true) {
-    picture.clear();
-  } else {
-    picture ??= createDelayedPicture({ video, container: stage });
-    picture.start(status?.delaySeconds ?? DEFAULT_DELAY_SECONDS, faceWanted() ?? 'dimmed');
-  }
-  draw();
+need<HTMLButtonElement>('#key-down').addEventListener('click', () => {
+  engine?.setKey((status?.semitones ?? 0) - 1);
+});
+
+need<HTMLButtonElement>('#key-up').addEventListener('click', () => {
+  engine?.setKey((status?.semitones ?? 0) + 1);
 });
 
 need<HTMLButtonElement>('#stop').addEventListener('click', () => {
-  stop().catch(report);
+  void stop().catch(report);
 });
 
-window.__karaDebug = {
-  status: () => status,
-  metrics: () => metrics,
-  blocks: () => blocks,
-  failure: () => failure,
-  picture: () => picture?.state() ?? null,
-  pictureOffsetSeconds,
-  progress: () => ({
-    samples: progressSamples,
-    monotonic,
-    max: maxFraction,
-    live: status?.status === 'live',
-  }),
-  primes: () => primes,
-  delays: () => delays,
-  start: async (fixture) => {
-    await start(fixture).catch(report);
-  },
-  setMode: (mode) => {
-    pipeline?.setMode(mode);
-  },
-  setGuide: (level) => {
-    pipeline?.setGuide(level);
-  },
-  setTranspose: (semitones) => {
-    pipeline?.setKey(semitones);
-  },
-  dominantHz: () => pipeline?.dominantHz() ?? null,
-  setOnReady: (next) => {
-    onReady = next;
-    pipeline?.setOnReady(next);
-  },
-  seek,
-  pause: () => {
-    video.pause();
-  },
-  play: async () => {
-    await video.play();
-  },
-  reset: () => {
-    pipeline?.reset('seek');
-  },
-  stop,
-};
-
-// The overlay paints on its own animation frames; this is only so a person
-// watching the page sees the numbers move with it.
 setInterval(draw, 500);
 
 if (asked.get('autoplay') === '1') {
-  // Chrome needs --autoplay-policy=no-user-gesture-required for this, which is
-  // a flag a test runner can pass and a person can click past instead.
-  start(asked.get('fixture') ?? DEFAULT_FIXTURE).catch(report);
+  const fixture = asked.get('fixture') ?? DEFAULT_FIXTURE;
+  start(fixture).catch(report);
 }
 draw();

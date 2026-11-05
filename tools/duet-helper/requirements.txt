@@ -1,0 +1,11 @@
+torch==2.5.1
+torchaudio==2.5.1
+numpy==1.26.4
+asteroid==0.7.0
+torch_complex
+typeguard
+huggingface_hub
+PyYAML
+librosa
+soundfile
+speechbrain==1.1.2

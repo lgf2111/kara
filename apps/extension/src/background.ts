@@ -1,16 +1,20 @@
 import {
+  DEBUG_KEY,
   IDLE_REPORT,
   packet,
   packetFor,
   STATUS_KEY,
+  type PipelineDebug,
   type Report,
   type Status,
   type StatusReport,
+  type StoredDebug,
   type StoredStatus,
+  type StreamInfo,
 } from './protocol.ts';
 import { reasonText } from './reason.ts';
 import { readSettings, watchSettings } from './settings-store.ts';
-import { mediaStreamId } from './tab-capture.ts';
+import { currentVideoId } from './stream/player.ts';
 
 /**
  * The service worker: the tab, the offscreen document, and the routing.
@@ -18,18 +22,18 @@ import { mediaStreamId } from './tab-capture.ts';
  * It holds the three things only it can hold. The tab, because `chrome.tabs`
  * exists nowhere else, so a report that has to reach the page has to come
  * through here. The offscreen document's existence, because creating one is a
- * service worker's job. And the last status report, in session storage, so
- * that a popup opening cold has something to show before the next one arrives.
+ * service worker's job. And the audio stream the page reported, so that a
+ * start asked for later has something to work with.
  *
- * What it no longer holds is the user gesture. `chrome.tabCapture` is granted
- * off the back of a click in an extension context, and since the action has a
- * popup, that click lands in the popup rather than in `chrome.action.onClicked`
- * — which, with a popup set, never fires at all. So the popup fetches the
- * stream id itself and passes it here with the request to start.
+ * What it no longer holds is the user gesture: there is no tab capture to
+ * grant any more, so a start is a start whoever asked — the popup's button or
+ * the panel in the page. The popup stays because it is the one place a person
+ * can find the state of the session without a video playing.
  *
  * It holds no audio and no state worth losing. A Manifest V3 service worker is
  * killed whenever Chrome feels like it, including while the offscreen document
- * is still playing, so which tab is captured lives in `chrome.storage.session`
+ * is still playing, so which tab the session belongs to lives in
+ * `chrome.storage.session`
  * rather than in a variable here.
  *
  * Routing is asymmetric, which is worth knowing before looking for the other
@@ -41,70 +45,135 @@ import { mediaStreamId } from './tab-capture.ts';
  */
 
 const OFFSCREEN_PAGE = 'offscreen.html';
+/**
+ * `WORKERS`, not `AUDIO_PLAYBACK`, and the difference is the whole session.
+ *
+ * Chrome closes an offscreen document created with `AUDIO_PLAYBACK` thirty
+ * seconds after it stops making sound. Preparing is minutes of silence by
+ * design — the video is still the sound being heard — so that reason would
+ * kill a session in the middle of the model load. Every other reason is
+ * lifetime-free, and this one is honest: the document owns the separation
+ * worker as well as the audio context.
+ */
+const OFFSCREEN_REASONS = ['WORKERS'] as const;
 const JUSTIFICATION =
-  "Separating the captured tab's audio and playing it back on a delay needs " +
-  'getUserMedia and an AudioContext, neither of which a service worker has.';
+  'Reading, separating and playing a video audio track needs fetch, an ' +
+  'AudioContext and a dedicated worker, none of which a service worker has.';
 
-/** Chrome takes the enum's string values; the typings insist on the enum. */
-const REASONS = ['USER_MEDIA', 'AUDIO_PLAYBACK'] as unknown as chrome.offscreen.Reason[];
+const SESSION_KEY = 'kara.session';
 
-const CAPTURED_KEY = 'kara.captured';
+/**
+ * Where the page's audio stream is left, per tab and per video.
+ *
+ * The MAIN world script reports the stream of whatever video the page is
+ * playing. It can report the next video before the address bar has caught up
+ * with the click, and a late answer for the previous video can arrive after
+ * it. Neither should decide what a later start uses, so each stream is filed
+ * under the video it belongs to: a start asks for the video in the address
+ * bar and gets exactly that one. It is a few hundred bytes of address, never
+ * audio.
+ *
+ * One key per tab as well, because a YouTube tab in the background is still a
+ * page with a video on it, and its stream must not replace the one belonging
+ * to the tab somebody is looking at.
+ */
+const STREAM_PREFIX = 'kara.stream.';
 
-interface Captured {
-  readonly tabId: number;
-  /**
-   * Where the tab was when it was captured, so a navigation can be judged, or
-   * empty when it could not be read. A service worker only sees a tab's URL
-   * where it has a host permission or an `activeTab` grant, and a capture it
-   * cannot place is a capture no navigation should be allowed to stop.
-   */
-  readonly origin: string;
+function streamPrefix(tabId: number): string {
+  return `${STREAM_PREFIX}${String(tabId)}.`;
 }
 
-/** The origin of an address, or empty for one nobody can read. */
-function originOf(url: string | undefined): string {
-  if (url === undefined) {
-    return '';
-  }
-  try {
-    return new URL(url).origin;
-  } catch {
-    return '';
-  }
+function streamKey(tabId: number, videoId: string): string {
+  return `${streamPrefix(tabId)}${videoId}`;
+}
+
+interface StoredStream {
+  readonly tabId: number;
+  readonly stream: StreamInfo;
+}
+
+interface Session {
+  readonly tabId: number;
+  /** The video the running session belongs to, when it can be known. */
+  readonly videoId: string | null;
 }
 
 const BADGE: Readonly<Record<Status, string>> = {
   idle: '',
-  priming: '...',
-  live: 'on',
+  preparing: '...',
+  ready: '♪',
   paused: '||',
   unsupported: '!',
   error: '!',
 };
 
 const TITLE: Readonly<Record<Status, string>> = {
-  idle: 'Kara: capture this tab',
-  priming: 'Kara: getting ready',
-  live: 'Kara: live',
-  paused: 'Kara: paused with the page',
-  unsupported: 'Kara: this machine cannot do it live',
+  idle: 'Kara: separate this video',
+  preparing: 'Kara: reading and separating',
+  ready: 'Kara: ready — toggle the vocal',
+  paused: 'Kara: paused with the video',
+  unsupported: 'Kara: this machine cannot do it',
   error: 'Kara: something went wrong',
 };
 
-async function captured(): Promise<Captured | null> {
-  const stored = await chrome.storage.session.get(CAPTURED_KEY);
-  const value = stored[CAPTURED_KEY] as Partial<Captured> | undefined;
-  return typeof value?.tabId === 'number' && typeof value.origin === 'string'
-    ? { tabId: value.tabId, origin: value.origin }
-    : null;
+async function session(): Promise<Session | null> {
+  const stored = await chrome.storage.session.get(SESSION_KEY);
+  const value = stored[SESSION_KEY] as Partial<Session> | undefined;
+  if (typeof value?.tabId !== 'number') {
+    return null;
+  }
+  return {
+    tabId: value.tabId,
+    videoId: typeof value.videoId === 'string' ? value.videoId : null,
+  };
 }
 
-async function remember(value: Captured | null): Promise<void> {
+async function remember(value: Session | null): Promise<void> {
   if (value === null) {
-    await chrome.storage.session.remove(CAPTURED_KEY);
+    await chrome.storage.session.remove(SESSION_KEY);
     return;
   }
-  await chrome.storage.session.set({ [CAPTURED_KEY]: value });
+  await chrome.storage.session.set({ [SESSION_KEY]: value });
+}
+
+async function rememberedStream(tabId: number, videoId: string): Promise<StreamInfo | null> {
+  const key = streamKey(tabId, videoId);
+  const stored = await chrome.storage.session.get(key);
+  const value = stored[key] as Partial<StoredStream> | undefined;
+  if (value === undefined || value.tabId !== tabId || typeof value.stream !== 'object') {
+    return null;
+  }
+  const stream = value.stream;
+  if (
+    stream.videoId !== videoId ||
+    typeof stream.url !== 'string' ||
+    !stream.url.startsWith('https://') ||
+    typeof stream.mimeType !== 'string'
+  ) {
+    return null;
+  }
+  return stream;
+}
+
+function keepStream(tabId: number, stream: StreamInfo): void {
+  const stored: StoredStream = { tabId, stream };
+  chrome.storage.session.set({ [streamKey(tabId, stream.videoId)]: stored }).catch(() => undefined);
+}
+
+/**
+ * Forgets every stream a tab has reported, which is what closing it means.
+ *
+ * A video key is left behind when the tab moves on, on purpose: the next
+ * video's stream may already be here, and a navigation that turns out to be
+ * the same video must find its address again.
+ */
+async function forgetStreams(tabId: number): Promise<void> {
+  const prefix = streamPrefix(tabId);
+  const all = await chrome.storage.session.get(null);
+  const keys = Object.keys(all).filter((key) => key.startsWith(prefix));
+  if (keys.length > 0) {
+    await chrome.storage.session.remove(keys);
+  }
 }
 
 function keepStatus(report: StatusReport, tabId: number | null): void {
@@ -112,24 +181,39 @@ function keepStatus(report: StatusReport, tabId: number | null): void {
   chrome.storage.session.set({ [STATUS_KEY]: stored }).catch(() => undefined);
 }
 
+function keepDebug(pipeline: PipelineDebug, tabId: number | null): void {
+  const stored: StoredDebug = { tabId, pipeline };
+  chrome.storage.session.set({ [DEBUG_KEY]: stored }).catch(() => undefined);
+}
+
 function send(message: unknown): void {
   chrome.runtime.sendMessage(message).catch(() => undefined);
 }
 
+async function offscreenOpen(): Promise<boolean> {
+  // `chrome.offscreen.hasDocument()` is Chrome 150+. The manifest promises
+  // 116, and `runtime.getContexts` has been there since 116.
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'],
+    documentUrls: [chrome.runtime.getURL(OFFSCREEN_PAGE)],
+  });
+  return contexts.length > 0;
+}
+
 async function ensureOffscreen(): Promise<void> {
-  if (await chrome.offscreen.hasDocument()) {
+  if (await offscreenOpen()) {
     return;
   }
   try {
     await chrome.offscreen.createDocument({
       url: OFFSCREEN_PAGE,
-      reasons: REASONS,
+      reasons: [...OFFSCREEN_REASONS],
       justification: JUSTIFICATION,
     });
   } catch (cause) {
-    // Two clicks in quick succession race here, and one document is all that
+    // Two starts in quick succession race here, and one document is all that
     // was wanted anyway.
-    if (!(await chrome.offscreen.hasDocument())) {
+    if (!(await offscreenOpen())) {
       throw cause;
     }
   }
@@ -153,12 +237,12 @@ async function show(status: Status, tabId: number | null): Promise<void> {
 }
 
 async function stop(): Promise<void> {
-  const active = await captured();
+  const active = await session();
   // Best effort, so the tracks are released promptly. Closing the document is
   // what actually guarantees it.
   send(packet('offscreen', { type: 'stop' }, active?.tabId ?? null));
   await remember(null);
-  if (await chrome.offscreen.hasDocument()) {
+  if (await offscreenOpen()) {
     await chrome.offscreen.closeDocument();
   }
   await show('idle', active?.tabId ?? null);
@@ -174,55 +258,56 @@ async function stop(): Promise<void> {
 }
 
 /**
- * Starts a capture of one tab, stopping whatever was being captured first.
+ * Starts a session on one tab, stopping whatever was running first.
  *
- * One at a time, because the model only fits on the GPU once. The stream id
- * comes from the popup when the popup asked, because that is where the gesture
- * was; when the page asked there is none, and trying here is what produces the
- * refusal the panel turns into a hint.
+ * One at a time, because the model only fits on the GPU once. The stream
+ * comes from the page's own report, which the service worker has been
+ * keeping; without one there is nothing to start, and the panel is told so.
  */
-async function start(tabId: number, offered: string | null): Promise<void> {
-  const active = await captured();
+async function start(tabId: number, stream: StreamInfo): Promise<void> {
+  const active = await session();
   if (active !== null && active.tabId !== tabId) {
     await stop();
   }
-  const streamId = offered ?? (await mediaStreamId(tabId));
   await ensureOffscreen();
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
-  await remember({ tabId, origin: originOf(tab?.url) });
-  await show('priming', tabId);
+  await remember({ tabId, videoId: stream.videoId });
+  await show('preparing', tabId);
   // The offscreen document cannot read storage, so it is told the setting.
   const settings = await readSettings();
-  send(packet('offscreen', { type: 'on-ready', onReady: settings.onReady }, tabId));
-  send(packet('offscreen', { type: 'start', streamId, tabId, key: settings.key }, tabId));
+  send(packet('offscreen', { type: 'start', stream, tabId, key: settings.key }, tabId));
 }
 
-/**
- * A start somebody asked for: the popup, with an id, or the panel in the page,
- * without one.
- *
- * A click inside a page is a gesture for the page, not for the extension, so
- * the panel's own button cannot produce a stream id. This tries anyway and,
- * when Chrome refuses, tells the tab to point the person at the toolbar.
- * Trying rather than assuming means the panel's button starts working by
- * itself on the day Chrome allows it, and the refusal costs one rejected
- * promise.
- */
-async function asked(tabId: number | undefined, streamId: string | null): Promise<void> {
-  if (tabId === undefined) {
+async function asked(tabId: number | null): Promise<void> {
+  if (tabId === null) {
+    return;
+  }
+  let here: string | null;
+  try {
+    here = currentVideoId((await chrome.tabs.get(tabId)).url ?? '');
+  } catch {
+    // The tab closed between the request and the read, so there is nothing to
+    // start on it and nothing worth reporting either.
+    return;
+  }
+  // The address bar is the authority on which video is on screen. The stream
+  // is filed under its own video id, so a report that arrived before the
+  // address caught up is waiting here, and one from an earlier video is not
+  // even looked at. A tab whose address names no video has none to start.
+  const stream = here === null ? null : await rememberedStream(tabId, here);
+  if (stream === null) {
+    const report: StatusReport = {
+      ...IDLE_REPORT,
+      status: 'error',
+      reason: 'the page has not shared its audio yet; let the video start playing and try again',
+    };
+    keepStatus(report, tabId);
+    chrome.tabs.sendMessage(tabId, packet('tab', report, tabId)).catch(() => undefined);
     return;
   }
   try {
-    await start(tabId, streamId);
+    await start(tabId, stream);
   } catch (cause) {
     await show('idle', tabId);
-    if (streamId === null) {
-      chrome.tabs
-        .sendMessage(tabId, packet('tab', { type: 'hint', hint: 'toolbar' }, tabId))
-        .catch(() => undefined);
-      return;
-    }
-    // The popup had a gesture and it still failed, which is worth saying.
     const report: StatusReport = { ...IDLE_REPORT, status: 'error', reason: reasonText(cause) };
     keepStatus(report, tabId);
     chrome.tabs.sendMessage(tabId, packet('tab', report, tabId)).catch(() => undefined);
@@ -233,6 +318,14 @@ function relay(report: Report, tabId: number | null): void {
   if (report.type === 'status') {
     void show(report.status, tabId);
     keepStatus(report, tabId);
+  }
+  if (report.type === 'debug-log') {
+    // Left where a popup can read it synchronously: its copy button has to
+    // answer inside the click that pressed it, so what it copies has to be
+    // something it already has. Not sent on to the tab — the page has no use
+    // for it and no business holding one.
+    keepDebug(report.pipeline, tabId);
+    return;
   }
   if (tabId !== null) {
     chrome.tabs.sendMessage(tabId, packet('tab', report, tabId)).catch(() => undefined);
@@ -245,11 +338,18 @@ chrome.runtime.onMessage.addListener((message: unknown, sender) => {
     return false;
   }
   const body = received.body;
-  if (body.type === 'status' || body.type === 'metrics') {
+  if (body.type === 'status' || body.type === 'metrics' || body.type === 'debug-log') {
     relay(body, received.tabId);
   }
   if (body.type === 'request-start') {
-    void asked(body.tabId ?? sender.tab?.id, body.streamId);
+    void asked(body.tabId ?? sender.tab?.id ?? null);
+  }
+  if (body.type === 'request-stream') {
+    // The tab is whoever sent it: a stream belongs to the page that found it.
+    const tabId = sender.tab?.id;
+    if (tabId !== undefined) {
+      keepStream(tabId, body.stream);
+    }
   }
   if (body.type === 'request-stop') {
     stop().catch((cause: unknown) => {
@@ -260,8 +360,9 @@ chrome.runtime.onMessage.addListener((message: unknown, sender) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  void forgetStreams(tabId);
   void (async () => {
-    if ((await captured())?.tabId === tabId) {
+    if ((await session())?.tabId === tabId) {
       await stop();
     }
   })();
@@ -269,28 +370,33 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   void (async () => {
-    const active = await captured();
+    const active = await session();
     if (active === null || active.tabId !== tabId || change.url === undefined) {
       return;
     }
-    // A capture belongs to a tab, not to a page, so it survives YouTube
-    // swapping one video for another: that is a new timeline, which is a
-    // reset. Leaving the site altogether is a stop — unless the origin could
-    // not be read when the capture started, in which case there is nothing to
-    // compare against and throwing the capture away would be a guess.
-    if (active.origin === '' || originOf(change.url) === active.origin) {
-      send(packet('offscreen', { type: 'reset', reason: 'navigation' }, tabId));
+    // YouTube rewrites its own address while the same video is on screen — a
+    // playlist parameter, a timestamp, the end of a redirect. That is not a
+    // new song, and stopping on it would throw away a session the person is
+    // listening to. Only a session whose own video is no longer in the address
+    // bar ends here.
+    const here = currentVideoId(change.url);
+    if (here !== null && active.videoId === here) {
       return;
     }
-    await stop();
+    // A session belongs to one video, not to a tab: YouTube swapping one
+    // video for another is a whole new song and needs a whole new analysis,
+    // so any other navigation ends the session. Leaving the site is the same
+    // thing by another route.
+    send(packet('offscreen', { type: 'stop' }, tabId));
+    void stop();
   })();
 });
 
 watchSettings((settings) => {
-  captured()
+  session()
     .then((active) => {
       if (active !== null) {
-        send(packet('offscreen', { type: 'on-ready', onReady: settings.onReady }, active.tabId));
+        send(packet('offscreen', { type: 'key', semitones: settings.key }, active.tabId));
       }
     })
     .catch(() => undefined);

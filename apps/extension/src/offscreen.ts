@@ -1,48 +1,52 @@
 import { clampKey, KEY_DEFAULT } from './audio/key.ts';
-import { startPipeline, type Pipeline } from './offscreen/pipeline.ts';
+import { normaliseMix, type StemMix } from './audio/stems.ts';
+import { startEngine, type Engine } from './offscreen/engine.ts';
 import {
   IDLE_REPORT,
   isCommand,
   packet,
   packetFor,
   type Command,
+  type MediaSample,
+  type PlayMode,
   type Report,
 } from './protocol.ts';
 import { reasonText } from './reason.ts';
 import { RUNTIME_PATH, WEIGHTS_PATH } from './separation/model.ts';
-import { DEFAULT_SETTINGS, type OnReady } from './settings.ts';
 
 /**
  * The offscreen document: where the audio lives.
  *
- * It exists because of what a Manifest V3 service worker cannot do. It has no
- * `getUserMedia`, no `AudioContext` and no guarantee of being alive in a
- * second's time, and this extension needs all three for about as long as a
- * song lasts. So the service worker owns the tab and the popup owns the user's
- * click, and a capture is handed over to this page, which owns the audio and
- * nothing else.
+ * It exists because of what a Manifest V3 service worker cannot do: it has no
+ * `AudioContext` and no guarantee of being alive in a second's time, and this
+ * extension needs the first for as long as a song lasts. So the service worker
+ * owns the tab and the popup owns the person's click, and a session is handed
+ * over to this page, which owns the audio and nothing else.
  *
- * It is also where the one setting is read, because the setting is about what
- * the audio does at the moment it is ready and this is the half that knows
- * when that is. A change made in the popup while a capture is running arrives
- * through `chrome.storage.onChanged`, so there is no command for it: the page
- * and the panel are told what it is through the status report instead.
- *
- * Everything it loads — the graph's pieces, the ONNX runtime's wasm, both
- * worklets, the separation worker — comes from `chrome.runtime.getURL`, which
- * is to say from the packed extension. There is no code path here that can
- * reach the network, and the captured audio never leaves this document.
+ * Everything it loads — the graph's pieces, the ONNX runtime's wasm, the
+ * playback worklet — comes from `chrome.runtime.getURL`, which is to say from
+ * the packed extension. The one thing it fetches from the world is the audio
+ * stream the page itself reported, which is read onto the device and never
+ * sent anywhere.
  */
 
-let pipeline: Pipeline | null = null;
-/**
- * The setting as the service worker last said it. An offscreen document has
- * no `chrome.storage` (only `chrome.runtime`), so it is told, not asked.
- */
-let onReady: OnReady = DEFAULT_SETTINGS.onReady;
+let engine: Engine | null = null;
 let tabId: number | null = null;
 /** Serialises start and stop, which both take a while and must not interleave. */
 let turn: Promise<void> = Promise.resolve();
+/**
+ * What the person asked for while the engine was still being built.
+ *
+ * `startEngine` is awaited for the fetch, the decode and the worker's setup,
+ * and `engine` is nought until it returns. A key button pressed during that
+ * wait used to be dropped; the last value of each is kept and applied to the
+ * engine the moment there is one.
+ */
+let pendingMode: PlayMode | null = null;
+let pendingMix: StemMix | null = null;
+let pendingKey: number | null = null;
+/** The last place the page said the video was, for the same reason. */
+let lastSample: MediaSample | null = null;
 
 function tell(report: Report): void {
   // The service worker may be asleep; sending wakes it. A send with nothing
@@ -54,36 +58,18 @@ function tellFailure(cause: unknown): void {
   tell({ ...IDLE_REPORT, status: 'error', reason: reasonText(cause) });
 }
 
-/**
- * The tab's audio, by stream id.
- *
- * `chromeMediaSource: 'tab'` is not in the standard constraints, hence the
- * cast. It is also the only audio source in this extension: nothing here
- * fetches a stream, a file or a URL, and the id is one the popup was handed
- * for the tab the person clicked in.
- */
-async function tabAudio(streamId: string): Promise<MediaStream> {
-  return navigator.mediaDevices.getUserMedia({
-    audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } },
-    video: false,
-  } as unknown as MediaStreamConstraints);
-}
-
 async function start(command: Extract<Command, { type: 'start' }>): Promise<void> {
   await stop();
   tabId = command.tabId;
-  const stream = await tabAudio(command.streamId);
-  pipeline = await startPipeline({
-    stream,
+  engine = await startEngine({
+    stream: command.stream,
     weightsBase: chrome.runtime.getURL(WEIGHTS_PATH),
     runtimePath: chrome.runtime.getURL(RUNTIME_PATH),
-    captureWorkletUrl: chrome.runtime.getURL('capture-worklet.js'),
-    playbackWorkletUrl: chrome.runtime.getURL('playback-worklet.js'),
-    onReady,
-    // The remembered default, handed over by the service worker with the start.
-    // From here on the key belongs to the capture and only a command moves it,
-    // so that a change made in the popup for one song cannot be undone by a
-    // sync that arrives mid-song.
+    playbackWorkletUrl: chrome.runtime.getURL('stem-player.js'),
+    pitchWorkletUrl: chrome.runtime.getURL('signalsmith-stretch.js'),
+    // The remembered default, handed over by the service worker with the
+    // start. From here on the key belongs to the session and only a command
+    // moves it.
     key: clampKey(command.key ?? KEY_DEFAULT),
     onStatus: (report) => {
       tell(report);
@@ -92,11 +78,33 @@ async function start(command: Extract<Command, { type: 'start' }>): Promise<void
       tell({ type: 'metrics', metrics });
     },
   });
+  const started = engine;
+  if (started !== null) {
+    if (pendingMode !== null) {
+      started.setMode(pendingMode);
+    }
+    if (pendingMix !== null) {
+      started.setMix(pendingMix);
+    }
+    if (pendingKey !== null) {
+      started.setKey(pendingKey);
+    }
+    if (lastSample !== null) {
+      started.media(lastSample);
+    }
+  }
+  pendingMode = null;
+  pendingMix = null;
+  pendingKey = null;
 }
 
 async function stop(): Promise<void> {
-  const running = pipeline;
-  pipeline = null;
+  const running = engine;
+  engine = null;
+  pendingMode = null;
+  pendingMix = null;
+  pendingKey = null;
+  lastSample = null;
   if (running !== null) {
     await running.stop();
   }
@@ -110,31 +118,53 @@ function accept(command: Command): void {
     case 'stop':
       turn = turn.then(stop).catch(tellFailure);
       return;
-    case 'reset':
-      pipeline?.reset(command.reason);
-      return;
-    case 'hold':
-      pipeline?.hold();
-      return;
-    case 'resume':
-      pipeline?.resume();
-      return;
     case 'mode':
-      pipeline?.setMode(command.mode);
+      if (engine === null) {
+        pendingMode = command.mode;
+      } else {
+        engine.setMode(command.mode);
+      }
       return;
-    case 'guide':
-      pipeline?.setGuide(command.level);
+    case 'mix':
+      if (engine === null) {
+        pendingMix = normaliseMix(command.mix);
+      } else {
+        engine.setMix(command.mix);
+      }
+      return;
+    case 'duet-start':
+      engine?.startDuet();
+      return;
+    case 'duet-mix':
+      engine?.setDuetMix(command.mix);
+      return;
+    case 'duet-swap':
+      engine?.swapDuet();
+      return;
+    case 'duet-anchor':
+      engine?.anchorDuet(command.voice, command.seconds);
+      return;
+    case 'duet-clear':
+      engine?.clearDuet();
       return;
     case 'key':
-      pipeline?.setKey(command.semitones);
+      if (engine === null) {
+        pendingKey = command.semitones;
+      } else {
+        engine.setKey(command.semitones);
+      }
       return;
-    case 'passthrough':
-      pipeline?.setPassthrough(command.enabled);
+    case 'media':
+      lastSample = command.sample;
+      engine?.media(command.sample);
       return;
-    case 'on-ready':
-      onReady = command.onReady;
-      pipeline?.setOnReady(command.onReady);
+    case 'debug': {
+      const running = engine;
+      if (running !== null) {
+        tell({ type: 'debug-log', pipeline: running.debug() });
+      }
       return;
+    }
   }
 }
 

@@ -6,8 +6,8 @@
  * tiling guarantee, the float32 island patch WebGPU needs and the backend
  * policy all live in `apps/web/src/separation`, are tested there, and are
  * imported across the workspace by relative path rather than copied. What the
- * extension adds is a tab capture at one end and a delayed player at the
- * other.
+ * extension adds is a fetch of the video's own audio at one end and a
+ * whole-track player at the other.
  *
  * Everything heavy the extension uses passes through this file, so the
  * dependency is one import away from being read, moved or measured. It is also
@@ -22,5 +22,6 @@ export { decideBackend } from '../../../web/src/separation/backend-policy.ts';
 export { createSegmentRunner } from '../../../web/src/separation/segment-runner.ts';
 export { createStreamingSeparator } from '../../../web/src/separation/streaming.ts';
 
+export type { Backend } from '../../../web/src/separation/protocol.ts';
 export type { SegmentRunner } from '../../../web/src/separation/segment-contract.ts';
 export type { StreamBlock, StreamingSeparator } from '../../../web/src/separation/streaming.ts';

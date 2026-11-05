@@ -1,232 +1,224 @@
 import { describe, expect, it } from 'vitest';
 
-import { NO_TIMINGS, prepareProgress, WINDOW_SECONDS } from '../src/audio/progress.ts';
-import {
-  delayNote,
-  guideFromPercent,
-  guidePercent,
-  jumpedBackNote,
-  panelView,
-  prepareDetail,
-  reprimeNote,
-  TOOLBAR_HINT,
-} from '../src/content/panel-view.ts';
-import type { PrepareProgress, Status, StatusReport } from '../src/protocol.ts';
-
-function reported(status: Status, rest: Partial<StatusReport> = {}): StatusReport {
-  return {
-    type: 'status',
-    status,
-    reason: null,
-    prepare: null,
-    reprime: null,
-    delaySeconds: null,
-    heldSeconds: 0,
-    mode: 'instrumental',
-    guide: 0,
-    semitones: 0,
-    onReady: 'restart',
-    ...rest,
-  };
-}
-
-/** A prime partway through loading the model, which is where it starts. */
-function loading(loaded: number): PrepareProgress {
-  return prepareProgress({
-    modelPieces: { loaded, total: 21 },
-    loadingSeconds: 3,
-    listenedSeconds: null,
-    windowSeconds: WINDOW_SECONDS,
-    separatingSeconds: null,
-    expectedSeparateSeconds: 5.85,
-    fillingSeconds: null,
-    fillSeconds: 1.5,
-    timings: NO_TIMINGS,
-  });
-}
+import { DEFAULT_DUET_MIX, type DuetStatus } from '../src/audio/duet.ts';
+import { DEFAULT_MIX, withMute, withSolo, withStem } from '../src/audio/stems.ts';
+import { panelView, prepareDetail } from '../src/content/panel-view.ts';
+import { report, separating } from './report.ts';
 
 describe('panelView', () => {
-  it('offers nothing but the button before anything has started', () => {
+  it('offers to start when nothing is running', () => {
     const view = panelView({ report: null });
 
     expect(view.state).toBe('off');
-    expect(view.label).toBe('Karaoke');
-    expect(view.detail).toBeNull();
-    expect(view.progress).toBeNull();
+    expect(view.label).toBe('Start karaoke');
     expect(view.controls).toBe(false);
+    expect(view.progress).toBeNull();
   });
 
-  it('shows the hint while off, because starting is not the panel to give', () => {
-    const view = panelView({ report: reported('idle'), hint: TOOLBAR_HINT });
-
-    expect(view.state).toBe('off');
-    expect(view.detail).toBe(TOOLBAR_HINT);
-  });
-
-  /**
-   * There used to be a countdown here, and it lied: it froze at 15.5 s through
-   * the model loading and reached nought twelve seconds before there was
-   * anything to hear. What replaced it is a bar out of the report, which the
-   * panel does not extrapolate.
-   */
-  it('shows a bar and the stage rather than a countdown', () => {
-    const view = panelView({ report: reported('priming', { prepare: loading(3) }) });
+  it('shows a bar and the stage while it gets ready, and no controls', () => {
+    const view = panelView({
+      report: report({
+        status: 'preparing',
+        prepare: { stage: 'loading', fraction: 0.3, pieces: { loaded: 2, total: 21 }, aboutSeconds: null },
+      }),
+    });
 
     expect(view.state).toBe('preparing');
-    expect(view.label).toBe('Preparing');
-    expect(view.progress).toBeCloseTo(0.45 * (3 / 21), 9);
-    expect(view.detail).toBe('Loading the model, 3 of 21');
+    expect(view.progress).toBeCloseTo(0.3);
+    expect(view.detail).toBe('Loading the model, 2 of 21');
     expect(view.controls).toBe(false);
   });
 
-  it('says how long is left only once the stages have been timed', () => {
-    const timed = prepareProgress({
-      modelPieces: null,
-      loadingSeconds: 10,
-      listenedSeconds: 0,
-      windowSeconds: WINDOW_SECONDS,
-      separatingSeconds: null,
-      expectedSeparateSeconds: 5.85,
-      fillingSeconds: null,
-      fillSeconds: 1.5,
-      timings: { loading: 10, listening: WINDOW_SECONDS, separating: 8, filling: 1.5 },
-    });
-
-    expect(prepareDetail(reported('priming', { prepare: timed }))).toBe(
-      'Listening to the first few seconds · about 17 s left',
-    );
-  });
-
-  it('shows a bar at nothing rather than no bar when the report has no progress', () => {
-    expect(panelView({ report: reported('priming') }).progress).toBe(0);
-  });
-
-  it('explains the bar starting over, because that reads as a crash', () => {
+  it('offers the controls while preparing once the stems reach the playhead', () => {
     const view = panelView({
-      report: reported('priming', { prepare: loading(1), reprime: 'seek' }),
+      report: report({
+        status: 'preparing',
+        covered: true,
+        prepare: separating(10, 40, 15),
+      }),
     });
 
-    expect(view.note).toBe('You jumped; preparing again');
+    expect(view.state).toBe('preparing');
+    expect(view.label).toBe('Preparing karaoke');
+    expect(view.controls).toBe(true);
+    expect(view.note).toBe('the rest is still being prepared');
+    expect(view.progress).toBeCloseTo(0.25);
   });
 
-  it('says a pause has lost nothing, and keeps the controls it has audio for', () => {
-    const paused = panelView({ report: reported('paused', { delaySeconds: 17.5 }) });
-
-    expect(paused.state).toBe('paused');
-    expect(paused.label).toBe('Paused');
-    expect(paused.detail).toBe('nothing lost; it carries on from here');
-    expect(paused.progress).toBeNull();
-    expect(paused.controls).toBe(true);
-    // Paused before there was ever any audio: nothing to control yet.
-    expect(panelView({ report: reported('paused') }).controls).toBe(false);
-  });
-
-  it('offers the controls only once there is audio to control', () => {
+  it('shows the estimate where there is one, without pretending it is a countdown', () => {
     const view = panelView({
-      report: reported('live', { delaySeconds: 17.5, mode: 'original', guide: 0.4 }),
+      report: report({
+        status: 'preparing',
+        prepare: separating(10, 40, 15),
+      }),
     });
 
-    expect(view.state).toBe('live');
+    expect(view.detail).toBe('Taking the vocal out · about 15 s left');
+  });
+
+  it('shows the toggle once the stems are ready', () => {
+    const view = panelView({
+      report: report({
+        status: 'ready',
+        mode: 'instrumental',
+        mix: withStem(DEFAULT_MIX, 'vocals', 0.4),
+        semitones: 2,
+      }),
+    });
+
+    expect(view.state).toBe('ready');
     expect(view.label).toBe('Karaoke on');
     expect(view.controls).toBe(true);
-    expect(view.mode).toBe('original');
-    expect(view.guide).toBe(40);
-    // Without this the delay reads as a broken page.
-    expect(view.detail).toBe('picture is 18 s behind YouTube');
+    expect(view.mode).toBe('instrumental');
+    expect(view.mix.levels.vocals).toBeCloseTo(0.4);
+    expect(view.keyLabel).toContain('+2');
   });
 
-  it('carries the key and its words out of the report', () => {
-    const view = panelView({ report: reported('live', { delaySeconds: 17.5, semitones: -2 }) });
+  it('says nothing about a pause, and keeps the controls', () => {
+    const view = panelView({ report: report({ status: 'paused' }) });
 
-    expect(view.semitones).toBe(-2);
-    expect(view.keyLabel).toBe('Key −2');
+    expect(view.state).toBe('paused');
+    expect(view.label).toBe('Paused');
+    expect(view.detail).toBeNull();
+    expect(view.note).toBeNull();
+    expect(view.controls).toBe(true);
   });
 
-  it('says the original key before anybody has moved it', () => {
-    expect(panelView({ report: null }).semitones).toBe(0);
-    expect(panelView({ report: null }).keyLabel).toBe('Original key');
-    // Whatever a report from some other version of this extension said.
-    expect(panelView({ report: reported('live', { semitones: 40 }) }).semitones).toBe(6);
-  });
-
-  it('says the picture jumped back, for as long as the caller asks', () => {
-    const live = reported('live', { delaySeconds: 18, onReady: 'continue' });
-
-    expect(panelView({ report: live, jumped: true }).note).toBe('jumped back 18 s');
-    expect(panelView({ report: live }).note).toBeNull();
-  });
-
-  it('keeps the reason a machine cannot do this, and offers no controls', () => {
+  it('gives the reason for a dead end rather than a generic failure', () => {
     const view = panelView({
-      report: reported('unsupported', { reason: 'this browser has no WebGPU adapter' }),
+      report: report({ status: 'unsupported', reason: 'this machine has no WebGPU' }),
     });
 
     expect(view.state).toBe('unsupported');
-    expect(view.label).toBe('Unavailable');
-    expect(view.detail).toBe('this browser has no WebGPU adapter');
+    expect(view.label).toBe('Not available here');
+    expect(view.detail).toBe('this machine has no WebGPU');
     expect(view.controls).toBe(false);
   });
 
-  it('never leaves a failure unexplained', () => {
-    const view = panelView({ report: reported('error') });
+  it('does not leave an error with no words', () => {
+    const view = panelView({ report: report({ status: 'error', reason: null }) });
 
     expect(view.state).toBe('error');
     expect(view.detail).toBe('no reason given');
   });
 
-  it('forgets the hint as soon as something is running', () => {
-    const view = panelView({ report: reported('priming'), hint: TOOLBAR_HINT });
+  it('clamps a key and a mix that arrived out of range', () => {
+    const view = panelView({
+      report: report({
+        status: 'ready',
+        semitones: 99,
+        mix: {
+          ...DEFAULT_MIX,
+          levels: { ...DEFAULT_MIX.levels, drums: -2, vocals: 4 },
+        },
+      }),
+    });
 
-    expect(view.detail).toBeNull();
+    expect(view.semitones).toBe(6);
+    expect(view.mix.levels.drums).toBe(0);
+    expect(view.mix.levels.vocals).toBe(1);
+  });
+
+  it('keeps mute and solo switches beside the levels they do not move', () => {
+    const mix = withSolo(withMute(withStem(DEFAULT_MIX, 'bass', 0.3), 'drums', true), 'bass', true);
+    const view = panelView({ report: report({ status: 'ready', mix }) });
+
+    expect(view.mix.levels.bass).toBeCloseTo(0.3);
+    expect(view.mix.muted.drums).toBe(true);
+    expect(view.mix.soloed.bass).toBe(true);
+    expect(view.mix.soloed.drums).toBe(false);
   });
 });
 
-describe('delayNote', () => {
-  it('rounds to whole seconds, because nobody needs the half', () => {
-    expect(delayNote(17.5)).toBe('picture is 18 s behind YouTube');
-    expect(delayNote(16)).toBe('picture is 16 s behind YouTube');
-  });
-
-  it('counts the pauses in, because the picture is behind by those too', () => {
-    expect(delayNote(17.5, 10.2)).toBe('picture is 28 s behind YouTube');
-  });
-
-  it('says nothing when there is no delay to speak of', () => {
-    expect(delayNote(null)).toBeNull();
-    expect(delayNote(0)).toBeNull();
-    expect(delayNote(Number.NaN)).toBeNull();
+describe('prepareDetail', () => {
+  it('is nothing at all when nothing is being prepared', () => {
+    expect(prepareDetail(report())).toBeNull();
   });
 });
 
-describe('the notes', () => {
-  it('has a sentence for every reason a prime can start again', () => {
-    for (const reason of ['seek', 'ratechange', 'navigation', 'ended', 'ad'] as const) {
-      expect(reprimeNote(reason)).toMatch(/\w/u);
-    }
-    expect(reprimeNote(null)).toBeNull();
+describe('the duet desk', () => {
+  const preparing: DuetStatus = {
+    state: 'preparing',
+    progress: { phase: 'separating', done: 5, total: 20 },
+    detail: null,
+    mix: DEFAULT_DUET_MIX,
+    hasVoices: false,
+    lowConfidenceSeconds: null,
+  };
+  const calibrating: DuetStatus = {
+    state: 'preparing',
+    progress: { phase: 'calibrating', done: 0, total: 0 },
+    detail: null,
+    mix: DEFAULT_DUET_MIX,
+    hasVoices: true,
+    lowConfidenceSeconds: 20,
+  };
+  const ready: DuetStatus = {
+    state: 'ready',
+    progress: null,
+    detail: null,
+    mix: DEFAULT_DUET_MIX,
+    hasVoices: true,
+    lowConfidenceSeconds: 20,
+  };
+  const failed: DuetStatus = {
+    state: 'error',
+    progress: null,
+    detail: 'Paste the Duet helper token in the Kara popup.',
+    mix: DEFAULT_DUET_MIX,
+    hasVoices: false,
+    lowConfidenceSeconds: null,
+  };
+
+  it('is off and offers the button when karaoke is ready', () => {
+    const view = panelView({ report: report({ status: 'ready' }) });
+
+    expect(view.duetState).toBe('off');
+    expect(view.duetCanStart).toBe(true);
+    expect(view.duetProgress).toBeNull();
   });
 
-  it('says how far the picture jumped, or nothing at all', () => {
-    expect(jumpedBackNote(18)).toBe('jumped back 18 s');
-    expect(jumpedBackNote(null)).toBeNull();
-    expect(jumpedBackNote(0)).toBeNull();
-  });
-});
+  it('shows the second bar while the helper runs, without taking the vocal row', () => {
+    const view = panelView({ report: report({ status: 'ready', duet: preparing }) });
 
-describe('the guide slider', () => {
-  it('goes from a gain to a position and back', () => {
-    expect(guidePercent(0)).toBe(0);
-    expect(guidePercent(0.35)).toBe(35);
-    expect(guidePercent(1)).toBe(100);
-    expect(guideFromPercent(35)).toBeCloseTo(0.35, 9);
+    expect(view.duetState).toBe('preparing');
+    expect(view.duetLabel).toBe('Splitting the two voices');
+    expect(view.duetProgress).toBeCloseTo(0.25);
+    expect(view.duetDetail).toBe('The normal vocal controls still work while this runs.');
+    expect(view.controls).toBe(true);
   });
 
-  it('stays inside the slider, whatever it is handed', () => {
-    expect(guidePercent(4)).toBe(100);
-    expect(guidePercent(-1)).toBe(0);
-    expect(guidePercent(Number.NaN)).toBe(0);
-    expect(guideFromPercent(400)).toBe(1);
-    expect(guideFromPercent(-20)).toBe(0);
-    expect(guideFromPercent(Number.NaN)).toBe(0);
+  it('cannot start before the first pass has finished', () => {
+    const view = panelView({
+      report: report({ status: 'preparing', covered: true, duet: preparing }),
+    });
+
+    expect(view.duetCanStart).toBe(false);
+  });
+
+  it('keeps the current pair on screen while it learns a new line', () => {
+    const view = panelView({ report: report({ status: 'ready', duet: calibrating }) });
+
+    expect(view.duetState).toBe('preparing');
+    expect(view.duetHasVoices).toBe(true);
+    expect(view.duetDetail).toBe('The current pair keeps playing while it re-renders.');
+  });
+
+  it('shows two voices and warns when the map was unsure', () => {
+    const view = panelView({ report: report({ status: 'ready', duet: ready }) });
+
+    expect(view.duetState).toBe('ready');
+    expect(view.duetLabel).toBe('Duet ready');
+    expect(view.duetDetail).toContain('uncertain');
+    expect(view.duetMix.muted).toEqual([false, false]);
+  });
+
+  it('keeps karaoke alive when the helper is missing', () => {
+    const view = panelView({ report: report({ status: 'ready', duet: failed }) });
+
+    expect(view.duetState).toBe('error');
+    expect(view.duetLabel).toBe('Duet stopped');
+    expect(view.duetDetail).toContain('token');
+    expect(view.duetCanStart).toBe(true);
   });
 });

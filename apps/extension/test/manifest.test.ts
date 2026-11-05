@@ -3,20 +3,18 @@ import { describe, expect, it } from 'vitest';
 import { buildManifest } from '../src/manifest.ts';
 
 describe('buildManifest', () => {
-  it('asks for the five permissions the audio side needs and no more', () => {
-    expect(buildManifest().permissions).toEqual([
-      'tabCapture',
-      'offscreen',
-      'activeTab',
-      'scripting',
-      'storage',
-    ]);
+  it('asks for the two permissions the audio side needs and no more', () => {
+    expect(buildManifest().permissions).toEqual(['offscreen', 'storage']);
   });
 
-  it('is on youtube.com and nowhere else by default', () => {
+  it('is on youtube.com plus the local duet helper by default', () => {
     const manifest = buildManifest();
 
-    expect(manifest.host_permissions).toEqual(['https://www.youtube.com/*']);
+    expect(manifest.host_permissions).toEqual([
+      'https://www.youtube.com/*',
+      'https://*.googlevideo.com/*',
+      'http://127.0.0.1/*',
+    ]);
     expect(manifest.manifest_version).toBe(3);
   });
 
@@ -26,44 +24,36 @@ describe('buildManifest', () => {
     expect(local.host_permissions).toEqual([
       'https://www.youtube.com/*',
       'http://localhost/*',
+      'https://*.googlevideo.com/*',
+      'http://127.0.0.1/*',
     ]);
     expect(buildManifest({ localhost: false }).host_permissions).toEqual([
       'https://www.youtube.com/*',
+      'https://*.googlevideo.com/*',
+      'http://127.0.0.1/*',
     ]);
   });
 
   it('matches the content script to the same sites as the host permissions', () => {
-    for (const manifest of [buildManifest(), buildManifest({ localhost: true })]) {
-      expect(manifest.content_scripts[0]?.matches).toEqual(manifest.host_permissions);
-      expect(manifest.content_scripts[0]?.js).toEqual(['content.js']);
-    }
+    expect(buildManifest().content_scripts[0]?.matches).toEqual(['https://www.youtube.com/*']);
+    expect(buildManifest({ localhost: true }).content_scripts[0]?.matches).toEqual([
+      'https://www.youtube.com/*',
+      'http://localhost/*',
+    ]);
   });
 
-  it('allows the one thing the default policy forbids and the runtime needs', () => {
+  it('runs the stream grabber in the page world before the page can load', () => {
+    const grabber = buildManifest().content_scripts[1];
+
+    expect(grabber?.js).toEqual(['stream-info.js']);
+    expect(grabber?.run_at).toBe('document_start');
+    expect(grabber?.world).toBe('MAIN');
+    expect(grabber?.all_frames).toBe(false);
+  });
+
+  it('lets the extension fetch its own audio without a remote origin anywhere', () => {
     const policy = buildManifest().content_security_policy.extension_pages;
 
-    expect(policy).toContain("'wasm-unsafe-eval'");
-    // No remote origin anywhere: everything is loaded from the packed files.
-    expect(policy).not.toMatch(/https?:/u);
-  });
-
-  it('runs the service worker as a module and the content script as a script', () => {
-    const manifest = buildManifest();
-
-    expect(manifest.background).toEqual({ service_worker: 'background.js', type: 'module' });
-    expect(manifest).not.toHaveProperty('web_accessible_resources');
-  });
-
-  /**
-   * The popup is not decoration: `chrome.tabCapture.getMediaStreamId` is only
-   * granted off the back of a click in one of the extension's own contexts,
-   * and with this set `chrome.action.onClicked` never fires at all, so this is
-   * where that click has to land.
-   */
-  it('puts a popup on the action, which is where the gesture now lands', () => {
-    expect(buildManifest().action).toEqual({
-      default_title: 'Kara: capture this tab',
-      default_popup: 'popup.html',
-    });
+    expect(policy).toBe("script-src 'self' 'wasm-unsafe-eval'; object-src 'self'");
   });
 });

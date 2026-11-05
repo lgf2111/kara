@@ -42,7 +42,7 @@ const require = createRequire(join(extension, 'package.json'));
 /** Anything bigger than this in dist/assets is a wasm nothing ever fetches. */
 const STRAY_LIMIT = 8 * 1024 * 1024;
 
-const TARGETS = ['pages', 'capture-worklet', 'playback-worklet', 'content'];
+const TARGETS = ['pages', 'stem-player', 'content', 'stream-info'];
 
 /** @param {string} message @returns {never} */
 function fail(message) {
@@ -134,6 +134,13 @@ writeFileSync(
   gzipSync(readFileSync(join(ort, 'ort-wasm-simd-threaded.asyncify.wasm')), { level: 9 }),
 );
 console.log(`build-extension: ort runtime, ${String(glue)} glue file(s) and the gzipped wasm`);
+
+// The key control is Signalsmith Stretch, loaded as a worklet. The package is
+// a single ES module with its WASM embedded, so it is one static file the
+// extension can load as `self`.
+const signalsmith = dirname(require.resolve('signalsmith-stretch'));
+copyFileSync(join(signalsmith, 'SignalsmithStretch.mjs'), join(dist, 'signalsmith-stretch.js'));
+console.log('build-extension: pitch-shift worklet');
 
 const weights = join(repoRoot, 'models/htdemucs-web');
 if (existsSync(weights)) {

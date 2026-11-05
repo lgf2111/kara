@@ -5,5 +5,5 @@
     "types": ["node"],
     "allowImportingTsExtensions": true
   },
-  "include": ["vite.config.ts", "test"]
+  "include": ["vite.config.ts", "test", "src/worklets/audio-worklet.d.ts"]
 }

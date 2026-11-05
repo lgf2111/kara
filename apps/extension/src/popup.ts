@@ -1,27 +1,33 @@
 import { canNudge, KEY_DEFAULT, nudgeKey } from './audio/key.ts';
-import { ON_READY_CHOICES, popupView, type PopupView } from './popup/popup-view.ts';
 import {
+  DUET_CONFIG_KEY,
+  normaliseDuetConfig,
+} from './audio/duet.ts';
+import { debugReportText } from './debug-report.ts';
+import { popupView, type PopupView } from './popup/popup-view.ts';
+import {
+  DEBUG_KEY,
   packet,
   STATUS_KEY,
-  type Command,
+  type PipelineDebug,
   type Request,
   type StatusReport,
+  type StoredDebug,
   type StoredStatus,
 } from './protocol.ts';
 import { reasonText } from './reason.ts';
-import { DEFAULT_SETTINGS, SETTINGS_KEY, parseSettings, type OnReady } from './settings.ts';
+import { DEFAULT_SETTINGS, SETTINGS_KEY, parseSettings } from './settings.ts';
 import { readSettings, writeSettings } from './settings-store.ts';
-import { mediaStreamId } from './tab-capture.ts';
 
 /**
- * The toolbar popup: the click that starts a capture, and the state of one.
+ * The toolbar popup: the state of the session, its start and stop, and the
+ * one setting.
  *
- * It is here because of where Chrome puts the user gesture.
- * `chrome.tabCapture.getMediaStreamId` is granted off the back of a click in
- * one of the extension's own contexts, and the moment the action has a popup,
- * `chrome.action.onClicked` stops firing — so this is the only place left that
- * can ask for a stream id. It asks, and hands the id to the service worker,
- * which owns the offscreen document the audio lives in.
+ * There is no capture gesture any more, so this is not the only place that
+ * can start anything — the panel in the page starts just as well. What it is
+ * is the one window that exists even when the person is not on a video: the
+ * state, the stop button, the remembered key and the debug report all live
+ * here.
  *
  * Plain DOM, no framework, and every decision about what to say is in
  * `popup/popup-view.ts` where it can be tested. What is left here is reading
@@ -35,6 +41,9 @@ import { mediaStreamId } from './tab-capture.ts';
  * anything.
  */
 
+/** How often the debug state is fetched while the popup is open, in ms. */
+const DEBUG_TICK_MS = 2000;
+
 function need<T extends Element>(selector: string): T {
   const found = document.querySelector<T>(selector);
   if (found === null) {
@@ -45,71 +54,162 @@ function need<T extends Element>(selector: string): T {
 
 const headline = need<HTMLParagraphElement>('#headline');
 const detail = need<HTMLParagraphElement>('#detail');
-const bar = need<HTMLProgressElement>('#bar');
+const bar = need<HTMLDivElement>('#bar');
+const barFill = need<HTMLSpanElement>('#bar-fill');
+const stateDot = need<HTMLSpanElement>('#state-dot');
 const action = need<HTMLButtonElement>('#action');
-const onReadyBox = need<HTMLFieldSetElement>('#on-ready');
 const keyValue = need<HTMLSpanElement>('#key-value');
 const keyDown = need<HTMLButtonElement>('#key-down');
 const keyUp = need<HTMLButtonElement>('#key-up');
 const keyClear = need<HTMLButtonElement>('#key-clear');
+const diagnosticsToggle = need<HTMLButtonElement>('#diagnostics-toggle');
+const diagnosticsLabel = need<HTMLSpanElement>('#diagnostics-label');
+const diagnosticsBox = need<HTMLElement>('#diagnostics');
+const diagnosticsTabs = need<HTMLDivElement>('#diagnostics-tabs');
+const diagnosticsGroups = need<HTMLDivElement>('#diagnostics-groups');
+const copyDebug = need<HTMLButtonElement>('#copy-debug');
+const copyNote = need<HTMLParagraphElement>('#copy-note');
+const debugDump = need<HTMLTextAreaElement>('#debug-dump');
+const duetUrl = need<HTMLInputElement>('#duet-url');
+const duetToken = need<HTMLInputElement>('#duet-token');
+const duetSave = need<HTMLButtonElement>('#duet-save');
+const duetTest = need<HTMLButtonElement>('#duet-test');
+const duetStatus = need<HTMLParagraphElement>('#duet-status');
 
 let tabId: number | null = null;
 let url: string | undefined;
 let report: StatusReport | null = null;
-let onReady: OnReady = DEFAULT_SETTINGS.onReady;
 /** The remembered default, until a report says what is actually playing. */
 let key = DEFAULT_SETTINGS.key;
 /** A start that has been asked for and not yet answered. */
 let starting = false;
 let failure: string | null = null;
-
-const radios = new Map<OnReady, HTMLInputElement>();
+/** The debug state as the offscreen document last sent it, or null for none. */
+let pipeline: PipelineDebug | null = null;
+/** Whether the diagnostics disclosure is open. It starts closed every time. */
+let diagnosticsOpen = false;
 
 function send(body: Request): void {
   chrome.runtime.sendMessage(packet('background', body, tabId)).catch(() => undefined);
 }
 
-/**
- * Straight to the audio, with no relay: a runtime message already reaches
- * every extension context, and the envelope is what stops the wrong one
- * acting on it.
- */
-function command(body: Command): void {
-  chrome.runtime.sendMessage(packet('offscreen', body, tabId)).catch(() => undefined);
+function view(): PopupView {
+  return popupView({ report, url, key, pipeline });
 }
 
-function view(): PopupView {
-  return popupView({ report, url, onReady, key });
+/** Which diagnostics group is showing; the three titles are stable. */
+let diagnosticsTab = 0;
+/** The group titles last used to build the tab buttons. */
+let diagnosticsSignature = '';
+
+function renderDiagnostics(diagnostics: PopupView['diagnostics']): void {
+  if (diagnostics === null) {
+    diagnosticsTabs.replaceChildren();
+    diagnosticsGroups.replaceChildren();
+    diagnosticsSignature = '';
+    return;
+  }
+  const signature = diagnostics.groups.map((group) => group.title).join('|');
+  if (signature !== diagnosticsSignature) {
+    diagnosticsTab = Math.min(diagnosticsTab, diagnostics.groups.length - 1);
+    diagnosticsTabs.replaceChildren();
+    diagnostics.groups.forEach((group, index) => {
+      const tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'diag-tab';
+      tab.id = `kara-diag-tab-${String(index)}`;
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-controls', 'diagnostics-groups');
+      tab.setAttribute('aria-selected', String(index === diagnosticsTab));
+      tab.textContent = group.title;
+      tab.addEventListener('click', () => {
+        diagnosticsTab = index;
+        renderDiagnostics(view().diagnostics);
+      });
+      diagnosticsTabs.append(tab);
+    });
+    diagnosticsSignature = signature;
+  } else {
+    for (const [index, tab] of Array.from(diagnosticsTabs.children).entries()) {
+      tab.setAttribute('aria-selected', String(index === diagnosticsTab));
+    }
+  }
+  const active = diagnostics.groups[diagnosticsTab] ?? diagnostics.groups[0];
+  diagnosticsGroups.replaceChildren();
+  if (active === undefined) {
+    return;
+  }
+  diagnosticsGroups.setAttribute(
+    'aria-labelledby',
+    `kara-diag-tab-${String(diagnosticsTab)}`,
+  );
+  const list = document.createElement('dl');
+  for (const row of active.rows) {
+    const item = document.createElement('div');
+    item.className = row.wide === true ? 'diag-row wide' : 'diag-row';
+    const term = document.createElement('dt');
+    term.textContent = row.label;
+    const value = document.createElement('dd');
+    value.textContent = row.value;
+    item.append(term, value);
+    list.append(item);
+  }
+  diagnosticsGroups.append(list);
+}
+
+function setDiagnostics(open: boolean): void {
+  diagnosticsOpen = open;
+  diagnosticsBox.hidden = !open;
+  diagnosticsToggle.setAttribute('aria-expanded', String(open));
+  diagnosticsLabel.textContent = open ? 'Hide diagnostics' : 'View diagnostics';
+  if (open) {
+    renderDiagnostics(view().diagnostics);
+  } else {
+    copyNote.hidden = true;
+    debugDump.hidden = true;
+  }
 }
 
 function draw(): void {
   const shown = view();
+  stateDot.dataset['state'] = shown.state;
   headline.textContent = starting ? 'Starting…' : shown.headline;
-  detail.textContent = failure ?? shown.detail;
+  detail.textContent = failure ?? shown.detail ?? '';
   detail.hidden = detail.textContent === '';
   bar.hidden = shown.progress === null;
   if (shown.progress !== null) {
-    bar.value = Math.round(shown.progress * 100);
+    const percent = Math.round(shown.progress * 100);
+    barFill.style.width = `${String(percent)}%`;
+    bar.setAttribute('aria-valuenow', String(percent));
+    bar.setAttribute('aria-valuetext', shown.detail ?? `${String(percent)}%`);
   }
+  action.dataset['action'] = shown.action;
   action.textContent = shown.actionLabel;
   action.disabled = shown.action === 'none' || starting;
-  for (const [value, radio] of radios) {
-    radio.checked = value === shown.onReady;
-  }
   keyValue.textContent = shown.keyLabel;
   keyDown.disabled = !canNudge(shown.semitones, -1);
   keyUp.disabled = !canNudge(shown.semitones, 1);
   keyClear.hidden = shown.semitones === KEY_DEFAULT;
+
+  diagnosticsToggle.hidden = shown.diagnostics === null;
+  if (shown.diagnostics === null) {
+    if (diagnosticsOpen) {
+      setDiagnostics(false);
+    }
+  } else if (diagnosticsOpen) {
+    renderDiagnostics(shown.diagnostics);
+  }
 }
 
 /**
- * The key, in two places at once: the capture that is playing, by command, and
+ * The key, in two places at once: the session that is playing, by command, and
  * the remembered default, by storage.
  *
  * Both, because the popup is where a decision rather than a nudge is made. The
- * command is sent rather than left to the offscreen document's storage watcher
- * on purpose — the panel in the page can move the key too, without touching
- * the default, and a watcher pushing the stored value would undo that.
+ * command goes through the service worker's relay rather than being left to
+ * the offscreen document's storage watcher on purpose — the panel in the page
+ * can move the key too, without touching the default, and a watcher pushing
+ * the stored value would undo that.
  */
 function setKey(semitones: number): void {
   key = semitones;
@@ -117,34 +217,12 @@ function setKey(semitones: number): void {
     report = { ...report, semitones };
   }
   draw();
-  command({ type: 'key', semitones });
-  writeSettings({ key: semitones }).catch(() => undefined);
-}
-
-/** Two radios rather than a switch, because neither of them is the off one. */
-function buildChoices(): void {
-  for (const choice of ON_READY_CHOICES) {
-    const label = document.createElement('label');
-    const radio = document.createElement('input');
-    radio.type = 'radio';
-    radio.name = 'on-ready';
-    radio.value = choice.value;
-    const words = document.createElement('span');
-    words.textContent = choice.label;
-    label.append(radio, words);
-    onReadyBox.append(label);
-    radios.set(choice.value, radio);
-    radio.addEventListener('change', () => {
-      if (!radio.checked) {
-        return;
-      }
-      onReady = choice.value;
-      draw();
-      // The offscreen document watches the same storage key, so a capture
-      // already running picks this up without being told.
-      writeSettings({ onReady: choice.value }).catch(() => undefined);
-    });
+  if (tabId !== null) {
+    chrome.runtime
+      .sendMessage(packet('offscreen', { type: 'key', semitones }, tabId))
+      .catch(() => undefined);
   }
+  writeSettings({ key: semitones }).catch(() => undefined);
 }
 
 /** The stored report, if it belongs to the tab this popup was opened over. */
@@ -153,24 +231,64 @@ function take(stored: unknown): void {
   report = value !== undefined && value.tabId === tabId ? value.report : null;
 }
 
-async function start(): Promise<void> {
+function takeDebug(stored: unknown): void {
+  const value = stored as StoredDebug | undefined;
+  pipeline = value !== undefined && value.tabId === tabId ? value.pipeline : null;
+  draw();
+}
+
+/**
+ * Asks the offscreen document for its debug state, which comes back through
+ * the service worker into session storage.
+ *
+ * Asked for in advance rather than on the button, because the clipboard is
+ * only granted inside the click that pressed it: a copy that awaited a
+ * message first would have lost the gesture by the time it had anything to
+ * copy.
+ */
+function askForDebug(): void {
+  chrome.runtime
+    .sendMessage(packet('offscreen', { type: 'debug' }, tabId))
+    .catch(() => undefined);
+}
+
+/**
+ * Copies the report, redacted by `debug-report.ts`: an origin and no page
+ * address beyond it, no video id, and nothing that is or was audio.
+ */
+function copyReport(): void {
+  const text = debugReportText(
+    {
+      atMs: Date.now(),
+      url,
+      status: report,
+      pipeline,
+      version: chrome.runtime.getManifest().version,
+    },
+    navigator.userAgent,
+  );
+  copyNote.hidden = false;
+  copyNote.textContent = 'Copied.';
+  navigator.clipboard.writeText(text).catch(() => {
+    // No clipboard, which some Chrome builds and policies answer with. The
+    // text itself is the fallback: selected, so one keystroke takes it.
+    copyNote.textContent = 'Select the text below and copy it.';
+    debugDump.hidden = false;
+    debugDump.value = text;
+    debugDump.select();
+  });
+}
+
+function start(): void {
   if (tabId === null) {
     return;
   }
   starting = true;
   failure = null;
   draw();
-  try {
-    // First, and before any await: the stream id is only granted off the back
-    // of this click.
-    const streamId = await mediaStreamId(tabId);
-    send({ type: 'request-start', streamId, tabId });
-  } catch (cause) {
-    failure = reasonText(cause);
-  } finally {
-    starting = false;
-    draw();
-  }
+  send({ type: 'request-start', tabId });
+  starting = false;
+  draw();
 }
 
 keyDown.addEventListener('click', () => {
@@ -192,7 +310,66 @@ action.addEventListener('click', () => {
     draw();
     return;
   }
-  void start();
+  start();
+});
+
+copyDebug.addEventListener('click', copyReport);
+
+function showDuetStatus(text: string): void {
+  duetStatus.hidden = text === '';
+  duetStatus.textContent = text;
+  if (text !== '') {
+    const shown = text;
+    window.setTimeout(() => {
+      if (duetStatus.textContent === shown) {
+        duetStatus.hidden = true;
+      }
+    }, 4000);
+  }
+}
+
+async function loadDuetConfig(): Promise<void> {
+  const stored = await chrome.storage.local.get(DUET_CONFIG_KEY);
+  const config = normaliseDuetConfig(stored[DUET_CONFIG_KEY]);
+  duetUrl.value = config.url;
+  duetToken.value = config.token;
+}
+
+duetSave.addEventListener('click', () => {
+  const config = normaliseDuetConfig({ url: duetUrl.value, token: duetToken.value });
+  duetUrl.value = config.url;
+  duetToken.value = config.token;
+  chrome.storage.local
+    .set({ [DUET_CONFIG_KEY]: config })
+    .then(() => {
+      showDuetStatus('Saved.');
+    })
+    .catch((cause: unknown) => {
+      showDuetStatus(reasonText(cause));
+    });
+});
+
+duetTest.addEventListener('click', () => {
+  const config = normaliseDuetConfig({ url: duetUrl.value, token: duetToken.value });
+  showDuetStatus('Checking…');
+  fetch(`${config.url}/v1/health`)
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error(`the helper answered ${String(response.status)}`);
+      }
+      const body = (await response.json()) as { ok?: unknown };
+      if (body.ok !== true) {
+        throw new Error('the helper did not say it is ready');
+      }
+      showDuetStatus('Helper found.');
+    })
+    .catch(() => {
+      showDuetStatus('Helper not reachable. Start bridge.py first.');
+    });
+});
+
+diagnosticsToggle.addEventListener('click', () => {
+  setDiagnostics(!diagnosticsOpen);
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -200,24 +377,29 @@ chrome.storage.onChanged.addListener((changes, area) => {
     take(changes[STATUS_KEY]?.newValue);
     draw();
   }
+  if (area === 'session' && Object.hasOwn(changes, DEBUG_KEY)) {
+    takeDebug(changes[DEBUG_KEY]?.newValue);
+  }
   if (area === 'sync' && Object.hasOwn(changes, SETTINGS_KEY)) {
-    const settings = parseSettings(changes[SETTINGS_KEY]?.newValue);
-    onReady = settings.onReady;
-    key = settings.key;
+    key = parseSettings(changes[SETTINGS_KEY]?.newValue).key;
     draw();
   }
 });
 
 async function open(): Promise<void> {
-  buildChoices();
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   tabId = tab?.id ?? null;
   url = tab?.url;
   const settings = await readSettings();
-  onReady = settings.onReady;
   key = settings.key;
+  await loadDuetConfig();
   take((await chrome.storage.session.get(STATUS_KEY))[STATUS_KEY]);
+  takeDebug((await chrome.storage.session.get(DEBUG_KEY))[DEBUG_KEY]);
   draw();
+  // And keep it fresh while this window is open, so the button always has
+  // something current to copy.
+  askForDebug();
+  setInterval(askForDebug, DEBUG_TICK_MS);
 }
 
 open().catch((cause: unknown) => {

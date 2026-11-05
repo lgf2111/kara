@@ -16,8 +16,10 @@ no separation, no lyrics, no player yet. See [docs/DESIGN.md](docs/DESIGN.md) fo
 
 These are not preferences. They are enforced in code, in tests and in CI.
 
-1. **Upload only.** You give Kara a file from your own device. There is no link import, no
-   downloader, and no integration with YouTube or any streaming service. None will be added.
+1. **The audio comes from what you are already playing, on your own machine.** The web app takes
+   a file from your own device. The extension reads the audio of the video in the tab it is
+   watching. Either way it is processed locally: nothing is uploaded anywhere, and nothing is
+   redistributed.
 2. **Your audio never leaves your device.** Decoding, separation, transcription and playback all
    happen in the browser. The page may only talk to its own origin: `connect-src 'self'` in the
    Content-Security-Policy, with no code that uploads audio anywhere.

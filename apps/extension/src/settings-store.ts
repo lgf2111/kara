@@ -11,9 +11,9 @@ import {
  *
  * Sync rather than local because it is a preference about how the extension
  * should behave, not a fact about this machine, and a person who has decided
- * they would rather keep listening while it gets ready has decided that on
- * every machine they sign in to. It is one small object under one key, so the
- * quota is not a consideration and a write is never half of one.
+ * on the key they sing in has decided that on every machine they sign in to.
+ * It is one small object under one key, so the quota is not a consideration
+ * and a write is never half of one.
  *
  * Everything in here fails to the default. A storage read that fails, a
  * profile with sync turned off, a value written by a version that thought the
@@ -42,7 +42,7 @@ export async function writeSettings(patch: Partial<Settings>): Promise<void> {
 
 /**
  * Calls back whenever the setting changes anywhere — another window's popup,
- * another machine's sync — so that a running capture and every open panel
+ * another machine's sync — so that a running session and every open panel
  * follow it without being told.
  */
 export function watchSettings(onChange: (settings: Settings) => void): () => void {

@@ -1,4 +1,4 @@
-import { SAMPLE_RATE, SEGMENT_SAMPLES } from './htdemucs.ts';
+import { SAMPLE_RATE, SEGMENT_SAMPLES, SOURCES } from './htdemucs.ts';
 import { medianMs, type JobPlan } from './job.ts';
 import { createStitcher } from './stitch.ts';
 import {
@@ -9,7 +9,7 @@ import {
   streamPlan,
   type LatencyReport,
 } from './stream-buffer.ts';
-import type { SegmentRunner } from './segment-contract.ts';
+import type { SegmentRun, SegmentRunner } from './segment-contract.ts';
 
 /**
  * Separation of audio that is still arriving.
@@ -78,6 +78,13 @@ export interface StreamBlock {
   /** Left and right, as long as the block. */
   readonly vocals: readonly [Float32Array, Float32Array];
   readonly instrumental: readonly [Float32Array, Float32Array];
+  /**
+   * All four sources, in htdemucs' `SOURCES` order, one stereo pair each.
+   * Present only when the separator was asked for `stems: 'all'`; the pair
+   * fields above are still filled, so a player that only wants karaoke need
+   * not know about this at all.
+   */
+  readonly stems?: readonly (readonly [Float32Array, Float32Array])[];
 }
 
 export interface StreamingOptions {
@@ -93,6 +100,14 @@ export interface StreamingOptions {
   readonly windowSamples?: number;
   /** Samples between windows. Defaults to the model's native 25% overlap. */
   readonly hopSamples?: number;
+  /**
+   * Which stems to finalise. `pair` (the default) is the vocal and the three
+   * backing sources summed, which is all a vocal switch needs. `all` also
+   * stitches each source on its own, which is what a mixer needs: the four
+   * separate are the model's output, and the sum is only one way of putting
+   * them back together.
+   */
+  readonly stems?: 'pair' | 'all';
 }
 
 export interface StreamingSeparator {
@@ -139,8 +154,19 @@ export function createStreamingSeparator(options: StreamingOptions): StreamingSe
   const instrumentalRight = new Float32Array(plan.segment);
   const computeMs: number[] = [];
 
+  /**
+   * The separate sources, when a mixer asked for them. Same plan as the pair
+   * above, one stitcher per source and one scratch pair to deinterleave into:
+   * the stitcher reuses its output, and `onBlock` is synchronous, so these
+   * buffers only have to survive one emit.
+   */
+  const allStems = options.stems === 'all';
+  const stemLeft = SOURCES.map(() => new Float32Array(plan.segment));
+  const stemRight = SOURCES.map(() => new Float32Array(plan.segment));
+
   let vocalsStitch = createStitcher(plan, 2);
   let instrumentalStitch = createStitcher(plan, 2);
+  let stemStitches = SOURCES.map(() => createStitcher(plan, 2));
   /** Windows run since the last reset, which decides whether a tail exists. */
   let windows = 0;
   /** Where the window the stitcher is holding begins. */
@@ -156,6 +182,7 @@ export function createStreamingSeparator(options: StreamingOptions): StreamingSe
     vocals: Float32Array,
     instrumental: Float32Array,
     frames: number,
+    stems: readonly (readonly [Float32Array, Float32Array])[] | null = null,
   ): void => {
     tiling.accept(startSample, frames);
     deinterleave(vocals, frames, vocalsLeft, vocalsRight);
@@ -164,7 +191,46 @@ export function createStreamingSeparator(options: StreamingOptions): StreamingSe
       startSample,
       vocals: [vocalsLeft.subarray(0, frames), vocalsRight.subarray(0, frames)],
       instrumental: [instrumentalLeft.subarray(0, frames), instrumentalRight.subarray(0, frames)],
+      ...(stems === null ? {} : { stems }),
     });
+  };
+
+  /** Every source for one finalised hop, or null while any is still held back. */
+  const stitchStems = (run: SegmentRun): readonly (readonly [Float32Array, Float32Array])[] | null => {
+    const released: (Float32Array | null)[] = [];
+    for (let index = 0; index < stemStitches.length; index += 1) {
+      const stitch = stemStitches[index];
+      const source = run.stems[index];
+      released.push(stitch === undefined || source === undefined ? null : stitch.push(source));
+    }
+    const pairs: (readonly [Float32Array, Float32Array])[] = [];
+    for (let index = 0; index < released.length; index += 1) {
+      const part = released[index];
+      const left = stemLeft[index];
+      const right = stemRight[index];
+      if (part === null || part === undefined || left === undefined || right === undefined) {
+        return null;
+      }
+      deinterleave(part, plan.stride, left, right);
+      pairs.push([left.subarray(0, plan.stride), right.subarray(0, plan.stride)]);
+    }
+    return pairs;
+  };
+
+  /** The last held tail of every source, cut to the frames that exist. */
+  const finishStems = (frames: number): readonly (readonly [Float32Array, Float32Array])[] | null => {
+    const pairs: (readonly [Float32Array, Float32Array])[] = [];
+    for (let index = 0; index < stemStitches.length; index += 1) {
+      const stitch = stemStitches[index];
+      const left = stemLeft[index];
+      const right = stemRight[index];
+      if (stitch === undefined || left === undefined || right === undefined) {
+        return null;
+      }
+      deinterleave(stitch.finish(), frames, left, right);
+      pairs.push([left.subarray(0, frames), right.subarray(0, frames)]);
+    }
+    return pairs;
   };
 
   /** The held window, cut off where the audio actually ended. */
@@ -176,7 +242,13 @@ export function createStreamingSeparator(options: StreamingOptions): StreamingSe
     if (frames <= 0) {
       return;
     }
-    emit(held, vocalsStitch.finish(), instrumentalStitch.finish(), frames);
+    emit(
+      held,
+      vocalsStitch.finish(),
+      instrumentalStitch.finish(),
+      frames,
+      allStems ? finishStems(frames) : null,
+    );
   };
 
   /**
@@ -223,12 +295,15 @@ export function createStreamingSeparator(options: StreamingOptions): StreamingSe
 
         const vocals = vocalsStitch.push(run.vocals);
         const instrumental = instrumentalStitch.push(run.instrumental);
+        // The stems are pushed on every window even if this one will not be
+        // emitted, so all the stitchers stay on the same window.
+        const stems = allStems ? stitchStems(run) : null;
         windows += 1;
         held = start;
         if (vocals !== null && instrumental !== null) {
           // What the stitcher let go of is the hop before the window just run:
           // its crossfade with this one is what made it final.
-          emit(start - plan.stride, vocals, instrumental, plan.stride);
+          emit(start - plan.stride, vocals, instrumental, plan.stride, stems);
         }
       }
     } finally {
@@ -266,6 +341,7 @@ export function createStreamingSeparator(options: StreamingOptions): StreamingSe
       tiling.reset(startSample);
       vocalsStitch = createStitcher(plan, 2);
       instrumentalStitch = createStitcher(plan, 2);
+      stemStitches = SOURCES.map(() => createStitcher(plan, 2));
       windows = 0;
       held = startSample;
       finishing = false;

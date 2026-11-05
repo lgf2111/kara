@@ -4,152 +4,510 @@
     <meta charset="utf-8" />
     <title>Kara</title>
     <style>
-      /* An extension page, so none of this can reach a tab and nothing in a
-         tab can reach it. Sized by content: a popup with a fixed height is a
-         popup with a scrollbar in it on somebody's machine. */
+      /* The popup is an extension page, so none of this can reach a tab. It
+         shares the panel's KTV palette and ShadCN-shaped controls: one warm
+         ground, one gold accent, one 32px control height. Diagnostics stay
+         here, behind one click, because the panel over a video is no place
+         for raw session data. */
       :root {
-        color-scheme: light dark;
+        color-scheme: dark;
+        --kara-ground: #1b1116;
+        --kara-surface: #24171d;
+        --kara-raised: #2c1b22;
+        --kara-border: #3b2a30;
+        --kara-border-strong: #4b343b;
+        --kara-text: #f7efe6;
+        --kara-muted: #c3b0a6;
+        --kara-faint: #9a877e;
+        --kara-accent: #e8b86d;
+        --kara-accent-ink: #21140b;
+        --kara-danger: #e58b8b;
+        --kara-danger-tint: rgba(229, 139, 139, 0.16);
+        --kara-track: #3a2730;
+        --kara-control: 32px;
+        --kara-radius: 8px;
       }
+      * {
+        box-sizing: border-box;
+      }
+      html,
       body {
         margin: 0;
-        padding: 12px;
-        width: 20rem;
-        font: 13px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif;
       }
-      h1 {
-        margin: 0 0 8px;
-        font-size: 13px;
-        font-weight: 600;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-        opacity: 0.6;
+      body {
+        width: 344px;
+        padding: 14px;
+        background: var(--kara-ground);
+        color: var(--kara-text);
+        font: 500 13px/1.45 "Avenir Next", "Segoe UI", system-ui, sans-serif;
+      }
+      button {
+        margin: 0;
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+        border: 1px solid transparent;
+        border-radius: var(--kara-radius);
+        background: transparent;
+        transition:
+          background-color 120ms ease,
+          border-color 120ms ease,
+          color 120ms ease;
+      }
+      button:hover {
+        background: var(--kara-surface);
+      }
+      button:active {
+        background: var(--kara-raised);
+      }
+      button:focus-visible {
+        outline: 2px solid var(--kara-accent);
+        outline-offset: 2px;
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      button:disabled:hover {
+        background: transparent;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      .top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        min-height: var(--kara-control);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .brand-glyph {
+        display: flex;
+        color: var(--kara-accent);
+      }
+      .brand-name {
+        margin: 0;
+        color: var(--kara-text);
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 19px;
+        font-weight: 700;
+        letter-spacing: -0.025em;
+        line-height: 1;
+      }
+      .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--kara-faint);
+      }
+      .dot[data-state='ready'],
+      .dot[data-state='preparing'] {
+        background: var(--kara-accent);
+      }
+      .dot[data-state='paused'] {
+        background: var(--kara-muted);
+      }
+      .dot[data-state='error'],
+      .dot[data-state='unsupported'] {
+        background: var(--kara-danger);
       }
       #headline {
-        margin: 0;
+        margin: 10px 0 0;
+        color: var(--kara-text);
         font-size: 15px;
         font-weight: 600;
       }
       #detail {
         margin: 4px 0 0;
-        opacity: 0.75;
+        color: var(--kara-muted);
+        font-size: 11px;
+        line-height: 1.45;
       }
-      #bar {
-        display: block;
-        width: 100%;
-        height: 5px;
-        margin: 8px 0 0;
-        appearance: none;
-        border: 0;
-        border-radius: 3px;
+      .bar {
+        height: 4px;
+        margin-top: 9px;
         overflow: hidden;
-        background: rgba(127, 127, 127, 0.28);
+        border-radius: 999px;
+        background: var(--kara-track);
       }
-      #bar::-webkit-progress-bar {
-        background: rgba(127, 127, 127, 0.28);
-      }
-      #bar::-webkit-progress-value {
-        background: #c58b00;
+      .bar-fill {
+        width: 0;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--kara-accent);
         transition: width 240ms linear;
       }
       #action {
-        margin: 12px 0 0;
         width: 100%;
-        padding: 7px 10px;
-        font: inherit;
-        font-weight: 600;
-        border: 1px solid rgba(127, 127, 127, 0.5);
-        border-radius: 8px;
-        background: rgba(127, 127, 127, 0.12);
-        cursor: pointer;
+        height: var(--kara-control);
+        margin-top: 12px;
+        padding: 0 12px;
+        border-color: var(--kara-accent);
+        background: var(--kara-accent);
+        color: var(--kara-accent-ink);
+        font-size: 12px;
+        font-weight: 650;
       }
-      #action:hover:not(:disabled) {
-        background: rgba(127, 127, 127, 0.22);
+      #action:hover {
+        background: #f0c47f;
       }
-      #action:disabled {
-        opacity: 0.5;
-        cursor: default;
+      #action[data-action='stop'] {
+        border-color: var(--kara-border-strong);
+        background: transparent;
+        color: var(--kara-text);
       }
-      fieldset {
-        margin: 14px 0 0;
-        padding: 8px 10px 10px;
-        border: 1px solid rgba(127, 127, 127, 0.35);
-        border-radius: 8px;
+      #action[data-action='stop']:hover {
+        background: var(--kara-surface);
       }
-      legend {
-        padding: 0 4px;
-        font-weight: 600;
-      }
-      label {
+      .key-row {
         display: flex;
-        gap: 8px;
-        align-items: start;
-        margin-top: 6px;
-      }
-      /* Steppers rather than a slider: a key is a step, and half a semitone
-         is not a thing anybody means to ask for. */
-      #key-box .row {
-        display: flex;
-        gap: 6px;
         align-items: center;
+        gap: 8px;
+        margin-top: 10px;
       }
-      #key-box button {
-        font: inherit;
-        padding: 3px 9px;
-        border: 1px solid rgba(127, 127, 127, 0.5);
-        border-radius: 6px;
-        background: rgba(127, 127, 127, 0.12);
-        cursor: pointer;
+      .key-name {
+        width: 26px;
+        color: var(--kara-muted);
+        font-size: 11px;
+        font-weight: 600;
       }
-      #key-box button:hover:not(:disabled) {
-        background: rgba(127, 127, 127, 0.22);
+      .key-stepper {
+        display: flex;
+        flex: 1;
+        align-items: center;
+        height: var(--kara-control);
+        overflow: hidden;
+        border: 1px solid var(--kara-border);
+        border-radius: var(--kara-radius);
       }
-      #key-box button:disabled {
-        opacity: 0.4;
-        cursor: default;
+      .key-stepper button {
+        width: var(--kara-control);
+        height: 100%;
+        padding: 0;
+        border: 0;
+        border-radius: 0;
+        color: var(--kara-muted);
+        font-size: 15px;
+      }
+      .key-stepper button:hover {
+        background: var(--kara-surface);
+        color: var(--kara-text);
+      }
+      .key-stepper button:focus-visible {
+        outline-offset: -2px;
       }
       #key-value {
         flex: 1;
-        text-align: center;
-        font-weight: 600;
-        font-variant-numeric: tabular-nums;
-      }
-      #key-box #key-clear {
+        overflow: hidden;
+        color: var(--kara-text);
         font-size: 11px;
-        font-weight: 400;
+        font-variant-numeric: tabular-nums;
+        text-align: center;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #key-clear {
+        height: var(--kara-control);
+        padding: 0 10px;
+        border-color: var(--kara-border);
+        color: var(--kara-muted);
+        font-size: 11px;
+      }
+      #key-clear:hover {
+        border-color: var(--kara-border-strong);
+        color: var(--kara-text);
       }
       .hint {
         margin: 6px 0 0;
+        color: var(--kara-faint);
         font-size: 11px;
-        opacity: 0.65;
+        line-height: 1.45;
       }
-      [hidden] {
-        display: none !important;
+      #duet {
+        margin-top: 12px;
+        padding: 10px;
+        border: 1px solid var(--kara-border);
+        border-radius: var(--kara-radius);
+        background: var(--kara-surface);
+      }
+      .section-title {
+        margin: 0 0 8px;
+        color: var(--kara-text);
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .duet-field {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 6px;
+      }
+      .duet-field span {
+        width: 38px;
+        color: var(--kara-faint);
+        font-size: 11px;
+      }
+      .duet-field input {
+        flex: 1;
+        min-width: 0;
+        height: var(--kara-control);
+        padding: 0 8px;
+        border: 1px solid var(--kara-border);
+        border-radius: var(--kara-radius);
+        background: var(--kara-ground);
+        color: var(--kara-text);
+        font: inherit;
+        font-size: 11px;
+      }
+      .duet-field input:focus-visible {
+        outline: 2px solid var(--kara-accent);
+        outline-offset: 1px;
+      }
+      .duet-actions {
+        display: flex;
+        gap: 6px;
+        margin-top: 8px;
+      }
+      .duet-actions button {
+        flex: 1;
+        height: var(--kara-control);
+        border-color: var(--kara-border);
+        color: var(--kara-muted);
+        font-size: 11px;
+      }
+      .duet-actions button:hover {
+        border-color: var(--kara-border-strong);
+        color: var(--kara-text);
+      }
+      #duet-save {
+        border-color: var(--kara-accent);
+        color: var(--kara-accent);
+      }
+      #duet-status {
+        margin-top: 7px;
+      }
+      #diagnostics-toggle {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        width: 100%;
+        height: var(--kara-control);
+        margin-top: 12px;
+        padding: 0 10px;
+        border-color: var(--kara-border);
+        color: var(--kara-muted);
+        font-size: 11px;
+        text-align: left;
+      }
+      #diagnostics-toggle:hover {
+        border-color: var(--kara-border-strong);
+        color: var(--kara-text);
+      }
+      #diagnostics-toggle[aria-expanded='true'] {
+        background: var(--kara-surface);
+        color: var(--kara-text);
+      }
+      .diagnostics-glyph {
+        display: flex;
+        color: var(--kara-faint);
+      }
+      #diagnostics-toggle[aria-expanded='true'] .diagnostics-glyph {
+        color: var(--kara-accent);
+      }
+      .chevron {
+        display: flex;
+        margin-left: auto;
+        color: var(--kara-faint);
+        transition: transform 120ms ease;
+      }
+      #diagnostics-toggle[aria-expanded='true'] .chevron {
+        transform: rotate(90deg);
+      }
+      #diagnostics {
+        margin-top: 8px;
+        padding: 10px;
+        border: 1px solid var(--kara-border);
+        border-radius: var(--kara-radius);
+        background: var(--kara-surface);
+      }
+      .diag-tabs {
+        display: flex;
+        gap: 4px;
+        margin-bottom: 8px;
+      }
+      .diag-tab {
+        flex: 1;
+        height: var(--kara-control);
+        padding: 0 6px;
+        border-color: var(--kara-border);
+        color: var(--kara-muted);
+        font-size: 11px;
+        font-weight: 600;
+      }
+      .diag-tab:hover {
+        border-color: var(--kara-border-strong);
+        color: var(--kara-text);
+      }
+      .diag-tab[aria-selected='true'] {
+        border-color: var(--kara-border-strong);
+        background: var(--kara-raised);
+        color: var(--kara-text);
+      }
+      #diagnostics-groups dl {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 3px 12px;
+        margin: 0;
+      }
+      .diag-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 6px;
+        min-width: 0;
+      }
+      .diag-row.wide {
+        grid-column: 1 / -1;
+      }
+      .diag-row dt {
+        color: var(--kara-faint);
+        font-size: 11px;
+        font-weight: 500;
+      }
+      .diag-row dd {
+        min-width: 0;
+        margin: 0;
+        overflow: hidden;
+        color: var(--kara-muted);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .diag-row.wide dd {
+        overflow: visible;
+        text-align: left;
+        white-space: normal;
+        word-break: break-word;
+      }
+      #copy-debug {
+        width: 100%;
+        height: var(--kara-control);
+        margin-top: 10px;
+        border-color: var(--kara-border);
+        color: var(--kara-muted);
+        font-size: 11px;
+      }
+      #copy-debug:hover {
+        border-color: var(--kara-border-strong);
+        color: var(--kara-text);
+      }
+      #copy-note {
+        margin: 6px 0 0;
+        color: var(--kara-muted);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+      #debug-dump {
+        width: 100%;
+        margin: 6px 0 0;
+        font: 11px/1.35 ui-monospace, monospace;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        button,
+        .bar-fill,
+        .chevron {
+          transition: none;
+        }
       }
     </style>
   </head>
   <body>
-    <h1>Kara live</h1>
+    <header class="top">
+      <div class="brand">
+        <span class="brand-glyph" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 19v3" />
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+            <path d="M12 3a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3" />
+          </svg>
+        </span>
+        <h1 class="brand-name">Kara</h1>
+      </div>
+      <span id="state-dot" class="dot" aria-hidden="true"></span>
+    </header>
+
     <!-- One live region, so a screen reader hears the state change rather
          than being told to go and look for it. -->
     <div id="state" role="status" aria-live="polite">
       <p id="headline">Checking…</p>
-      <progress id="bar" max="100" value="0" hidden></progress>
-      <p id="detail"></p>
-    </div>
-    <button id="action" type="button" disabled>Start</button>
-    <fieldset id="key-box">
-      <legend>Key</legend>
-      <div class="row">
-        <button id="key-down" type="button" title="Down a semitone">−</button>
-        <span id="key-value" role="status" aria-live="polite">Original key</span>
-        <button id="key-up" type="button" title="Up a semitone">+</button>
-        <button id="key-clear" type="button" title="Back to the original key">Reset</button>
+      <p id="detail" hidden></p>
+      <div id="bar" class="bar" role="progressbar" aria-label="Getting karaoke ready" aria-valuemin="0" aria-valuemax="100" hidden>
+        <span id="bar-fill" class="bar-fill"></span>
       </div>
-      <p class="hint">Remembered, and used for the next song too.</p>
-    </fieldset>
-    <fieldset id="on-ready">
-      <legend>When ready</legend>
-    </fieldset>
+    </div>
+
+    <button id="action" type="button" disabled>Start</button>
+
+    <div class="key-row">
+      <span class="key-name">Key</span>
+      <div class="key-stepper" role="group" aria-label="Key">
+        <button id="key-down" type="button" title="Down a semitone" aria-label="Down a semitone">−</button>
+        <span id="key-value" role="status" aria-live="polite">Original key</span>
+        <button id="key-up" type="button" title="Up a semitone" aria-label="Up a semitone">+</button>
+      </div>
+      <button id="key-clear" type="button" title="Back to the original key">Reset</button>
+    </div>
+    <p class="hint">Remembered, and used for the next song too.</p>
+
+    <section id="duet" aria-label="Duet helper">
+      <h2 class="section-title">Duet helper</h2>
+      <label class="duet-field">
+        <span>URL</span>
+        <input id="duet-url" type="url" spellcheck="false" placeholder="http://127.0.0.1:8765" />
+      </label>
+      <label class="duet-field">
+        <span>Token</span>
+        <input id="duet-token" type="password" spellcheck="false" autocomplete="off" />
+      </label>
+      <div class="duet-actions">
+        <button id="duet-save" type="button">Save</button>
+        <button id="duet-test" type="button">Test</button>
+      </div>
+      <p id="duet-status" class="hint" role="status" aria-live="polite" hidden></p>
+    </section>
+
+    <button id="diagnostics-toggle" type="button" aria-expanded="false" aria-controls="diagnostics" hidden>
+      <span class="diagnostics-glyph" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m4 17 6-6-6-6" />
+          <path d="M12 19h8" />
+        </svg>
+      </span>
+      <span id="diagnostics-label">View diagnostics</span>
+      <span class="chevron" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m9 18 6-6-6-6" />
+        </svg>
+      </span>
+    </button>
+
+    <section id="diagnostics" aria-label="Diagnostics" hidden>
+      <div id="diagnostics-tabs" class="diag-tabs" role="tablist" aria-label="Diagnostics sections"></div>
+      <div id="diagnostics-groups" role="tabpanel"></div>
+      <!-- What to send when this goes wrong. The report is an origin, the
+           measurements and the state: no media, no video id, no title.
+           src/debug-report.ts is the one place that redaction happens. -->
+      <button id="copy-debug" type="button">Copy debug report</button>
+      <p id="copy-note" hidden></p>
+      <textarea id="debug-dump" rows="5" readonly hidden></textarea>
+    </section>
+
     <script type="module" src="/src/popup.ts"></script>
   </body>
 </html>

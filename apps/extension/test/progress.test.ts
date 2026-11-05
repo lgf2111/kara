@@ -3,266 +3,164 @@ import { describe, expect, it } from 'vitest';
 import {
   aboutText,
   advanceProgress,
+  fractionAt,
   NO_TIMINGS,
   prepareLabel,
   prepareProgress,
-  PREPARE_STAGES,
   progressPercent,
   stageOf,
-  stageSpan,
   STAGE_WEIGHTS,
-  WINDOW_SECONDS,
   type PrepareFacts,
-  type StageSeconds,
 } from '../src/audio/progress.ts';
 
-/** A first prime: nothing measured, nothing loaded, nothing heard. */
-const FRESH: PrepareFacts = {
-  modelPieces: null,
-  loadingSeconds: 0,
-  listenedSeconds: null,
-  windowSeconds: WINDOW_SECONDS,
-  separatingSeconds: null,
-  expectedSeparateSeconds: 5.85,
-  fillingSeconds: null,
-  fillSeconds: 1.5,
-  timings: NO_TIMINGS,
-};
+function facts(patch: Partial<PrepareFacts> = {}): PrepareFacts {
+  return {
+    download: null,
+    pieces: null,
+    windowsDone: 0,
+    windowsTotal: 0,
+    elapsedSeconds: 0,
+    timings: { ...NO_TIMINGS },
+    ...patch,
+  };
+}
 
-/** What a machine knows about itself after one prime. */
-const MEASURED: StageSeconds = {
-  loading: 10,
-  listening: WINDOW_SECONDS,
-  separating: 8,
-  filling: 1.5,
-};
-
-describe('the stages', () => {
-  it('divide the bar between them and nothing else', () => {
-    const total = PREPARE_STAGES.reduce((sum, stage) => sum + STAGE_WEIGHTS[stage], 0);
-
-    expect(total).toBeCloseTo(1, 9);
+describe('the bar', () => {
+  it('is split into the three things that happen, and sums to one', () => {
+    expect(STAGE_WEIGHTS.download).toBeCloseTo(0.1);
+    expect(STAGE_WEIGHTS.loading).toBeCloseTo(0.4);
+    expect(STAGE_WEIGHTS.separating).toBeCloseTo(0.5);
+    expect(STAGE_WEIGHTS.download + STAGE_WEIGHTS.loading + STAGE_WEIGHTS.separating).toBeCloseTo(1);
   });
 
-  it('own the slices the panel and the popup were built around', () => {
-    expect(stageSpan('loading')).toEqual({ from: 0, size: 0.45 });
-    expect(stageSpan('listening')).toEqual({ from: 0.45, size: 0.25 });
-    expect(stageSpan('separating')).toEqual({ from: 0.7, size: 0.15 });
-    expect(stageSpan('filling')).toEqual({ from: 0.85, size: 0.15 });
+  it('starts each stage where the last one ended', () => {
+    expect(fractionAt('download', 0)).toBeCloseTo(0);
+    expect(fractionAt('download', 1)).toBeCloseTo(0.1);
+    expect(fractionAt('loading', 0)).toBeCloseTo(0.1);
+    expect(fractionAt('loading', 1)).toBeCloseTo(0.5);
+    expect(fractionAt('separating', 0)).toBeCloseTo(0.5);
+    expect(fractionAt('separating', 1)).toBeCloseTo(1);
+  });
+
+  it('is about the work, not about a guess', () => {
+    const halfway = prepareProgress(
+      facts({ windowsTotal: 20, windowsDone: 10 }),
+    );
+
+    expect(halfway.stage).toBe('separating');
+    expect(halfway.fraction).toBeCloseTo(0.75);
   });
 });
 
 describe('stageOf', () => {
-  it('is loading until the separator says it is ready', () => {
-    expect(stageOf(FRESH)).toBe('loading');
-    expect(stageOf({ ...FRESH, modelPieces: { loaded: 20, total: 21 } })).toBe('loading');
-  });
-
-  it('is listening as soon as there is a clock, which is a later prime', () => {
-    expect(stageOf({ ...FRESH, listenedSeconds: 0 })).toBe('listening');
-  });
-
-  it('is separating once a whole window has been heard', () => {
-    const facts = { ...FRESH, listenedSeconds: WINDOW_SECONDS, separatingSeconds: 0 };
-
-    expect(stageOf(facts)).toBe('separating');
-  });
-
-  it('is filling once the first block has fixed the delay', () => {
-    const facts = {
-      ...FRESH,
-      listenedSeconds: WINDOW_SECONDS,
-      separatingSeconds: 8,
-      fillingSeconds: 0,
-    };
-
-    expect(stageOf(facts)).toBe('filling');
+  it('reads the first thing that has not finished', () => {
+    expect(stageOf(facts())).toBe('download');
+    expect(stageOf(facts({ pieces: { loaded: 1, total: 21 } }))).toBe('loading');
+    expect(
+      stageOf(facts({ pieces: { loaded: 21, total: 21 }, windowsTotal: 9, windowsDone: 0 })),
+    ).toBe('separating');
   });
 });
 
-describe('prepareProgress', () => {
-  it('counts the model out of its pieces, across the first slice', () => {
-    expect(prepareProgress(FRESH).fraction).toBe(0);
-    expect(
-      prepareProgress({ ...FRESH, modelPieces: { loaded: 21, total: 21 } }).fraction,
-    ).toBeCloseTo(0.45, 9);
-    expect(
-      prepareProgress({ ...FRESH, modelPieces: { loaded: 7, total: 21 } }).fraction,
-    ).toBeCloseTo(0.15, 9);
+describe('the download', () => {
+  it('is a ratio of bytes when the length is known', () => {
+    const progress = prepareProgress(
+      facts({ download: { doneBytes: 250, totalBytes: 1000 } }),
+    );
+
+    expect(progress.fraction).toBeCloseTo(0.025);
   });
 
-  it('starts a later prime at the listening stage, with the model behind it', () => {
-    const later = prepareProgress({ ...FRESH, listenedSeconds: 0, timings: MEASURED });
+  it('creeps towards its edge when the length is not known, and never arrives', () => {
+    const atStart = prepareProgress(facts({ download: { doneBytes: 10, totalBytes: null } }));
+    const later = prepareProgress(
+      facts({ download: { doneBytes: 10, totalBytes: null }, elapsedSeconds: 30 }),
+    );
 
-    expect(later.stage).toBe('listening');
-    expect(later.fraction).toBeCloseTo(0.45, 9);
-  });
-
-  it('fills the listening slice with the audio the separator needs', () => {
-    const half = prepareProgress({ ...FRESH, listenedSeconds: WINDOW_SECONDS / 2 });
-
-    expect(half.fraction).toBeCloseTo(0.575, 9);
-  });
-
-  it('approaches the separating slice without ever sitting on its edge', () => {
-    const at = (seconds: number): number =>
-      prepareProgress({
-        ...FRESH,
-        listenedSeconds: WINDOW_SECONDS,
-        separatingSeconds: seconds,
-      }).fraction;
-
-    expect(at(0)).toBeCloseTo(0.7, 9);
-    // At the guess it is most of the way across, and at four times the guess
-    // it is still moving: a machine slower than the guess never sees a bar
-    // that has stopped.
-    expect(at(5.85)).toBeGreaterThan(0.82);
-    expect(at(5.85)).toBeLessThan(0.85);
-    expect(at(23.4)).toBeLessThan(0.85);
-    expect(at(23.4)).toBeGreaterThan(at(11.7));
-    expect(at(11.7)).toBeGreaterThan(at(5.85));
-  });
-
-  it('reaches one exactly when the first block is due', () => {
-    const done = prepareProgress({
-      ...FRESH,
-      listenedSeconds: WINDOW_SECONDS,
-      separatingSeconds: 8,
-      fillingSeconds: 1.5,
-      fillSeconds: 1.5,
-    });
-
-    expect(done.stage).toBe('filling');
-    expect(done.fraction).toBe(1);
-  });
-
-  it('never leaves the bar, whatever it is handed', () => {
-    const silly = prepareProgress({
-      ...FRESH,
-      modelPieces: { loaded: 99, total: 0 },
-      loadingSeconds: Number.NaN,
-    });
-
-    expect(silly.fraction).toBeGreaterThanOrEqual(0);
-    expect(silly.fraction).toBeLessThanOrEqual(1);
+    expect(atStart.fraction).toBeCloseTo(0);
+    expect(later.fraction).toBeGreaterThan(atStart.fraction);
+    expect(later.fraction).toBeLessThan(STAGE_WEIGHTS.download);
   });
 });
 
-describe('the estimate', () => {
-  it('is nothing at all on a machine that has never done this', () => {
-    expect(prepareProgress(FRESH).aboutSeconds).toBeNull();
-    expect(prepareProgress({ ...FRESH, listenedSeconds: 1 }).aboutSeconds).toBeNull();
+describe('loading the model', () => {
+  it('is a ratio of pieces, and says how many', () => {
+    const progress = prepareProgress(facts({ pieces: { loaded: 7, total: 21 } }));
+
+    expect(progress.stage).toBe('loading');
+    expect(progress.pieces).toEqual({ loaded: 7, total: 21 });
+    expect(progress.fraction).toBeCloseTo(0.1 + 0.4 * (7 / 21));
+    expect(prepareLabel(progress)).toBe('Loading the model, 7 of 21');
+  });
+});
+
+describe('separating', () => {
+  it('is a ratio of windows, and reports the count it is waiting on', () => {
+    const progress = prepareProgress(
+      facts({ windowsTotal: 40, windowsDone: 10, timings: { ...NO_TIMINGS, windowMs: 1000 } }),
+    );
+
+    expect(progress.stage).toBe('separating');
+    expect(progress.fraction).toBeCloseTo(0.5 + 0.5 * 0.25);
+    expect(prepareLabel(progress)).toBe('Taking the vocal out');
   });
 
-  it('totals what is left here with what the stages ahead have cost', () => {
-    const facts = { ...FRESH, listenedSeconds: 0, timings: MEASURED };
+  it('offers a time only once a window has actually been timed', () => {
+    const unmeasured = prepareProgress(facts({ windowsTotal: 40, windowsDone: 10 }));
+    const measured = prepareProgress(
+      facts({ windowsTotal: 40, windowsDone: 10, timings: { ...NO_TIMINGS, windowMs: 500 } }),
+    );
 
-    // 7.8 s of audio still to hear, then eight seconds of separating and a
-    // second and a half of waiting, all of them measured.
-    expect(prepareProgress(facts).aboutSeconds).toBeCloseTo(17.3, 6);
+    expect(unmeasured.aboutSeconds).toBeNull();
+    expect(measured.aboutSeconds).toBeCloseTo(15);
+    expect(aboutText(measured)).toBe('about 15 s left');
   });
 
-  it('is exact in the last stage, even the first time through', () => {
-    const facts = { ...FRESH, listenedSeconds: 8, separatingSeconds: 8, fillingSeconds: 0.5 };
+  it('says a second rather than zero when there is almost none left', () => {
+    const progress = prepareProgress(
+      facts({ windowsTotal: 10, windowsDone: 9, timings: { ...NO_TIMINGS, windowMs: 200 } }),
+    );
 
-    expect(prepareProgress(facts).aboutSeconds).toBeCloseTo(1, 9);
+    expect(aboutText(progress)).toBe('about a second left');
   });
 
-  it('goes missing again when the stage ahead has not been timed', () => {
-    const half: StageSeconds = { ...MEASURED, separating: null };
-    const facts = { ...FRESH, listenedSeconds: 0, timings: half };
+  it('has no estimate at all before the plan is known, however the machine was timed', () => {
+    const progress = prepareProgress(
+      facts({ pieces: { loaded: 3, total: 21 }, timings: { ...NO_TIMINGS, windowMs: 500 } }),
+    );
 
-    expect(prepareProgress(facts).aboutSeconds).toBeNull();
-  });
-
-  it('says about, because that is what a measured average is', () => {
-    const facts = { ...FRESH, listenedSeconds: 0, timings: MEASURED };
-
-    expect(aboutText(prepareProgress(facts))).toBe('about 17 s left');
-    expect(aboutText(prepareProgress(FRESH))).toBeNull();
-  });
-
-  it('does not say nought seconds when there is a moment left', () => {
-    const facts = { ...FRESH, listenedSeconds: 8, separatingSeconds: 8, fillingSeconds: 1.49 };
-
-    expect(aboutText(prepareProgress(facts))).toBe('about a second left');
+    expect(progress.aboutSeconds).toBeNull();
+    expect(aboutText(progress)).toBeNull();
   });
 });
 
 describe('advanceProgress', () => {
-  it('lets the bar climb', () => {
-    const first = prepareProgress({ ...FRESH, modelPieces: { loaded: 2, total: 21 } });
-    const second = prepareProgress({ ...FRESH, modelPieces: { loaded: 9, total: 21 } });
+  it('never lets the bar retreat, because a measured wobble reads as a fault', () => {
+    const first = prepareProgress(facts({ windowsTotal: 10, windowsDone: 5 }));
+    const second = prepareProgress(facts({ windowsTotal: 10, windowsDone: 4 }));
 
-    expect(advanceProgress(first, second).fraction).toBe(second.fraction);
+    expect(advanceProgress(first, second).fraction).toBe(first.fraction);
+    // Everything else still comes from the new measurement.
+    expect(advanceProgress(first, second).stage).toBe('separating');
   });
 
-  it('refuses to let it fall back, whatever the measurements do', () => {
-    const ahead = prepareProgress({
-      ...FRESH,
-      listenedSeconds: WINDOW_SECONDS,
-      separatingSeconds: 20,
-    });
-    const behind = prepareProgress({
-      ...FRESH,
-      listenedSeconds: WINDOW_SECONDS,
-      separatingSeconds: 1,
-    });
-    const held = advanceProgress(ahead, behind);
+  it('starts from wherever it is given when there is nothing before it', () => {
+    const next = prepareProgress(facts({ windowsTotal: 10, windowsDone: 5 }));
 
-    expect(held.fraction).toBe(ahead.fraction);
-    // The stage is still whatever is really happening; only the bar is held.
-    expect(held.stage).toBe(behind.stage);
-  });
-
-  it('starts again from nothing when a reset passes null', () => {
-    const anywhere = prepareProgress({ ...FRESH, listenedSeconds: 4 });
-    const fresh = prepareProgress({ ...FRESH, listenedSeconds: 0 });
-
-    expect(advanceProgress(null, fresh).fraction).toBe(fresh.fraction);
-    expect(advanceProgress(anywhere, fresh).fraction).toBe(anywhere.fraction);
-  });
-});
-
-describe('prepareLabel', () => {
-  it('names the pieces, because that is the slow part and it is countable', () => {
-    const loading = prepareProgress({ ...FRESH, modelPieces: { loaded: 3, total: 21 } });
-
-    expect(prepareLabel(loading)).toBe('Loading the model, 3 of 21');
-  });
-
-  it('says what each of the other stages is waiting for', () => {
-    expect(prepareLabel(prepareProgress({ ...FRESH, listenedSeconds: 1 }))).toBe(
-      'Listening to the first few seconds',
-    );
-    expect(
-      prepareLabel(
-        prepareProgress({ ...FRESH, listenedSeconds: WINDOW_SECONDS, separatingSeconds: 1 }),
-      ),
-    ).toBe('Taking the vocal out');
-    expect(
-      prepareLabel(
-        prepareProgress({
-          ...FRESH,
-          listenedSeconds: WINDOW_SECONDS,
-          separatingSeconds: 8,
-          fillingSeconds: 0.2,
-        }),
-      ),
-    ).toBe('Filling the delay');
+    expect(advanceProgress(null, next)).toBe(next);
   });
 });
 
 describe('progressPercent', () => {
-  it('is a whole percentage, for a style and for aria', () => {
+  it('is a whole number for a style and for aria', () => {
     expect(progressPercent(0)).toBe(0);
-    expect(progressPercent(0.456)).toBe(46);
+    expect(progressPercent(0.754)).toBe(75);
     expect(progressPercent(1)).toBe(100);
   });
 
-  it('stays on the bar', () => {
+  it('clamps rather than letting a bad measurement widen the bar', () => {
+    expect(progressPercent(-2)).toBe(0);
     expect(progressPercent(4)).toBe(100);
-    expect(progressPercent(-1)).toBe(0);
     expect(progressPercent(Number.NaN)).toBe(0);
   });
 });

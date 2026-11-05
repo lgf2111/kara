@@ -2,16 +2,13 @@
  * The key control: what it is allowed to be, what a button press makes of it,
  * and what it is called on screen.
  *
- * The shift itself is `apps/web/src/dsp/pitch-shift.ts`, shared with the web
- * app, and the limit here is a copy of its `QUALITY_SEMITONES` rather than an
- * import of it: the panel and the popup are built into the content script and
- * a page, and neither has any business pulling a Fourier transform in to find
- * out what a button should say. `test/key.test.ts` holds the two sides to the
- * same number.
- *
- * Whole semitones, because every surface that sets this is a pair of buttons
- * and the shifter is happy with fractions nobody can ask for. Six either way,
- * because that is where a phase vocoder stops sounding like the song.
+ * The shift itself is the Signalsmith Stretch worklet the offscreen document
+ * puts after the player; the limit here is a product choice rather than an
+ * import of the library's own range. Six either way is where a key change is
+ * still useful for singing, and it keeps the control to whole steps on a
+ * pair of buttons. The panel and the popup are built into the content script
+ * and a page, and neither needs to load a pitch-shifting library to find out
+ * what a button should say.
  *
  * Pure, so the words are the test.
  */

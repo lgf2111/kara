@@ -19,6 +19,13 @@ const RATE = 44100;
 const MIX = 0.5;
 
 /**
+ * How each source is scaled against the input, in `SOURCES` order. The three
+ * backing sources add up to {@link MIX}, so the pair the old player reads and
+ * the four the mixer reads describe the same separation.
+ */
+const STEM_SCALE = [0.1, 0.2, 0.2, 1] as const;
+
+/**
  * Stands in for the model: hands the vocal straight back and returns an
  * instrumental at half the amplitude. Whatever comes out of the stitching then
  * says exactly which input samples it was made of.
@@ -44,6 +51,15 @@ function fakeRunner(segmentSamples: number): SegmentRunner & { readonly windows:
         vocals[frame * 2 + 1] = r;
         instrumental[frame * 2] = l * MIX;
         instrumental[frame * 2 + 1] = r * MIX;
+        for (let index = 0; index < stems.length; index += 1) {
+          const stem = stems[index];
+          const scale = STEM_SCALE[index];
+          if (stem === undefined || scale === undefined) {
+            continue;
+          }
+          stem[frame * 2] = l * scale;
+          stem[frame * 2 + 1] = r * scale;
+        }
       }
       return Promise.resolve({
         stems,
@@ -129,8 +145,33 @@ function sink(length: number, offset = 0): Sink {
   };
 }
 
-function maxError(actual: Float32Array, wanted: Float32Array): number {
-  let worst = 0;
+/** Lays every separate source back down, for a test of the mixer's blocks. */
+function stemSink(length: number): {
+  readonly onBlock: (block: StreamBlock) => void;
+  readonly stems: [Float32Array, Float32Array][];
+} {
+  const stems: [Float32Array, Float32Array][] = SOURCES.map(() => [
+    new Float32Array(length),
+    new Float32Array(length),
+  ]);
+  return {
+    stems,
+    onBlock(block) {
+      const pairs = block.stems ?? [];
+      for (let index = 0; index < pairs.length; index += 1) {
+        const pair = pairs[index];
+        const into = stems[index];
+        if (pair === undefined || into === undefined) {
+          continue;
+        }
+        into[0].set(pair[0], block.startSample);
+        into[1].set(pair[1], block.startSample);
+      }
+    },
+  };
+}
+
+function maxError(actual: Float32Array, wanted: Float32Array): number {  let worst = 0;
   for (let index = 0; index < wanted.length; index += 1) {
     worst = Math.max(worst, Math.abs((actual[index] ?? 0) - (wanted[index] ?? 0)));
   }
@@ -193,6 +234,66 @@ describe('createStreamingSeparator', () => {
     expect(maxError(collected.vocals[1], right)).toBeLessThan(1e-6);
     expect(maxError(collected.instrumental[0], scaled(left, MIX))).toBeLessThan(1e-6);
     expect(maxError(collected.instrumental[1], scaled(right, MIX))).toBeLessThan(1e-6);
+  });
+
+  it('stitches every source separately when a mixer asks for them', async () => {
+    const total = 103;
+    const left = sine(total, 0.05);
+    const right = sine(total, 0.05, Math.PI / 3);
+    const collected = stemSink(total);
+    const separator = createStreamingSeparator({
+      runner: fakeRunner(SEGMENT),
+      onBlock: collected.onBlock,
+      windowSamples: WINDOW,
+      hopSamples: HOP,
+      stems: 'all',
+    });
+
+    await pushAll(separator, left, right, [7, 1, 13, 2, 41, 3]);
+    await separator.flush();
+
+    for (let index = 0; index < SOURCES.length; index += 1) {
+      const pair = collected.stems[index];
+      const scale = STEM_SCALE[index] ?? 0;
+      expect(pair, SOURCES[index]).toBeDefined();
+      if (pair === undefined) {
+        continue;
+      }
+      expect(maxError(pair[0], scaled(left, scale))).toBeLessThan(1e-6);
+      expect(maxError(pair[1], scaled(right, scale))).toBeLessThan(1e-6);
+    }
+
+    // The three backing sources are the pair's instrumental, which is what
+    // makes the four gains and the old karaoke path one separation.
+    const [drums, bass, other] = collected.stems;
+    if (drums === undefined || bass === undefined || other === undefined) {
+      throw new Error('the separator did not return all the backing stems');
+    }
+    for (let frame = 0; frame < total; frame += 1) {
+      expect(
+        (drums[0][frame] ?? 0) + (bass[0][frame] ?? 0) + (other[0][frame] ?? 0),
+      ).toBeCloseTo(scaled(left, MIX)[frame] ?? 0, 6);
+    }
+  });
+
+  it('leaves the separate sources out when only the pair was asked for', async () => {
+    const total = 40;
+    const signal = sine(total, 0.05);
+    const blocks: StreamBlock[] = [];
+    const separator = createStreamingSeparator({
+      runner: fakeRunner(SEGMENT),
+      onBlock: (block) => blocks.push(block),
+      windowSamples: WINDOW,
+      hopSamples: HOP,
+    });
+
+    await pushAll(separator, signal, signal, [9]);
+    await separator.flush();
+
+    expect(blocks.length).toBeGreaterThan(0);
+    for (const block of blocks) {
+      expect(block.stems).toBeUndefined();
+    }
   });
 
   it('runs the same windows the file pipeline would for the same audio', async () => {

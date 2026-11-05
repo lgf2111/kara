@@ -1,74 +1,96 @@
 import { KEY_DEFAULT } from './audio/key.ts';
+import type { MediaSample } from './audio/media-time.ts';
 import type { PlayMode } from './audio/mix-gain.ts';
 import type { PrepareProgress } from './audio/progress.ts';
 import type { Status } from './audio/status.ts';
-import { DEFAULT_SETTINGS, type OnReady } from './settings.ts';
+import { IDLE_DUET, type DuetMix, type DuetStatus } from './audio/duet.ts';
+import { DEFAULT_MIX, type StemMix } from './audio/stems.ts';
+import type { Backend } from '../../web/src/separation/protocol.ts';
+import type { StreamInfo } from './stream/player.ts';
 
 /**
  * What the four scopes of this extension say to each other.
  *
  * There are four, not two: the service worker owns the tab, the popup owns the
- * user gesture, the offscreen document owns the audio, and the content script
- * owns the page. `chrome.runtime.sendMessage` broadcasts to all of them at
- * once, so every message is wrapped in an envelope that names who it is for
- * and which tab it belongs to. The service worker is the only one that routes.
+ * person's click, the offscreen document owns the audio, and the content
+ * script owns the page. `chrome.runtime.sendMessage` broadcasts to all of them
+ * at once, so every message is wrapped in an envelope that names who it is
+ * for and which tab it belongs to. The service worker is the only one that
+ * routes.
  *
  * Commands travel towards the audio, reports travel back, and requests go to
  * the service worker for the two things only it can do. Nothing in here
  * carries audio: the stems never leave the offscreen document.
  */
 
+export type { MediaSample } from './audio/media-time.ts';
 export type { PlayMode } from './audio/mix-gain.ts';
 export type { PrepareProgress, PrepareStage } from './audio/progress.ts';
 export type { Status } from './audio/status.ts';
-export type { OnReady } from './settings.ts';
+export type { DuetMix, DuetPhase, DuetProgress, DuetState, DuetStatus } from './audio/duet.ts';
 
 export type Side = 'background' | 'offscreen' | 'tab';
 
 /**
- * Why a reset was asked for. All of them mean the buffer is worthless, which
- * is the point of the list: a pause is not on it.
+ * The audio stream of the video being watched, as the page reported it.
  *
- * A separated block belongs to the timeline it was captured on. Jumping
- * somewhere else in the video, changing the rate, reaching the end, crossing
- * an ad boundary or loading another video all put the person on a different
- * timeline, and everything in flight was captured on the old one. Pausing does
- * none of that — the audio either side of a pause is the same song with
- * nothing missing between it — so pausing holds instead.
+ * The shape is owned by `src/stream/player.ts`, which the MAIN world script
+ * and this file both import; the page can say anything in one of these, so
+ * every receiver checks the fields it reads.
  */
-export type ResetReason = 'seek' | 'ratechange' | 'navigation' | 'ended' | 'ad';
+export type { StreamInfo };
 
 export type Command =
+  /**
+   * Read the stream, separate it, and hold the stems for the toggle. The
+   * stream is what the page reported for the tab being started.
+   */
   | {
       readonly type: 'start';
-      readonly streamId: string;
+      readonly stream: StreamInfo;
       readonly tabId: number;
       /** The remembered default key. The offscreen document cannot read storage. */
       readonly key?: number;
     }
   | { readonly type: 'stop' }
-  | { readonly type: 'reset'; readonly reason: ResetReason }
-  /** The page paused: freeze the output where it is and keep everything. */
-  | { readonly type: 'hold' }
-  /** And carry on from the same sample, with the same delay. */
-  | { readonly type: 'resume' }
+  /** The vocal switch: the video's own sound, or the stems in its place. */
   | { readonly type: 'mode'; readonly mode: PlayMode }
-  | { readonly type: 'guide'; readonly level: number }
   /**
-   * The key, in semitones. It belongs to the capture rather than to the
-   * timeline, so a seek, a pause or an ad leaves it exactly where the person
-   * put it; only another one of these moves it.
+   * The four slider positions and their mute and solo switches. The whole mix
+   * travels rather than a patch, so a status report can never disagree with
+   * what the player is doing.
+   */
+  | { readonly type: 'mix'; readonly mix: StemMix }
+  /**
+   * The opt-in second pass: split the vocal stem into Voice 1 and Voice 2.
+   * The normal mixer stays usable while this runs.
+   */
+  | { readonly type: 'duet-start' }
+  /** The two voice levels, in Voice 1 / Voice 2 order. */
+  | { readonly type: 'duet-mix'; readonly mix: DuetMix }
+  /** Exchange which separated stream is called Voice 1. */
+  | { readonly type: 'duet-swap' }
+  /**
+   * Teach the helper that a moment in the song is one singer. The engine
+   * sends a three-second window around `seconds`; the helper re-renders.
+   */
+  | { readonly type: 'duet-anchor'; readonly voice: 1 | 2; readonly seconds: number }
+  /** Put the single vocal row back and forget the pair. */
+  | { readonly type: 'duet-clear' }
+  /**
+   * The key, in semitones. It belongs to the session rather than to the
+   * video, so a seek, a pause or an ad leaves it exactly where the person put
+   * it; only another one of these moves it.
    */
   | { readonly type: 'key'; readonly semitones: number }
   /**
-   * Whether to play the tab's own audio, undelayed, while priming. The
-   * `continue` setting turns it on for every prime; an ad turns it on for the
-   * ad's duration, because capture has muted the tab and the ad would
-   * otherwise be silent.
+   * Where the page is in the song, about four times a second and on every
+   * media event. The stems are anchored to these, which is how a seek, a
+   * pause and an ad all reach the audio without commands of their own.
    */
-  | { readonly type: 'passthrough'; readonly enabled: boolean }
-  /** What to do at the moment the delayed audio is ready. */
-  | { readonly type: 'on-ready'; readonly onReady: OnReady };
+  | { readonly type: 'media'; readonly sample: MediaSample }
+  /** Send the debug state back, for the popup's copy button. */
+  | { readonly type: 'debug' };
 
 /**
  * Every command's name, as a record rather than a list so that adding one to
@@ -77,14 +99,16 @@ export type Command =
 const COMMANDS: Readonly<Record<Command['type'], true>> = {
   start: true,
   stop: true,
-  reset: true,
-  hold: true,
-  resume: true,
   mode: true,
-  guide: true,
+  mix: true,
+  'duet-start': true,
+  'duet-mix': true,
+  'duet-swap': true,
+  'duet-anchor': true,
+  'duet-clear': true,
   key: true,
-  passthrough: true,
-  'on-ready': true,
+  media: true,
+  debug: true,
 };
 
 /** Whether a body is for the audio side, which is the only side that acts. */
@@ -95,60 +119,47 @@ export function isCommand(body: Body): body is Command {
 /**
  * What the page and the popup ask of the service worker, which owns the tab.
  *
- * Starting carries a stream id when whoever asked was able to get one.
- * `chrome.tabCapture.getMediaStreamId` is granted off the back of a gesture in
- * an extension context, which a click in the popup is and a click inside the
- * page is not, so the popup fetches the id itself and passes it on. A page
- * that asks without one has the service worker try on its behalf, which it
- * will almost always be refused; then the panel is told to point at the
- * toolbar. Trying rather than assuming means the panel's own button starts
- * working by itself on the day Chrome allows it.
+ * Starting carries no permission and no gesture any more: the audio is read
+ * from the stream the page itself reported, so a click anywhere — the popup
+ * or the panel in the page — can start it. The service worker refuses, with
+ * words, when the page has not reported a stream for that tab yet.
  */
 export type Request =
   | {
       readonly type: 'request-start';
-      /** From the popup's own gesture, or null when the page asked. */
-      readonly streamId: string | null;
-      /** The tab to capture, or null to mean the one that sent this. */
+      /** The tab to start, or null to mean the one that sent this. */
       readonly tabId: number | null;
     }
-  | { readonly type: 'request-stop' };
+  | { readonly type: 'request-stop' }
+  /** The page found the audio stream of the video it is watching. */
+  | { readonly type: 'request-stream'; readonly stream: StreamInfo };
 
 export interface Metrics {
-  /** The delay the player settled on, or null while priming. */
-  readonly delaySeconds: number | null;
-  /** How late the last block actually was, measured on the capture clock. */
-  readonly measuredLagMs: number | null;
-  /** How late the separator said it would be. */
-  readonly reportedLagMs: number | null;
+  /** Where the stems are playing in the song, or null before they are. */
+  readonly mediaSeconds: number | null;
+  /** The frame the player is reading, or -1 while it is playing nothing. */
+  readonly playFrame: number;
+  /** Frames of stem the player holds. */
+  readonly stemFrames: number;
+  /** Windows separated, and the whole number of them. */
+  readonly windowsDone: number;
+  readonly windowsTotal: number;
   /** Median milliseconds one window costs to separate. */
   readonly computeMs: number | null;
-  /** Captured samples no finalised block covers yet. */
-  readonly bufferSamples: number;
-  readonly blocks: number;
-  readonly underrunFrames: number;
-  readonly lateFrames: number;
-  readonly gapFrames: number;
-  readonly queuedFrames: number;
-  /** Seconds the output has spent frozen by a pause since the last reset. */
-  readonly heldSeconds: number;
-  /** Where the capture stamps have drifted from the sample count. */
-  readonly driftMs: number;
+  /** Where the download has got to, for the report. */
+  readonly downloadBytes: number;
+  readonly downloadTotal: number | null;
 }
 
 export const NO_METRICS: Metrics = {
-  delaySeconds: null,
-  measuredLagMs: null,
-  reportedLagMs: null,
+  mediaSeconds: null,
+  playFrame: -1,
+  stemFrames: 0,
+  windowsDone: 0,
+  windowsTotal: 0,
   computeMs: null,
-  bufferSamples: 0,
-  blocks: 0,
-  underrunFrames: 0,
-  lateFrames: 0,
-  gapFrames: 0,
-  queuedFrames: 0,
-  heldSeconds: 0,
-  driftMs: 0,
+  downloadBytes: 0,
+  downloadTotal: null,
 };
 
 export interface StatusReport {
@@ -156,27 +167,34 @@ export interface StatusReport {
   readonly status: Status;
   readonly reason: string | null;
   /**
-   * How far along getting ready is, or null when it is not. There is no
+   * How far along preparing is, or null when it is not. There is no
    * countdown here on purpose: `audio/progress.ts` says why.
    */
   readonly prepare: PrepareProgress | null;
   /**
-   * Why it is preparing again, when this is not the first time. The panel says
-   * so, because a bar that starts over with no explanation reads as a crash.
+   * Whether the separated stems reach the point the video is at. They become
+   * usable before the whole track is done — as soon as the frontier passes
+   * the playhead — which is what lets the vocal switch come alive early.
    */
-  readonly reprime: ResetReason | null;
-  readonly delaySeconds: number | null;
-  /**
-   * Seconds the output has been frozen by pauses since the last reset. The
-   * picture is behind the page by `delaySeconds + heldSeconds`, and this is
-   * the second and last number that has to cross between the two halves.
-   */
-  readonly heldSeconds: number;
+  readonly covered: boolean;
+  /** Which sound is playing: the video's own, or the stems. */
   readonly mode: PlayMode;
-  readonly guide: number;
-  /** The key the capture is being played in, in whole semitones. */
+  /** Slider positions and mute/solo switches for all four stems. */
+  readonly mix: StemMix;
+  /** The opt-in Voice 1 / Voice 2 pair, or off before anyone asks. */
+  readonly duet?: DuetStatus;
+  /** The key the stems are played in, in whole semitones. */
   readonly semitones: number;
-  readonly onReady: OnReady;
+  /**
+   * How many seconds from the start have their stems ready. Separation runs
+   * from the beginning outwards, so this is a prefix rather than a list of
+   * ranges; the page draws it on the progress bar. Null before any block.
+   */
+  readonly analyzedSeconds: number | null;
+  /** Which video the stems belong to, or null with nothing prepared. */
+  readonly videoId: string | null;
+  /** The song's length, in seconds, or null with nothing prepared. */
+  readonly durationSeconds: number | null;
 }
 
 export interface MetricsReport {
@@ -184,16 +202,27 @@ export interface MetricsReport {
   readonly metrics: Metrics;
 }
 
-/**
- * Something only the person can do. There is one of these, and it exists
- * because of where Chrome puts the user gesture for a tab capture.
- */
-export interface HintReport {
-  readonly type: 'hint';
-  readonly hint: 'toolbar';
+/** What the offscreen document knows, for the popup's copy button. */
+export interface PipelineDebug {
+  readonly atMs: number;
+  readonly status: Status;
+  readonly reason: string | null;
+  readonly sampleRate: number;
+  readonly metrics: Metrics;
+  readonly videoId: string | null;
+  readonly durationSeconds: number | null;
+  /** Which backend separated the track, once the model has loaded. */
+  readonly backend: Backend | null;
+  /** Why that backend was chosen, in the policy's own words. */
+  readonly backendReason: string | null;
 }
 
-export type Report = StatusReport | MetricsReport | HintReport;
+export interface DebugReportMessage {
+  readonly type: 'debug-log';
+  readonly pipeline: PipelineDebug;
+}
+
+export type Report = StatusReport | MetricsReport | DebugReportMessage;
 
 export type Body = Command | Report | Request;
 
@@ -203,7 +232,7 @@ const TAG = 'kara/1';
 export interface Packet {
   readonly kara: typeof TAG;
   readonly to: Side;
-  /** The captured tab, or null for a message that belongs to no tab. */
+  /** The tab it belongs to, or null for a message that belongs to no tab. */
   readonly tabId: number | null;
   readonly body: Body;
 }
@@ -224,9 +253,17 @@ export function packet(to: Side, body: Body, tabId: number | null = null): Packe
  */
 export const STATUS_KEY = 'kara.status';
 
+/** And where the last debug state is left, for the same reason. */
+export const DEBUG_KEY = 'kara.debug';
+
 export interface StoredStatus {
   readonly tabId: number | null;
   readonly report: StatusReport;
+}
+
+export interface StoredDebug {
+  readonly tabId: number | null;
+  readonly pipeline: PipelineDebug;
 }
 
 /** A received message, if it is ours and addressed to this side. */
@@ -247,26 +284,12 @@ export const IDLE_REPORT: StatusReport = {
   status: 'idle',
   reason: null,
   prepare: null,
-  reprime: null,
-  delaySeconds: null,
-  heldSeconds: 0,
-  mode: 'instrumental',
-  guide: 0,
+  covered: false,
+  mode: 'original',
+  mix: DEFAULT_MIX,
+  duet: IDLE_DUET,
   semitones: KEY_DEFAULT,
-  onReady: DEFAULT_SETTINGS.onReady,
+  analyzedSeconds: null,
+  videoId: null,
+  durationSeconds: null,
 };
-
-/** What one separated block came to, for the debug harness and the metrics. */
-export interface BlockStat {
-  readonly startSample: number;
-  readonly frames: number;
-  /** Context time the block's first sample was captured at. */
-  readonly captureTime: number;
-  /** Context time it is due to be heard. */
-  readonly playTime: number;
-  /** Context time it came back from the separator. */
-  readonly arrivedAt: number;
-  /** Root mean square of a sparse sample of each pair, to prove it has audio. */
-  readonly vocalsRms: number;
-  readonly instrumentalRms: number;
-}

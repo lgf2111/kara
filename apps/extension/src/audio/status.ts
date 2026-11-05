@@ -1,54 +1,45 @@
 /**
  * The six things this extension can be doing, and what moves it between them.
  *
- * - `idle`: nothing is captured. The tab plays to the person as it always did.
- * - `priming`: the tab is captured and muted, the separator is filling its
- *   first windows, and there is nothing yet to play. `progress.ts` is how long
- *   that is and how far along it is.
- * - `live`: separated audio is coming out, delayed by the agreed amount.
- * - `paused`: the page is paused, so the output and the picture are frozen
- *   where they are. Nothing has been thrown away, and a resume carries on from
- *   the same sample with the same delay.
- * - `unsupported`: this machine cannot run the model fast enough to be live at
- *   all. There is no WASM fallback here, so this is a dead end with a reason.
+ * - `idle`: nothing is running. The video plays as it always did.
+ * - `preparing`: the video's audio is being read, decoded and separated. The
+ *   video itself plays on untouched — there is nothing different to hear yet.
+ *   `progress.ts` is how far along that is.
+ * - `ready`: the stems are separated and held in memory. The vocal toggle is
+ *   live: `original` plays the video's own sound, `instrumental` mutes the
+ *   video and plays the stems in its place, synced to the video's clock. Seek
+ *   anywhere, any time: the whole track is in hand.
+ * - `paused`: the video paused, so the stems hold where they are. Nothing is
+ *   lost, and a resume carries on from the same place.
+ * - `unsupported`: the audio could not be read, or this machine cannot run the
+ *   model. A dead end with a reason.
  * - `error`: something went wrong that a retry might survive.
  *
- * Three things in the table are worth saying out loud.
- *
- * `unsupported` does not answer to anything but `stop`, because a missing
- * WebGPU adapter is a fact about the machine and pressing the button again
- * will not change it.
- *
- * `reset` is ignored unless something was running, so a stray seek event from
- * a tab nobody is capturing cannot start a prime.
- *
- * And `paused` remembers what it was doing, because a pause in the middle of
- * priming has to go back to priming and a pause in the middle of a song has to
- * go back to the song. That is the whole reason this state exists rather than
- * being a reset: a pause used to throw the buffer away and prime the entire
- * delay again, which is eighteen seconds of silence for a click on the video.
+ * The old design had seven states because it had a delay to defend: priming,
+ * live, catching up. All three are gone. There is nothing to catch up to and
+ * no arrival to wait for, so preparing goes straight to ready, and a pause is
+ * the only other state a running session can be in.
  *
  * Pure, so the table is the test.
  */
 
-export type Status = 'idle' | 'priming' | 'live' | 'paused' | 'unsupported' | 'error';
+export type Status = 'idle' | 'preparing' | 'ready' | 'paused' | 'unsupported' | 'error';
 
 export interface StatusState {
   readonly status: Status;
   /** Why, in words, for `unsupported` and `error`. Null otherwise. */
   readonly reason: string | null;
   /** What a resume goes back to. Only ever set while paused. */
-  readonly resumeTo?: 'priming' | 'live';
+  readonly resumeTo?: 'ready';
 }
 
 export type StatusEvent =
   | { readonly type: 'start' }
-  /** The first separated audio reached the player. */
-  | { readonly type: 'primed' }
-  /** A seek, a rate change or an ad: what is buffered is worthless. */
-  | { readonly type: 'reset' }
-  /** The page paused. Everything is kept; nothing moves. */
+  /** The stems are separated and the toggle is live. */
+  | { readonly type: 'prepared' }
+  /** The video paused: the stems hold where they are. */
   | { readonly type: 'hold' }
+  /** And carry on from the same place. */
   | { readonly type: 'resume' }
   | { readonly type: 'stop' }
   | { readonly type: 'unsupported'; readonly reason: string }
@@ -56,9 +47,9 @@ export type StatusEvent =
 
 export const IDLE: StatusState = { status: 'idle', reason: null };
 
-/** Whether the capture is doing something a pause or a reset could affect. */
+/** Whether the session is doing something a media report could matter to. */
 export function isRunning(status: Status): boolean {
-  return status === 'priming' || status === 'live' || status === 'paused';
+  return status === 'preparing' || status === 'ready' || status === 'paused';
 }
 
 export function nextStatus(state: StatusState, event: StatusEvent): StatusState {
@@ -74,33 +65,25 @@ export function nextStatus(state: StatusState, event: StatusEvent): StatusState 
         ? state
         : { status: 'error', reason: event.reason };
     case 'start':
-      return state.status === 'unsupported' ? state : { status: 'priming', reason: null };
-    case 'primed':
-      if (state.status === 'paused') {
-        // The moment the first block was due went by while the page was
-        // paused. Nothing is audible yet, but a resume goes to a song now.
-        return { status: 'paused', reason: null, resumeTo: 'live' };
-      }
-      return state.status === 'priming' || state.status === 'live'
-        ? { status: 'live', reason: null }
-        : state;
-    case 'reset':
-      if (state.status === 'paused') {
-        return { status: 'paused', reason: null, resumeTo: 'priming' };
-      }
-      return state.status === 'priming' || state.status === 'live'
-        ? { status: 'priming', reason: null }
+      return state.status === 'unsupported' ? state : { status: 'preparing', reason: null };
+    case 'prepared':
+      // The stems being ready does not make a paused video play: it lands in
+      // paused with something to go back to.
+      return state.status === 'preparing' || state.status === 'paused'
+        ? state.status === 'paused'
+          ? { status: 'paused', reason: null, resumeTo: 'ready' }
+          : { status: 'ready', reason: null }
         : state;
     case 'hold':
       if (state.status === 'paused') {
         return state;
       }
-      return state.status === 'priming' || state.status === 'live'
-        ? { status: 'paused', reason: null, resumeTo: state.status }
+      return state.status === 'ready'
+        ? { status: 'paused', reason: null, resumeTo: 'ready' }
         : state;
     case 'resume':
       return state.status === 'paused'
-        ? { status: state.resumeTo ?? 'priming', reason: null }
+        ? { status: state.resumeTo ?? 'ready', reason: null }
         : state;
   }
 }
