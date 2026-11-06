@@ -48,11 +48,13 @@ import {
  * stems should be playing.
  *
  * **The key is last, after the mixing and before the output**, so it applies
- * to the instrumental and the guide vocal alike. It is a Signalsmith Stretch
- * worklet after this player, whose reported latency is the same at no shift
- * as at any shift. That constant latency is paid in the anchor: the head is
- * read `shiftSeconds` early, so the sample the video is at leaves the shifter
- * exactly when the video shows it.
+ * to the instrumental and the guide vocal alike. At the original key the sum
+ * goes straight out, because there is nothing to shift and the shifter's
+ * delay is not worth paying; at any other key it goes through a Signalsmith
+ * Stretch worklet. When the shifter is in, its reported latency is paid in
+ * the anchor: the head is read `shiftSeconds` early, so the sample the video
+ * is at leaves the shifter exactly when the video shows it. At the original
+ * key `shiftSeconds` is nought and the head is the video's position.
  */
 
 /** How long a jump's fade is, in seconds. */
@@ -320,9 +322,14 @@ class StemPlayerProcessor extends AudioWorkletProcessor {
    * and the video position implied by the current head is `head - shiftSamples`.
    *
    * A change beyond {@link JUMP_FRAMES} is a seek: fade out, land the head
-   * when the fade has, fade back in. Anything smaller is drift, and stepping
-   * it is the correction — four anchors a second mean the steps are sub-frame
-   * anyway.
+   * when the fade has, fade back in. Anything smaller is the report's own
+   * jitter, not drift, and is left alone. Four reports a second is four
+   * chances to re-aim by the few milliseconds the page's clock and its
+   * message took to arrive; stepping the head for each one repeats or skips
+   * that much audio four times a second, which is heard as a buzz. The
+   * audio clock is the same clock the video runs on, so real drift is parts
+   * per million and will be corrected by a faded jump long before it is
+   * visible.
    */
   private land(mediaSeconds: number, rate: number): void {
     this.rate = Number.isFinite(rate) && rate > 0 ? rate : 1;
@@ -334,11 +341,11 @@ class StemPlayerProcessor extends AudioWorkletProcessor {
       this.master = rampTo(this.master, 0, this.heard, JUMP_FADE_SECONDS, 'smooth');
       return;
     }
-    // A correction that lands where the video already is cancels any jump
-    // still waiting to fire, and must undo that jump's fade as well.
+    // A report that lands where the video already is cancels any jump still
+    // waiting to fire, and must undo that jump's fade as well. With no jump
+    // in flight the head is deliberately left where it is.
     const wasJumping = this.pendingJump !== null;
     this.pendingJump = null;
-    this.head = to + latency;
     if (wasJumping) {
       this.master = rampTo(this.master, this.masterTarget, this.heard, JUMP_FADE_SECONDS, 'smooth');
     }

@@ -230,14 +230,17 @@ leaves it exactly where the person put it, because none of those is a decision a
 Only another press moves it, and the popup's copy is also remembered in `chrome.storage.sync`, so
 the next song starts where the last one did.
 
-**The latency is fixed and paid in the anchor.** Signalsmith reports its own delay — 120 ms at the
-default block size — and the player reads the stems that far ahead, so the sample the video is
-showing is the sample the shifter is about to emit. The head is the video position plus the
-shifter's latency, and every number the worklet reasons about — where an anchor lands, where a jump
-lands, where the report says it is playing — is converted back to video time by subtracting it. The
-cost is that the shifter holds 120 ms of audio: a seek or pause can leave that much of the previous
-position in its buffer. It is the trade for the quality, and it is why the block size is left at the
-library's default rather than shortened.
+**The latency is paid in the anchor only when the key is shifted.** At the original key the stems
+bypass the shifter and the player reads the video's own position, so there is no delay and no
+vocoder in a path with nothing to shift. Pressing a key fades the dry path out, inserts the
+shifter, and fades it back in once its buffer holds the re-aimed audio. Signalsmith reports its own
+delay — 120 ms at the default block size — and while it is in, the player reads the stems that far
+ahead, so the sample the video is showing is the sample the shifter is about to emit. The head is
+the video position plus the shifter's latency, and every number the worklet reasons about — where
+an anchor lands, where a jump lands, where the report says it is playing — is converted back to
+video time by subtracting it. The cost is that the shifter holds 120 ms of audio: a seek or pause
+can leave that much of the previous position in its buffer. It is the trade for the quality, and
+it is why the block size is left at the library's default rather than shortened.
 
 Six semitones is a product choice, not the library's limit: the control is for singing along, and a
 key change past half an octave stops being useful long before the arithmetic stops working.
@@ -358,7 +361,7 @@ Seven parts, in the contexts Manifest V3 gives them.
 | Service worker | `src/background.ts` | The tab, the offscreen document's existence, the streams filed by video id, routing |
 | Offscreen document | `src/offscreen.ts`, `src/offscreen/engine.ts` | The `AudioContext`, the fetch, the decode, the pitch shifter, and every block on to the player |
 | Dedicated worker | `src/separation/separator.worker.ts` | The model, window by window |
-| Audio worklet | `src/worklets/stem-player.worklet.ts` | Playing the whole track at the video's clock, through the key shifter |
+| Audio worklet | `src/worklets/stem-player.worklet.ts` | Playing the whole track at the video's clock, through the key shifter when shifted |
 | Content script | `src/content.ts` | The wiring: the panel, the mute, the media reports |
 
 The pure files either side of them are where the arguing happens, and they are the ones with
@@ -592,10 +595,12 @@ repository ever sees, and they are gitignored.
   when they do.
 - **One tab at a time.** The model only fits on the GPU once, so starting a second session stops
   the first.
-- **The key shifter is high quality, but it holds 120 ms of audio.** Signalsmith Stretch is built
-  for this rather than being a hand-rolled phase vocoder, so the old smearing and hollowness are
-  gone. The delay is reported by the node and paid in the anchor, so steady playback stays in sync;
-  the cost is that a seek or pause can leave up to 120 ms of the previous position in its buffer.
+- **The key shifter is high quality, but it holds 120 ms of audio while it is in use.** Signalsmith
+  Stretch is built for this rather than being a hand-rolled phase vocoder, so the old smearing and
+  hollowness are gone. The delay is reported by the node and paid in the anchor, so steady playback
+  stays in sync; the cost is that a seek or pause can leave up to 120 ms of the previous position
+  in its buffer. The original key bypasses it entirely, so the cost is only paid while a key is
+  shifted.
   Six semitones either way is a product choice, not the library's limit — the control is for
   singing along, and a key change past half an octave stops being useful long before the arithmetic
   stops working.

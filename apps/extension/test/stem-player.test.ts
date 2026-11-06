@@ -74,6 +74,27 @@ function start(): Processor {
 }
 
 /**
+ * One stem whose every frame is its own index, so a repeated or skipped
+ * frame is visible as a jump in the output rather than as a phase change.
+ */
+function rampedStems(seconds: number): Float32Array[] {
+  const channels = Array.from(
+    { length: 8 },
+    () => new Float32Array(Math.floor(seconds * RATE)),
+  );
+  const left = channels[0];
+  const right = channels[1];
+  if (left === undefined || right === undefined) {
+    return channels;
+  }
+  for (let frame = 0; frame < left.length; frame += 1) {
+    left[frame] = frame;
+    right[frame] = frame;
+  }
+  return channels;
+}
+
+/**
  * Runs `seconds` of audio and returns the loudest sample of each quantum.
  *
  * The shifter holds everything for one 2048-sample frame, so anything asserted
@@ -169,6 +190,53 @@ describe('the stem player', () => {
     });
     const resumed = run(processor, 0.4);
     expect(loudest(resumed, quanta(0.1), resumed.length)).toBeGreaterThan(0.1);
+  });
+
+  it('ignores anchor jitter smaller than a jump, so the head does not repeat frames', () => {
+    if (ProcessorClass === null) {
+      throw new Error('the worklet did not register');
+    }
+    now = 0;
+    vi.stubGlobal('currentTime', 0);
+    const processor = new ProcessorClass();
+    command(processor, { type: 'stems', channels: rampedStems(4) });
+    command(processor, { type: 'mix', gains: [1, 0, 0, 0], seconds: 0 });
+    command(processor, { type: 'master', target: 1, seconds: 0, shape: 'linear' });
+    command(processor, { type: 'latency', samples: 0 });
+    command(processor, { type: 'playing', playing: true });
+
+    // Four reports a second, each a few milliseconds off the audio clock. The
+    // old worklet stepped the head to every one, so the ramp below repeated or
+    // skipped up to a few hundred frames at four hertz.
+    const jitter = [0.008, -0.006, 0.004, -0.009, 0.007, -0.003];
+    const anchors = jitter.map((offset, index) => ({
+      at: 0.25 * (index + 1),
+      mediaSeconds: 0.25 * (index + 1) + offset,
+    }));
+    const firstSamples: number[] = [];
+    const frames = Math.ceil((2 * RATE) / QUANTUM);
+    for (let quantum = 0; quantum < frames; quantum += 1) {
+      while (anchors.length > 0 && (anchors[0]?.at ?? Infinity) <= now) {
+        const anchor = anchors.shift();
+        if (anchor !== undefined) {
+          command(processor, { type: 'anchor', mediaSeconds: anchor.mediaSeconds, rate: 1 });
+        }
+      }
+      const left = new Float32Array(QUANTUM);
+      const right = new Float32Array(QUANTUM);
+      (globalThis as unknown as { currentTime: number }).currentTime = now;
+      processor.process([], [[left, right]]);
+      firstSamples.push(left[0] ?? 0);
+      now += QUANTUM / RATE;
+    }
+
+    // After the master's short fade, consecutive quanta differ by exactly the
+    // quantum, because no frame was repeated or skipped.
+    for (let quantum = quanta(0.1); quantum < firstSamples.length; quantum += 1) {
+      const before = firstSamples[quantum - 1] ?? 0;
+      const after = firstSamples[quantum] ?? 0;
+      expect(after - before).toBeCloseTo(QUANTUM, 3);
+    }
   });
 
   it('fades a pause to silence after the shifter has drained', () => {

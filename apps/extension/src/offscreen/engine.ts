@@ -5,7 +5,7 @@ import {
 } from '../audio/download.ts';
 import SignalsmithStretch, { type StretchNode } from 'signalsmith-stretch';
 
-import { clampKey, KEY_DEFAULT } from '../audio/key.ts';
+import { clampKey, KEY_DEFAULT, keyRoute } from '../audio/key.ts';
 import { decodeStereo } from '../audio/decode.ts';
 import { DuetClient } from '../audio/duet-client.ts';
 import { projectMediaSeconds, tidySample, type MediaSample } from '../audio/media-time.ts';
@@ -110,6 +110,12 @@ const COVER_START_LEAD_SECONDS = 1;
 
 /** How close the frontier may get before they hand the sound back. */
 const COVER_STOP_LEAD_SECONDS = 0.25;
+
+/** How long the key path takes to fade out and back in when it changes. */
+const ROUTE_FADE_SECONDS = 0.02;
+
+/** Slack over the shifter's delay before its buffer holds the new head. */
+const ROUTE_PRIME_MS = 30;
 
 export interface EngineOptions {
   readonly stream: StreamInfo;
@@ -397,18 +403,37 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     // page cannot load one, so it is pointed at the packed module instead.
     SignalsmithStretch.moduleUrl = options.pitchWorkletUrl;
     pitch = await SignalsmithStretch(context);
-    await pitch.schedule({ active: true, semitones });
   } catch (cause) {
     await context.close();
     throw cause;
   }
   const pitchLatency = await reportedLatency(pitch);
+  const route = keyRoute(semitones, pitchLatency);
+  await pitch.schedule({ active: !route.bypass, semitones });
+
+  /**
+   * The two ways out of the player, crossfaded rather than connected and
+   * disconnected. The dry path is the stems themselves; the shifter path is
+   * the same stems after the key. Only one is audible after a key settles,
+   * and the other is faded to nought.
+   */
+  const dry = new GainNode(context, { gain: route.bypass ? 1 : 0 });
+  const wet = new GainNode(context, { gain: route.bypass ? 0 : 1 });
+  player.connect(dry);
+  dry.connect(context.destination);
   player.connect(pitch);
-  pitch.connect(context.destination);
+  pitch.connect(wet);
+  wet.connect(context.destination);
   if (analyser !== null) {
-    pitch.connect(analyser);
+    dry.connect(analyser);
+    wet.connect(analyser);
   }
-  toPlayer({ type: 'latency', samples: pitchLatency });
+  let routeTarget: 'dry' | 'wet' = route.bypass ? 'dry' : 'wet';
+  let routeTurn = 0;
+  let routeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Long enough for the shifter to hold the re-aimed head, not the old one. */
+  const routePrimeMs = Math.round((pitchLatency / context.sampleRate) * 1000) + ROUTE_PRIME_MS;
+  toPlayer({ type: 'latency', samples: route.latencySamples });
 
   let stopped = false;
   let metrics: Metrics = NO_METRICS;
@@ -567,6 +592,55 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     if (active) {
       toPlayer({ type: 'anchor', mediaSeconds: position, rate: tidy.rate });
     }
+  };
+
+  /**
+   * Moves the stems between the dry path and the shifter, without a click.
+   *
+   * The two paths do not have the same delay: while the shifter is in, the
+   * player reads ahead by its latency and the shifter holds that much audio.
+   * So both gains fall to nought first, then the player is re-aimed at the
+   * new head and the new path is faded in only after it has had time to fill
+   * with the re-aimed audio. The short silence is the price of not playing a
+   * stale buffer through the new path.
+   */
+  const setRoute = (next: 'dry' | 'wet'): void => {
+    const turn = ++routeTurn;
+    routeTarget = next;
+    if (routeTimer !== null) {
+      clearTimeout(routeTimer);
+      routeTimer = null;
+    }
+    const at = context.currentTime;
+    for (const gain of [dry, wet]) {
+      gain.gain.cancelScheduledValues(at);
+      gain.gain.setValueAtTime(gain.gain.value, at);
+      gain.gain.linearRampToValueAtTime(0, at + ROUTE_FADE_SECONDS);
+    }
+    routeTimer = setTimeout(() => {
+      if (turn !== routeTurn) {
+        return;
+      }
+      const active = next === 'wet';
+      void pitch.schedule({ active, semitones }).catch(() => undefined);
+      toPlayer({ type: 'latency', samples: active ? pitchLatency : 0 });
+      // Re-aim now rather than waiting for the next quarter-second tick: the
+      // head has to move by the shifter's delay while the output is silent.
+      if (latest !== null) {
+        follow(latest);
+      }
+      routeTimer = setTimeout(() => {
+        if (turn !== routeTurn) {
+          return;
+        }
+        const now = context.currentTime;
+        const target = next === 'dry' ? dry : wet;
+        target.gain.cancelScheduledValues(now);
+        target.gain.setValueAtTime(0, now);
+        target.gain.linearRampToValueAtTime(1, now + ROUTE_FADE_SECONDS);
+        routeTimer = null;
+      }, active ? routePrimeMs : ROUTE_PRIME_MS);
+    }, ROUTE_FADE_SECONDS * 1000);
   };
 
   const setDuet = (next: Partial<DuetStatus>): void => {
@@ -1065,7 +1139,12 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
         return;
       }
       semitones = wanted;
-      sendKey();
+      const want = keyRoute(semitones, pitchLatency).bypass ? 'dry' : 'wet';
+      if (want !== routeTarget) {
+        setRoute(want);
+      } else {
+        sendKey();
+      }
       tellStatus();
     },
 
@@ -1133,6 +1212,10 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       stopped = true;
       stopDuetPolling();
       stopPractice();
+      if (routeTimer !== null) {
+        clearTimeout(routeTimer);
+        routeTimer = null;
+      }
       if (duetJobId !== null && duetClient !== null) {
         void duetClient.cancel(duetJobId).catch(() => undefined);
       }
@@ -1154,6 +1237,8 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       player.port.onmessage = null;
       player.disconnect();
       pitch.disconnect();
+      dry.disconnect();
+      wet.disconnect();
       if (analyser !== null) {
         analyser.disconnect();
       }

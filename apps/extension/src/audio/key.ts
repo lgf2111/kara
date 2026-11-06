@@ -49,3 +49,30 @@ export function keyLabel(semitones: number): string {
   }
   return key > 0 ? `Key +${String(key)}` : `Key −${String(-key)}`;
 }
+
+/** Which path the stems take, and how far ahead the player must read. */
+export interface KeyRoute {
+  /** Whether the shifter is out of the path at this key. */
+  readonly bypass: boolean;
+  /** The latency the player has to pay for, in whole frames. */
+  readonly latencySamples: number;
+}
+
+/**
+ * The graph the key asks for.
+ *
+ * At the original key there is nothing to shift, so the stems go straight to
+ * the output and the player reads the video's position, not the shifter's
+ * delay. Any other key goes through Signalsmith and pays its reported
+ * latency. Pure, so the routing is a test rather than a wiring detail.
+ */
+export function keyRoute(semitones: unknown, shifterLatencySamples: unknown): KeyRoute {
+  const key = clampKey(semitones);
+  const latency =
+    typeof shifterLatencySamples === 'number' && Number.isFinite(shifterLatencySamples)
+      ? Math.max(0, Math.round(shifterLatencySamples))
+      : 0;
+  return key === 0
+    ? { bypass: true, latencySamples: 0 }
+    : { bypass: false, latencySamples: latency };
+}

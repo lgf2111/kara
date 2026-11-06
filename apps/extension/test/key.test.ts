@@ -7,6 +7,7 @@ import {
   KEY_MAX,
   KEY_MIN,
   keyLabel,
+  keyRoute,
   nudgeKey,
 } from '../src/audio/key.ts';
 
@@ -39,6 +40,24 @@ describe('clampKey', () => {
     expect(clampKey(-40)).toBe(KEY_MIN);
     expect(clampKey(2.4)).toBe(2);
     expect(clampKey(-2.6)).toBe(-3);
+  });
+});
+
+describe('keyRoute', () => {
+  it('bypasses the shifter and its delay at the original key', () => {
+    expect(keyRoute(0, 5292)).toEqual({ bypass: true, latencySamples: 0 });
+    expect(keyRoute(Number.NaN, 5292)).toEqual({ bypass: true, latencySamples: 0 });
+  });
+
+  it('inserts the shifter at any other key, with its reported delay', () => {
+    expect(keyRoute(1, 5292)).toEqual({ bypass: false, latencySamples: 5292 });
+    expect(keyRoute(-6, 5292)).toEqual({ bypass: false, latencySamples: 5292 });
+  });
+
+  it('keeps the latency a whole number of frames, and never negative', () => {
+    expect(keyRoute(3, 5291.6).latencySamples).toBe(5292);
+    expect(keyRoute(3, -10).latencySamples).toBe(0);
+    expect(keyRoute(3, Number.NaN).latencySamples).toBe(0);
   });
 });
 
