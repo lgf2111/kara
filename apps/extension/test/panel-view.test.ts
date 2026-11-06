@@ -312,7 +312,6 @@ describe('the song card', () => {
       bpm: 128.4,
       bpmConfidence: 0.7,
       range: { lowMidi: 48, highMidi: 76, confidence: 0.6, frames: 120 },
-      transpose: -2,
     },
     detail: null,
   };
@@ -324,7 +323,6 @@ describe('the song card', () => {
       bpm: null,
       bpmConfidence: 0.1,
       range: null,
-      transpose: null,
     },
     detail: null,
   };
@@ -337,14 +335,13 @@ describe('the song card', () => {
     expect(view.songBpm).toBeNull();
   });
 
-  it('shows the key, tempo, range and suggested fit when it is ready', () => {
+  it('shows the key, tempo and range when it is ready', () => {
     const view = panelView({ report: report({ status: 'ready' }), analysis: ready });
 
     expect(view.songAnalysisState).toBe('ready');
     expect(view.songKey).toBe('G major');
     expect(view.songBpm).toBe(128);
     expect(view.songRange).toBe('C3–E5');
-    expect(view.songTranspose).toBe('−2 semitones');
     expect(view.songDetail).toBeNull();
   });
 
@@ -355,7 +352,6 @@ describe('the song card', () => {
     expect(view.songKey).toBeNull();
     expect(view.songBpm).toBeNull();
     expect(view.songRange).toBeNull();
-    expect(view.songTranspose).toBe('Original key');
   });
 
   it('shows the line while the analysis runs', () => {

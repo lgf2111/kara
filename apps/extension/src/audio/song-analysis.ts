@@ -31,9 +31,7 @@ import {
  *
  * **The range is percentiles, not extremes.** One shouted high note is not the
  * top of the song. The fifth and ninety-fifth percentiles of the confident
- * frames are what a singer is asked to reach, and a suggestion transposes the
- * song only when both ends fit a typical voice without moving past the key
- * control's limit.
+ * frames are what a singer is asked to reach.
  */
 
 /** The rate these analyses run at. A guide melody needs no more. */
@@ -44,13 +42,6 @@ export const KEY_MIN_CONFIDENCE = 0.35;
 
 /** A tempo only reaches the panel above this confidence. */
 export const BPM_MIN_CONFIDENCE = 0.3;
-
-/** Where the key control can take a song, in semitones either way. */
-export const TRANSPOSE_LIMIT = 6;
-
-/** A comfortable target for an amateur singer: C3 to C5. */
-export const TARGET_LOW_MIDI = 48;
-export const TARGET_HIGH_MIDI = 72;
 
 /** The chroma frame and hop, in samples at {@link SONG_ANALYSIS_RATE}. */
 const CHROMA_FRAME = 8192;
@@ -113,8 +104,6 @@ export interface SongFacts {
   readonly bpmConfidence: number;
   /** The comfortable vocal range, or null with too little singing. */
   readonly range: SongRange | null;
-  /** Whole semitones that would fit the range, or null for the original key. */
-  readonly transpose: number | null;
 }
 
 export type SongAnalysisState = 'analyzing' | 'ready' | 'error';
@@ -636,42 +625,6 @@ export function analyseVocalRange(
   return rangePercentiles(midis, options);
 }
 
-/**
- * A transposition that puts both ends of the range inside a typical voice,
- * or null when the original key is already the useful answer.
- *
- * A song narrower than the target gets the least movement that fits it on
- * either side; one wider than a typical voice is centred instead. A move past
- * the key control's six semitones is not offered at all, because a suggestion
- * the person cannot follow is worse than none.
- */
-export function suggestTranspose(
-  range: SongRange | null,
-  options: { readonly targetLowMidi?: number; readonly targetHighMidi?: number } = {},
-): number | null {
-  if (range === null) {
-    return null;
-  }
-  const targetLow = Math.round(positive(options.targetLowMidi, TARGET_LOW_MIDI));
-  const targetHigh = Math.round(positive(options.targetHighMidi, TARGET_HIGH_MIDI));
-  if (targetHigh <= targetLow) {
-    return null;
-  }
-  const lowest = Math.min(targetLow, targetHigh) - range.lowMidi;
-  const highest = Math.max(targetLow, targetHigh) - range.highMidi;
-  let shift: number;
-  if (lowest <= highest) {
-    shift = lowest <= 0 && highest >= 0 ? 0 : lowest > 0 ? lowest : highest;
-  } else {
-    shift = (targetLow + targetHigh - range.lowMidi - range.highMidi) / 2;
-  }
-  const whole = Math.round(shift);
-  if (whole === 0 || Math.abs(whole) > TRANSPOSE_LIMIT) {
-    return null;
-  }
-  return whole;
-}
-
 /** The key as a person reads it: `G major`, `E minor`. */
 export function keyName(key: SongKey): string {
   const pitchClass = ((Math.round(key.tonic) % 12) + 12) % 12;
@@ -681,16 +634,6 @@ export function keyName(key: SongKey): string {
 /** The range as a person reads it: `C3–E5`. */
 export function rangeLabel(range: SongRange): string {
   return `${noteName(range.lowMidi)}–${noteName(range.highMidi)}`;
-}
-
-/** The suggestion as a person reads it, with the neutral case spelled out. */
-export function transposeLabel(semitones: number | null): string {
-  if (semitones === null || !Number.isFinite(semitones) || Math.round(semitones) === 0) {
-    return 'Original key';
-  }
-  const whole = Math.round(semitones);
-  const size = Math.abs(whole) === 1 ? 'semitone' : 'semitones';
-  return whole > 0 ? `+${String(whole)} ${size}` : `−${String(-whole)} ${size}`;
 }
 
 interface SongStems {
@@ -704,7 +647,7 @@ interface SongStems {
 
 /**
  * The whole analysis, in one pure call. The worker supplies the three stems
- * and receives the four things the card shows; nothing here knows where they
+ * and receives the three things the card shows; nothing here knows where they
  * came from.
  */
 export function analyseSong(
@@ -743,7 +686,6 @@ export function analyseSong(
     bpm,
     bpmConfidence: tempo?.confidence ?? 0,
     range,
-    transpose: suggestTranspose(range),
   };
 }
 
@@ -751,8 +693,8 @@ export function analyseSong(
  * An analysis report from the offscreen document, made safe for the page.
  *
  * Everything is bounded the way the panel draws it: a tonic is a pitch class,
- * a range is inside MIDI, a suggestion is inside the key control, and a
- * malformed field falls back to "not known" rather than to a guess.
+ * a range is inside MIDI, and a malformed field falls back to "not known"
+ * rather than to a guess.
  */
 export function normaliseSongAnalysis(raw: unknown): SongAnalysis {
   const stored = recordOf(raw);
@@ -795,12 +737,6 @@ export function normaliseSongAnalysis(raw: unknown): SongAnalysis {
           frames: Math.max(0, Math.round(numberOrNull(rangeStored['frames']) ?? 0)),
         };
 
-  const rawTranspose = numberOrNull(facts['transpose']);
-  const transpose =
-    rawTranspose === null
-      ? null
-      : clamp(Math.round(rawTranspose), -TRANSPOSE_LIMIT, TRANSPOSE_LIMIT);
-
   return {
     state,
     progress: progress === null ? null : clamp(progress, 0, 1),
@@ -811,7 +747,6 @@ export function normaliseSongAnalysis(raw: unknown): SongAnalysis {
             bpm,
             bpmConfidence,
             range,
-            transpose,
           }
         : null,
     detail:

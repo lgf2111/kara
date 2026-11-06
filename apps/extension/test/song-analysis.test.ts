@@ -12,8 +12,6 @@ import {
   percentile,
   rangeLabel,
   rangePercentiles,
-  suggestTranspose,
-  transposeLabel,
   type SongFacts,
   type SongKey,
 } from '../src/audio/song-analysis.ts';
@@ -232,31 +230,6 @@ describe('vocal range percentiles', () => {
   });
 });
 
-describe('the transpose suggestion', () => {
-  it('moves a high song down into a typical range', () => {
-    expect(suggestTranspose({ lowMidi: 56, highMidi: 78, confidence: 1, frames: 100 })).toBe(-6);
-  });
-
-  it('moves a low song up into a typical range', () => {
-    expect(suggestTranspose({ lowMidi: 42, highMidi: 66, confidence: 1, frames: 100 })).toBe(6);
-  });
-
-  it('leaves a song that already fits at the original key', () => {
-    expect(suggestTranspose({ lowMidi: 52, highMidi: 70, confidence: 1, frames: 100 })).toBeNull();
-  });
-
-  it('does not suggest more than the key control can do', () => {
-    expect(suggestTranspose({ lowMidi: 30, highMidi: 50, confidence: 1, frames: 100 })).toBeNull();
-  });
-
-  it('says the neutral thing when there is no range', () => {
-    expect(transposeLabel(null)).toBe('Original key');
-    expect(transposeLabel(0)).toBe('Original key');
-    expect(transposeLabel(-2)).toBe('−2 semitones');
-    expect(transposeLabel(1)).toBe('+1 semitone');
-  });
-});
-
 describe('analyseSong', () => {
   it('gives key, tempo and range from separated stems', () => {
     const harmonic = progression(
@@ -284,7 +257,6 @@ describe('analyseSong', () => {
     expect(facts.bpm).toBeCloseTo(120, 0);
     expect(facts.range?.lowMidi).toBe(60);
     expect(facts.range?.highMidi).toBe(64);
-    expect(facts.transpose).toBeNull();
   });
 
   it('reports no key and no bpm when the confidence is not there', () => {
@@ -300,7 +272,6 @@ describe('analyseSong', () => {
     expect(facts.key).toBeNull();
     expect(facts.bpm).toBeNull();
     expect(facts.range).toBeNull();
-    expect(facts.transpose).toBeNull();
   });
 });
 
@@ -310,7 +281,6 @@ describe('normaliseSongAnalysis', () => {
     bpm: 128.4,
     bpmConfidence: 0.7,
     range: { lowMidi: 48, highMidi: 64, confidence: 0.6, frames: 120 },
-    transpose: -2,
   };
 
   it('keeps a ready report and its facts', () => {
@@ -357,7 +327,6 @@ describe('normaliseSongAnalysis', () => {
         bpm: 900,
         bpmConfidence: -2,
         range: { lowMidi: 200, highMidi: 100, confidence: 9, frames: -1 },
-        transpose: 40,
       },
       detail: '',
     });
@@ -367,7 +336,6 @@ describe('normaliseSongAnalysis', () => {
     expect(analysis.facts?.bpm).toBeNull();
     expect(analysis.facts?.bpmConfidence).toBe(0);
     expect(analysis.facts?.range).toBeNull();
-    expect(analysis.facts?.transpose).toBe(6);
     expect(analysis.detail).toBeNull();
   });
 

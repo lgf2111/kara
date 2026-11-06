@@ -19,7 +19,6 @@ import type { PracticeAnalysis } from '../audio/practice.ts';
 import {
   keyName,
   rangeLabel,
-  transposeLabel,
   type SongAnalysis,
 } from '../audio/song-analysis.ts';
 import type { PlayMode, StatusReport } from '../protocol.ts';
@@ -57,7 +56,7 @@ export interface PanelView {
   readonly detail: string | null;
   /** A line under the controls while the rest of the song is still arriving. */
   readonly note: string | null;
-  /** Whether the mode switch, the mix and the key belong on screen. */
+  /** Whether the mode switch and the mix belong on screen. */
   readonly controls: boolean;
   readonly mode: PlayMode;
   /**
@@ -96,8 +95,6 @@ export interface PanelView {
   readonly songBpm: number | null;
   /** E.g. `C3–E5`, or null when the vocal had too little to measure. */
   readonly songRange: string | null;
-  /** E.g. `+2 semitones`, or the neutral `Original key`. */
-  readonly songTranspose: string | null;
   /** The one line shown while the analysis runs or after it stops. */
   readonly songDetail: string | null;
   /** The microphone desk: five controls and a monitor that starts shut. */
@@ -200,7 +197,6 @@ export function panelView(input: PanelInput): PanelView {
   const songRange = songFacts?.range === null || songFacts?.range === undefined
     ? null
     : rangeLabel(songFacts.range);
-  const songTranspose = songFacts === null ? null : transposeLabel(songFacts.transpose);
   const songDetail =
     songAnalysisState === 'analyzing'
       ? (analysis?.detail ?? 'Reading the song.')
@@ -259,7 +255,6 @@ export function panelView(input: PanelInput): PanelView {
     songKey,
     songBpm,
     songRange,
-    songTranspose,
     songDetail,
     mic: micDesk.fx,
     micWarning: MONITOR_WARNING,

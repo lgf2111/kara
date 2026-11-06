@@ -37,11 +37,11 @@ import type { PanelView } from './panel-view.ts';
  * The panel is a small piece of furniture floating over somebody else's
  * video, so it has two jobs and no third: say what is happening now, and put
  * the next move where a thumb or a cursor already is. The arrangement is a
- * console, not a settings page — a named lead control (the vocal), a backing
- * section that stays folded until asked for, and a key stepper at the foot.
+ * console, not a settings page — the vocal is the lead control, and the
+ * original/instrumental switch is the one decision beside it.
  *
  * **One control size.** Every actionable control is thirty-two pixels tall:
- * the mode toggle, mute and solo, the backing disclosure, reset, the key
+ * the mode toggle, mute and solo, the disclosure headers, reset, the key
  * stepper, stop, and the primary start button. The earlier panel mixed five
  * heights, so the rows never settled on a line; this one has one horizontal
  * rhythm. The popup owns the diagnostic view; the player stays a player.
@@ -50,6 +50,12 @@ import type { PanelView } from './panel-view.ts';
  * Instrumental are the same song through two paths, so the control is a single
  * pressed button whose label names the path currently playing. It is filled
  * with the one accent while the stems are live.
+ *
+ * **Advanced is one door.** Backing, song facts, pitch practice, the
+ * microphone, duet and key are each their own disclosure inside it, so the
+ * default panel is the vocal and the switch rather than a settings page. The
+ * master and every section remember whether they were open for the session,
+ * and only what is already in use is offered inside them.
  *
  * **Nothing says paused.** A pause is visible in the video; the panel keeps
  * its controls and drops the status line instead of announcing a state the
@@ -71,6 +77,9 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /** The three stems behind the disclosure; the vocal is always on screen. */
 const BACKING = ['drums', 'bass', 'other'] as const;
+
+/** Which disclosures were left open, remembered for this tab's session. */
+const OPEN_DISCLOSURES = new Set<string>();
 
 /** The microphone desk's five sliders, in the order they are drawn. */
 type MicSlider = 'level' | 'reverb' | 'echo' | 'tone' | 'compression';
@@ -783,7 +792,12 @@ button[hidden] {
 .duet-error .primary {
   height: var(--kara-control);
 }
-.backing-head {
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.section-head {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -791,6 +805,7 @@ button[hidden] {
 .disclosure {
   display: flex;
   flex: 1;
+  min-width: 0;
   align-items: center;
   gap: 6px;
   height: var(--kara-control);
@@ -811,12 +826,13 @@ button[hidden] {
 .disclosure[aria-expanded='true'] .chevron {
   transform: rotate(90deg);
 }
-.backing-label {
+.section-label {
   color: var(--kara-text);
   font-size: 12px;
   font-weight: 600;
 }
-.backing-meta {
+.section-meta {
+  min-width: 0;
   overflow: hidden;
   color: var(--kara-faint);
   font-size: 11px;
@@ -834,11 +850,31 @@ button[hidden] {
   border-color: var(--kara-border-strong);
   color: var(--kara-text);
 }
-.backing-rows {
+.section-body {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 2px 0 0;
+}
+.advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.advanced-body > .section {
+  padding-top: 6px;
+  border-top: 1px solid var(--kara-border);
+}
+.advanced-body > .section:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+.duet-idle {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.duet-idle .duet-button {
+  align-self: flex-start;
 }
 .key-row {
   display: flex;
@@ -962,6 +998,14 @@ export interface Panel {
   destroy: () => void;
 }
 
+/** One collapsible section, and the pieces its caller arranges. */
+interface Disclosure {
+  readonly box: HTMLDivElement;
+  readonly head: HTMLDivElement;
+  readonly toggle: HTMLButtonElement;
+  readonly body: HTMLDivElement;
+}
+
 /** One stem's row, and the controls `update` and the reset reach through it. */
 interface StemControl {
   readonly row: HTMLDivElement;
@@ -1055,6 +1099,65 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   panel.setAttribute('role', 'region');
   panel.setAttribute('aria-label', 'Kara karaoke controls');
 
+  /**
+   * One disclosure whose open state is remembered for the session.
+   *
+   * A button is the whole keyboard story: Enter and Space click it, and
+   * `aria-expanded` is what a screen reader reads. The chevron turns with it,
+   * so the state is visible as well as announced.
+   */
+  const disclosure = (key: string, title: string, meta: string): Disclosure => {
+    const box = div('section');
+    const head = div('section-head');
+    const toggle = button('', 'disclosure');
+    const body = div('section-body');
+    body.id = `kara-${key}`;
+    toggle.setAttribute('aria-controls', body.id);
+    const chevron = span('chevron');
+    chevron.append(icon('chevron'));
+    const label = span('section-label');
+    label.textContent = title;
+    const metaText = span('section-meta');
+    metaText.textContent = meta;
+    toggle.append(chevron, label, metaText);
+    head.append(toggle);
+    box.append(head, body);
+
+    const setOpen = (open: boolean): void => {
+      if (open) {
+        OPEN_DISCLOSURES.add(key);
+      } else {
+        OPEN_DISCLOSURES.delete(key);
+      }
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.title = `${open ? 'Hide' : 'Show'} ${title.toLowerCase()}`;
+      body.hidden = !open;
+    };
+    toggle.addEventListener('click', () => {
+      setOpen(toggle.getAttribute('aria-expanded') !== 'true');
+    });
+    setOpen(OPEN_DISCLOSURES.has(key));
+    return { box, head, toggle, body };
+  };
+
+  const advanced = disclosure('advanced', 'Advanced', 'More controls');
+  advanced.box.classList.add('advanced');
+  advanced.body.classList.add('advanced-body');
+  const backingSection = disclosure('advanced-backing', 'Backing', 'Drums, bass, other');
+  const songSection = disclosure('advanced-song', 'Song', 'Key, tempo, range');
+  const practiceSection = disclosure('advanced-practice', 'Pitch practice', 'Learn the melody');
+  const micSection = disclosure('advanced-mic', 'Mic & recording', 'Monitor and record');
+  const duetSection = disclosure('advanced-duet', 'Duet', 'Split two singers');
+  const keySection = disclosure('advanced-key', 'Key', 'Transpose the song');
+  advanced.body.append(
+    backingSection.box,
+    songSection.box,
+    practiceSection.box,
+    micSection.box,
+    duetSection.box,
+    keySection.box,
+  );
+
   const top = div('top');
   const brand = div('brand');
   const brandGlyph = span('brand-glyph');
@@ -1144,8 +1247,6 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     control.fill.style.width = `${String(percent)}%`;
   };
 
-  let duetButton: HTMLButtonElement | null = null;
-
   const stemRow = (stem: Stem, featured: boolean): HTMLDivElement => {
     const row = div(featured ? 'stem featured' : 'stem');
     row.setAttribute('role', 'group');
@@ -1164,18 +1265,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     solo.setAttribute('aria-pressed', String(DEFAULT_MIX.soloed[stem]));
     switches.append(mute, solo);
     const level = span('level');
-    head.append(name);
-    if (stem === 'vocals') {
-      const open = button('Duet', 'duet-button');
-      open.title = 'Duet (beta) — split the two singers';
-      open.setAttribute('aria-label', 'Duet (beta)');
-      open.addEventListener('click', () => {
-        handlers.onDuetStart();
-      });
-      duetButton = open;
-      head.append(open);
-    }
-    head.append(switches, level);
+    head.append(name, switches, level);
     row.dataset['muted'] = String(DEFAULT_MIX.muted[stem]);
     row.dataset['soloed'] = String(DEFAULT_MIX.soloed[stem]);
 
@@ -1215,7 +1305,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   };
 
   const vocalsRow = stemRow('vocals', true);
-  mixer.append(vocalsRow);
+  mixer.append(vocalsRow, advanced.box);
 
   /**
    * Pitch practice, beside the vocal row it analyses. The button stays
@@ -1243,17 +1333,15 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
 
   const practiceDetail = paragraph('practice-detail');
   practiceBox.append(practiceHead, practiceBar, practiceDetail);
-  mixer.append(practiceBox);
+  practiceSection.body.append(practiceBox);
 
   /**
-   * The song card, under the vocal it describes. It is information rather than
-   * a control: the key stepper below is where a suggestion is acted on, and
-   * this only says what the separated audio appears to be. A key the analysis
-   * is not sure of is a question mark, and a tempo it is not sure of is
-   * absent, so an unsure read never looks like a fact.
+   * The song card. It is information rather than a control: it only says what
+   * the separated audio appears to be. A key the analysis is not sure of is a
+   * question mark, and a tempo it is not sure of is absent, so an unsure read
+   * never looks like a fact.
    */
   const songBox = div('song-panel');
-  songBox.hidden = true;
   const songHead = div('song-head');
   const songTitle = span('song-title');
   songTitle.textContent = 'Song';
@@ -1273,9 +1361,8 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   const songKeyCell = songRow('Key');
   const songBpmCell = songRow('BPM');
   const songRangeCell = songRow('Range');
-  const songTransposeCell = songRow('Suggested');
   songBox.append(songHead, songFacts);
-  mixer.append(songBox);
+  songSection.body.append(songBox);
 
   /**
    * The microphone desk. The monitor starts off and the warning is always
@@ -1364,7 +1451,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   micDetail.hidden = true;
 
   micBox.append(micHead, micWarning, micRows, recordRow, micDetail);
-  mixer.append(micBox);
+  micSection.body.append(micBox);
 
   monitor.addEventListener('click', () => {
     const pressed = monitor.getAttribute('aria-pressed') !== 'true';
@@ -1388,7 +1475,17 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
    * live, which is the whole point of keeping the second pass opt-in.
    */
   const duetBox = div('duet-panel');
-  duetBox.hidden = true;
+
+  const duetIdle = div('duet-idle');
+  const duetStart = button('Start duet', 'duet-button');
+  duetStart.title = 'Duet (beta) — split the two singers';
+  duetStart.setAttribute('aria-label', 'Start duet (beta)');
+  duetStart.addEventListener('click', () => {
+    handlers.onDuetStart();
+  });
+  const duetIdleNote = paragraph('duet-note');
+  duetIdleNote.textContent = 'Uses the local Duet helper to separate two voices.';
+  duetIdle.append(duetStart, duetIdleNote);
 
   const duetProgress = div('loading');
   const duetProgressHead = div('loading-head');
@@ -1561,32 +1658,20 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   duetError.append(duetErrorHead, duetErrorDetail, duetRetry);
   duetError.hidden = true;
 
-  duetBox.append(duetProgress, duetReady, duetError);
-  mixer.append(duetBox);
+  duetBox.append(duetIdle, duetProgress, duetReady, duetError);
+  duetSection.body.append(duetBox);
 
-  const backingHead = div('backing-head');
-  const more = button('', 'disclosure');
-  more.setAttribute('aria-expanded', 'false');
-  more.setAttribute('aria-controls', 'kara-backing');
-  const chevron = span('chevron');
-  chevron.append(icon('chevron'));
-  const backingLabel = span('backing-label');
-  backingLabel.textContent = 'Backing';
-  const backingMeta = span('backing-meta');
-  backingMeta.textContent = 'Drums, bass, other';
-  more.title = 'Drums, bass, other';
-  more.append(chevron, backingLabel, backingMeta);
   const reset = button('Reset', 'reset');
   reset.title = 'Backing stems to full, unmuted and unsoloed';
-  reset.hidden = true;
-  backingHead.append(more, reset);
-  const backingRows = div('backing-rows');
-  backingRows.id = 'kara-backing';
-  backingRows.hidden = true;
+  backingSection.head.append(reset);
   for (const stem of BACKING) {
-    backingRows.append(stemRow(stem, false));
+    backingSection.body.append(stemRow(stem, false));
   }
-  mixer.append(backingHead, backingRows);
+  const syncReset = (): void => {
+    reset.hidden = backingSection.toggle.getAttribute('aria-expanded') !== 'true';
+  };
+  backingSection.toggle.addEventListener('click', syncReset);
+  syncReset();
 
   const keyRow = div('key-row');
   const keyName = span('key-name');
@@ -1606,7 +1691,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   const keyClear = iconButton('reset', 'icon-button key-reset', 'Back to the original key');
   keyClear.hidden = true;
   keyRow.append(keyName, keyStepper, keyClear);
-  mixer.append(keyRow);
+  keySection.body.append(keyRow);
 
   const note = div('note');
   const noteGlyph = span('note-glyph');
@@ -1644,7 +1729,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   /**
    * Keep the panel inside the player. The host sits 72px above the control
    * bar, so the usable height is the player minus that and a small top gap;
-   * when the backing is open, the panel scrolls rather than reaching into the
+   * when Advanced is open, the panel scrolls rather than reaching into the
    * picture above.
    */
   const fit = (): void => {
@@ -1748,12 +1833,6 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     handlers.onKey(KEY_DEFAULT);
   });
 
-  more.addEventListener('click', () => {
-    backingRows.hidden = !backingRows.hidden;
-    reset.hidden = backingRows.hidden;
-    more.setAttribute('aria-expanded', String(!backingRows.hidden));
-  });
-
   // The backing only: the vocal row is outside this and is the person's
   // guide, not part of the backing. A reset that left a stem muted or soloed
   // would not be a reset, so the switches go back too. While collapsed there
@@ -1819,17 +1898,14 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
 
     const duetVoicesVisible = view.duetHasVoices;
     vocalsRow.hidden = duetVoicesVisible;
-    duetBox.hidden = view.duetState === 'off';
+    duetIdle.hidden = view.duetState !== 'off';
     duetProgress.hidden = view.duetState !== 'preparing';
     duetReady.hidden = !duetVoicesVisible;
     duetError.hidden = view.duetState !== 'error';
-    if (duetButton !== null) {
-      duetButton.hidden = duetVoicesVisible || view.duetState === 'preparing';
-      duetButton.disabled = !view.duetCanStart;
-      duetButton.title = view.duetCanStart
-        ? 'Duet (beta) — split the two singers'
-        : 'Finish preparing karaoke first';
-    }
+    duetStart.disabled = !view.duetCanStart;
+    duetStart.title = view.duetCanStart
+      ? 'Duet (beta) — split the two singers'
+      : 'Finish preparing karaoke first';
 
     duetProgressTitle.textContent = view.duetLabel;
     const duetFraction = view.duetProgress === null ? 0 : progressPercent(view.duetProgress);
@@ -1848,7 +1924,6 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
       duetFixPanel.hidden = true;
     }
 
-    practiceBox.hidden = !view.controls;
     practiceBox.dataset['state'] = view.practiceState;
     practiceTitle.textContent = view.practiceLabel;
     practiceButton.textContent = view.practiceActive
@@ -1878,7 +1953,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     practiceDetail.hidden = view.practiceDetail === null;
     practiceDetail.dataset['tone'] = view.practiceState === 'error' ? 'error' : 'hint';
 
-    songBox.hidden = !view.controls || view.songAnalysisState === 'off';
+    songSection.box.hidden = view.songAnalysisState === 'off';
     songBox.dataset['state'] = view.songAnalysisState;
     songTitle.textContent = view.songAnalysisState === 'ready' ? 'Song' : 'Song analysis';
     songDetail.textContent = view.songDetail ?? '';
@@ -1890,10 +1965,8 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
       songBpmCell.value.textContent = view.songBpm === null ? '' : String(view.songBpm);
       songRangeCell.row.hidden = view.songRange === null;
       songRangeCell.value.textContent = view.songRange ?? '';
-      songTransposeCell.value.textContent = view.songTranspose ?? '';
     }
 
-    micBox.hidden = !view.controls;
     monitor.setAttribute('aria-pressed', String(view.monitorOn));
     monitor.textContent = view.monitorOn ? 'Monitor on' : 'Monitor off';
     monitor.setAttribute(

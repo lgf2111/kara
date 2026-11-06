@@ -8,7 +8,7 @@ import type { SongAnalysisCommand, SongAnalysisEvent } from './song-analysis-mes
  *
  * A four-minute song is thousands of FFTs and pitch frames. On the document's
  * thread that would stall the message pump that keeps the stems playing, so it
- * happens here and the result is four small numbers. The stems arrive as
+ * happens here and the result is a few small numbers. The stems arrive as
  * copies by transfer and are never the buffers the player or the duet helper
  * holds.
  */
