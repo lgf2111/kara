@@ -1,8 +1,8 @@
 import type { PracticeOverlayView } from './practice-view.ts';
 
 /**
- * The practice picture: a dark wash, a scrolling note lane, a playhead, the
- * singer's marker, a small scoreboard, and the end card.
+ * The practice picture: a dark wash, a field of note rectangles over the video,
+ * a playhead, the singer's marker, a small scoreboard, and the end card.
  *
  * It lives inside the player element, which is what makes fullscreen work
  * without a second document. The host is `pointer-events: none`, so every
@@ -10,9 +10,11 @@ import type { PracticeOverlayView } from './practice-view.ts';
  * card's two buttons take a pointer. The panel above it is at z-index 60, so
  * the wash never covers the karaoke controls.
  *
- * The drawing is deliberately plain: notes are positioned from fractions the
- * pure view model worked out, and the only motion is the lane scrolling with
- * `video.currentTime`. `prefers-reduced-motion` removes the short transitions.
+ * The drawing is deliberately plain: rectangles are positioned from fractions
+ * the pure view model worked out, and the only motion is the field scrolling
+ * with `video.currentTime`. Percentages mean a resize, a devicePixelRatio
+ * change and fullscreen need no second layout. `prefers-reduced-motion`
+ * removes the short transitions.
  */
 
 const STYLE = `
@@ -44,22 +46,26 @@ const STYLE = `
     rgba(9, 5, 7, 0.28);
   pointer-events: none;
 }
-.lane {
+.field {
   position: absolute;
-  top: 7%;
-  right: 3.5%;
-  left: 3.5%;
-  height: 44%;
-  overflow: hidden;
-  border: 1px solid rgba(59, 42, 48, 0.9);
-  border-radius: var(--kara-radius);
-  background: linear-gradient(180deg, rgba(27, 17, 22, 0.82), rgba(27, 17, 22, 0.62));
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.38); /* taste-skill-ignore: video overlay */
+  top: 9%;
+  right: 2.5%;
+  left: 2.5%;
+  height: 47%;
   pointer-events: none;
 }
 .notes {
   position: absolute;
   inset: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    transparent 0,
+    #000 1.4%,
+    #000 98.6%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(90deg, transparent 0, #000 1.4%, #000 98.6%, transparent 100%);
 }
 .note {
   position: absolute;
@@ -68,42 +74,67 @@ const STYLE = `
   align-items: center;
   justify-content: center;
   min-width: 2px;
-  padding: 0 4px;
+  padding: 0 5px;
   overflow: hidden;
-  border: 1px solid rgba(195, 176, 166, 0.36);
-  border-radius: 5px;
-  background: rgba(195, 176, 166, 0.14);
-  color: var(--kara-muted);
-  font-size: 10px;
+  border: 1px solid rgba(247, 239, 230, 0.42);
+  border-radius: 7px;
+  background: rgba(20, 12, 16, 0.5);
+  color: rgba(247, 239, 230, 0.9);
+  font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.01em;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
   white-space: nowrap;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    opacity 120ms ease;
 }
 .note[data-past='true'] {
-  opacity: 0.42;
+  opacity: 0.34;
 }
 .note[data-current='true'] {
-  border-color: var(--kara-accent);
-  background: rgba(232, 184, 109, 0.26);
-  color: var(--kara-text);
-  box-shadow: 0 0 18px rgba(232, 184, 109, 0.22);
+  border-color: rgba(232, 184, 109, 0.95);
+  background: rgba(232, 184, 109, 0.3);
+  color: #fff;
+  box-shadow:
+    0 0 0 1px rgba(232, 184, 109, 0.28),
+    0 0 22px rgba(232, 184, 109, 0.3); /* taste-skill-ignore: video overlay */
 }
 .playhead {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 2px;
-  margin-left: -1px;
-  background: var(--kara-accent);
-  box-shadow: 0 0 12px rgba(232, 184, 109, 0.6);
+  width: 1px;
+  margin-left: -0.5px;
+  background: linear-gradient(
+    180deg,
+    rgba(232, 184, 109, 0) 0,
+    rgba(232, 184, 109, 0.9) 5%,
+    rgba(232, 184, 109, 0.9) 95%,
+    rgba(232, 184, 109, 0) 100%
+  );
+  box-shadow: 0 0 12px rgba(232, 184, 109, 0.4);
   pointer-events: none;
+}
+.playhead::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--kara-accent);
+  box-shadow: 0 0 10px rgba(232, 184, 109, 0.6);
+  transform: translate(-50%, -50%);
 }
 .marker {
   position: absolute;
-  width: 14px;
-  height: 14px;
-  margin: -7px 0 0 -7px;
-  border: 2px solid rgba(27, 17, 22, 0.94);
+  width: 16px;
+  height: 16px;
+  margin: -8px 0 0 -8px;
+  border: 2px solid rgba(20, 12, 16, 0.94);
   border-radius: 50%;
   background: var(--kara-faint);
   transition: top 70ms linear;
@@ -126,14 +157,16 @@ const STYLE = `
 }
 .now {
   position: absolute;
-  top: 8px;
-  left: 11px;
+  top: -19px;
+  left: 32%;
   z-index: 1;
   color: var(--kara-muted);
   font-size: 10px;
   font-weight: 650;
   letter-spacing: 0.08em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
   text-transform: uppercase;
+  white-space: nowrap;
   pointer-events: none;
 }
 .hud {
@@ -331,6 +364,7 @@ const STYLE = `
 }
 @media (prefers-reduced-motion: reduce) {
   .marker,
+  .note,
   .meter-fill,
   .actions button {
     transition: none;
@@ -380,7 +414,7 @@ function button(text: string, className: string): HTMLButtonElement {
   return made;
 }
 
-/** `0.314` as `31.4%`, which is the only unit the lane is drawn in. */
+/** `0.314` as `31.4%`, which is the only unit the note field is drawn in. */
 function percent(fraction: number): string {
   return `${(fraction * 100).toFixed(3)}%`;
 }
@@ -405,12 +439,12 @@ export function mountPracticeOverlay(
 
   const dark = div('dark');
 
-  const lane = div('lane');
+  const field = div('field');
   const now = span('now');
   const notesLayer = div('notes');
   const playhead = div('playhead');
   const marker = div('marker');
-  lane.append(notesLayer, playhead, marker, now);
+  field.append(notesLayer, playhead, marker, now);
 
   const hud = div('hud');
   const scoreRow = div('score-row');
@@ -486,7 +520,7 @@ export function mountPracticeOverlay(
   errorActions.append(errorClose);
   error.append(errorTitle, errorDetail, errorActions);
 
-  root.append(style, dark, lane, hud, learning, summary, error);
+  root.append(style, dark, field, hud, learning, summary, error);
 
   let noteKey = '';
   const noteEls = new Map<number, HTMLDivElement>();
@@ -525,7 +559,7 @@ export function mountPracticeOverlay(
     if (view.mode === 'hidden') {
       return;
     }
-    // The lane and the scoreboard are decoration; the end card's buttons are
+    // The field and the scoreboard are decoration; the end card's buttons are
     // real controls, so only then does the host step out of the accessibility
     // tree's way.
     if (view.mode === 'ended' || view.mode === 'error') {
@@ -534,7 +568,7 @@ export function mountPracticeOverlay(
       host.setAttribute('aria-hidden', 'true');
     }
     const listening = view.mode === 'listening';
-    lane.hidden = !listening;
+    field.hidden = !listening;
     hud.hidden = !listening;
     learning.hidden = view.mode !== 'learning';
     summary.hidden = view.mode !== 'ended';
@@ -565,6 +599,7 @@ export function mountPracticeOverlay(
     }
     drawNotes(view);
     playhead.style.left = percent(view.playhead);
+    now.style.left = `calc(${percent(view.playhead)} + 10px)`;
     now.textContent = view.currentName === null ? 'Rest' : `Now ${view.currentName}`;
     scoreValue.textContent = String(Math.round(view.score.score));
     combo.textContent =

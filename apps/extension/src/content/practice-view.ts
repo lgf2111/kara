@@ -1,6 +1,7 @@
 import { noteName } from '../audio/pitch.ts';
 import {
   normalisePracticeScore,
+  targetAt,
   type PracticeAnalysis,
   type PracticeLive,
   type PracticeNote,
@@ -11,21 +12,25 @@ import {
  * What the practice overlay draws, worked out from the guide melody and the
  * latest live report.
  *
- * Pure, so the lane geometry and the colour of the pitch marker are tests
+ * Pure, so the rectangle geometry and the colour of the pitch marker are tests
  * rather than something only a video can check. The DOM half in
  * `practice-overlay.ts` takes fractions from here and puts them on screen: the
- * note lane, the playhead and the marker are all nought to one, which is what
- * lets the overlay scale with the player and with fullscreen.
+ * note field, the playhead and the marker are all nought to one, which is what
+ * lets the overlay scale with the player, with a resize and with fullscreen.
  */
 
-/** How much of the song the lane shows at once. */
+/** How much of the song the note field shows at once. */
 export const PRACTICE_WINDOW_SECONDS = 8;
 
-/** Where the playhead sits across the lane, leaving a little of the past visible. */
+/** Where the playhead sits across the field, leaving a little of the past visible. */
 export const PRACTICE_PLAYHEAD = 0.32;
 
-/** The smallest slice of the melody a lane can show without changing scale. */
+/** The smallest slice of the melody a field can show without changing scale. */
 const MIN_SEMITONES = 12;
+
+/** Smallest and largest height of one note rectangle, as fractions of the field. */
+const MIN_NOTE_HEIGHT = 0.035;
+const MAX_NOTE_HEIGHT = 0.18;
 
 export type PracticeTone = 'perfect' | 'good' | 'off' | 'idle';
 
@@ -35,7 +40,7 @@ export interface PracticeLaneNote {
   readonly name: string;
   readonly start: number;
   readonly end: number;
-  /** Fractions of the lane: left and width across, top and height down. */
+  /** Fractions of the note field: left and width across, top and height down. */
   readonly left: number;
   readonly width: number;
   readonly top: number;
@@ -56,7 +61,7 @@ export interface PracticeMarker {
 export interface PracticeOverlayView {
   readonly mode: 'hidden' | 'learning' | 'listening' | 'ended' | 'error';
   readonly notes: readonly PracticeLaneNote[];
-  /** Where the playhead is across the lane, nought to one. */
+  /** Where the playhead is across the field, nought to one. */
   readonly playhead: number;
   readonly marker: PracticeMarker | null;
   readonly currentName: string | null;
@@ -72,7 +77,7 @@ export interface PracticeOverlayInput {
   readonly live: PracticeLive | null;
   /** The final score while the end card is up, or null during a run. */
   readonly summary?: PracticeScore | null;
-  /** `video.currentTime`, the clock the lane scrolls by. */
+  /** `video.currentTime`, the clock the note field scrolls by. */
   readonly at: number;
 }
 
@@ -95,7 +100,7 @@ function clamp(value: number, low: number, high: number): number {
   return Math.min(high, Math.max(low, value));
 }
 
-/** The speed of the marker against the target, in the three colours the lane has. */
+/** The speed of the marker against the target, in the three colours the field has. */
 export function practiceTone(cents: number | null): PracticeTone {
   if (cents === null || !Number.isFinite(cents)) {
     return 'idle';
@@ -110,8 +115,12 @@ export function practiceTone(cents: number | null): PracticeTone {
   return 'off';
 }
 
-/** The pitch span the lane shows, wide enough to keep every visible note in frame. */
-function pitchRange(
+/**
+ * The pitch span the note field shows, wide enough to keep every visible note
+ * in frame. A singer near the guide joins the span; one an octave and a half
+ * away is clamped to the field rather than shrinking every rectangle.
+ */
+export function practicePitchRange(
   notes: readonly PracticeNote[],
   micMidi: number | null,
 ): { readonly low: number; readonly high: number } {
@@ -130,8 +139,6 @@ function pitchRange(
     micMidi >= low - 12 &&
     micMidi <= high + 12
   ) {
-    // A singer near the guide stays in frame; one an octave and a half away
-    // is clamped to the lane rather than shrinking every note.
     low = Math.min(low, micMidi);
     high = Math.max(high, micMidi);
   }
@@ -211,9 +218,10 @@ export function practiceOverlayView(input: PracticeOverlayInput): PracticeOverla
   const windowSeconds = PRACTICE_WINDOW_SECONDS;
   const leftTime = at - windowSeconds * PRACTICE_PLAYHEAD;
   const rightTime = leftTime + windowSeconds;
-  const targetIndex = live?.target?.index ?? null;
+  const target = targetAt(notes, at);
+  const targetIndex = target?.index ?? null;
   const micMidi = live?.mic?.midi ?? null;
-  const range = pitchRange(
+  const range = practicePitchRange(
     notes.filter((note) => note.end >= leftTime && note.start <= rightTime),
     micMidi,
   );
@@ -226,8 +234,9 @@ export function practiceOverlayView(input: PracticeOverlayInput): PracticeOverla
     }
     const from = clamp(note.start, leftTime, rightTime);
     const to = clamp(note.end, leftTime, rightTime);
-    const height = Math.max(0.035, Math.min(0.18, 0.8 / span));
+    const height = Math.max(MIN_NOTE_HEIGHT, Math.min(MAX_NOTE_HEIGHT, 0.8 / span));
     const top = clamp((range.high - note.midi) / span - height / 2, 0, 1 - height);
+    const current = targetIndex === index;
     lane.push({
       index,
       midi: note.midi,
@@ -238,13 +247,12 @@ export function practiceOverlayView(input: PracticeOverlayInput): PracticeOverla
       width: Math.max(0.006, (to - from) / windowSeconds),
       top,
       height,
-      current: targetIndex === null ? at >= note.start && at <= note.end : targetIndex === index,
-      past: note.end < at,
+      current,
+      past: !current && note.end < at,
     });
   }
 
-  const current = lane.find((note) => note.current) ?? null;
-  const targetMidi = live?.target?.midi ?? current?.midi ?? null;
+  const targetMidi = target?.note.midi ?? null;
   const marker =
     micMidi === null || !Number.isFinite(micMidi)
       ? null
