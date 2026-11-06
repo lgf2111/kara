@@ -16,9 +16,30 @@ import {
   type CachedStems,
   type StereoChannels,
 } from './entry.ts';
-import type { CodecInput, StemCodec, StemEncoder } from './codec.ts';
-import type { CacheFiles, EntryWriter } from './opfs.ts';
+import type {
+  CodecInput,
+  MonoStemEncoder,
+  StemCodec,
+  StemEncoder,
+} from './codec.ts';
+import type { CacheFiles, DuetFiles, EntryWriter } from './opfs.ts';
 import type { CacheMetadata } from './metadata-contract.ts';
+import {
+  DUET_FORMAT_VERSION,
+  MAX_DUET_MAP_BYTES,
+  buildDuetSidecar,
+  duetVoicePair,
+  normaliseDuetHelperVersion,
+  normaliseDuetModelVersion,
+  normaliseDuetMap,
+  normaliseDuetVoices,
+  parseDuetSidecar,
+  type CachedDuet,
+  type CachedDuetInput,
+  type CachedDuetMeta,
+  type DuetExpectation,
+  type DuetSidecar,
+} from './duet.ts';
 
 /**
  * The cache's state machine: one writer, a metadata list and a cap.
@@ -39,6 +60,7 @@ import type { CacheMetadata } from './metadata-contract.ts';
 const FILE_MAGIC = [0x4b, 0x53, 0x43, 0x31] as const;
 const FILE_VERSION = 1;
 const FILE_CHANNELS = 2;
+const MONO_FILE_CHANNELS = 1;
 const HEADER_BASE_BYTES = 25;
 const MAX_CODEC_ID_BYTES = 255;
 
@@ -163,13 +185,16 @@ function isQuotaExceeded(error: unknown): boolean {
   );
 }
 
-function encodeHeader(input: HeaderInput): Uint8Array<ArrayBuffer> {
+function encodeHeader(
+  input: HeaderInput,
+  channels: number = FILE_CHANNELS,
+): Uint8Array<ArrayBuffer> {
   const codecId = new TextEncoder().encode(input.codecId);
   const bytes = new Uint8Array(HEADER_BASE_BYTES + codecId.length);
   const view = new DataView(bytes.buffer);
   bytes.set(FILE_MAGIC, 0);
   view.setUint8(4, FILE_VERSION);
-  view.setUint8(5, FILE_CHANNELS);
+  view.setUint8(5, channels);
   view.setUint16(6, 0, true);
   view.setUint32(8, input.sampleRate, true);
   view.setUint32(12, input.frames, true);
@@ -180,7 +205,10 @@ function encodeHeader(input: HeaderInput): Uint8Array<ArrayBuffer> {
   return bytes;
 }
 
-function parseStemFile(bytes: Uint8Array): ParsedStemFile | null {
+function parseStemFile(
+  bytes: Uint8Array,
+  channels: number = FILE_CHANNELS,
+): ParsedStemFile | null {
   if (bytes.byteLength < HEADER_BASE_BYTES) {
     return null;
   }
@@ -190,7 +218,7 @@ function parseStemFile(bytes: Uint8Array): ParsedStemFile | null {
     }
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (view.getUint8(4) !== FILE_VERSION || view.getUint8(5) !== FILE_CHANNELS) {
+  if (view.getUint8(4) !== FILE_VERSION || view.getUint8(5) !== channels) {
     return null;
   }
   const codecIdLength = view.getUint8(24);
@@ -256,6 +284,18 @@ function totalBytes(entries: readonly CachedEntry[]): number {
     bytes += entry.bytes;
   }
   return bytes;
+}
+
+/** The stem bytes under an entry's total, which may include a duet sidecar. */
+function stemBytes(entry: CachedEntry): number {
+  return Math.max(0, entry.bytes - (entry.duet?.bytes ?? 0));
+}
+
+/** The same record without a duet, with its bytes back to the stem total. */
+function withoutDuet(entry: CachedEntry): CachedEntry {
+  const { duet: _duet, ...rest } = entry;
+  void _duet;
+  return { ...rest, bytes: stemBytes(entry) };
 }
 
 export class StemCache {
@@ -552,6 +592,422 @@ export class StemCache {
     }
   }
 
+  /**
+   * The entry's duet metadata, but only when this build and the caller agree
+   * with its versions. A mismatch is a sidecar miss, never a stem miss.
+   */
+  private duetMetaMatches(
+    entry: CachedEntry,
+    expectation?: DuetExpectation,
+  ): CachedDuetMeta | null {
+    const meta = entry.duet;
+    if (meta === undefined || meta === null) {
+      return null;
+    }
+    if (
+      meta.duetFormatVersion !== DUET_FORMAT_VERSION ||
+      meta.frames !== entry.durationFrames ||
+      meta.sampleRate !== entry.sampleRate ||
+      meta.helperVersion === ''
+    ) {
+      return null;
+    }
+    if (
+      expectation?.duetFormatVersion !== undefined &&
+      meta.duetFormatVersion !== expectation.duetFormatVersion
+    ) {
+      return null;
+    }
+    if (
+      expectation?.helperVersion !== undefined &&
+      meta.helperVersion !== normaliseDuetHelperVersion(expectation.helperVersion)
+    ) {
+      return null;
+    }
+    return meta;
+  }
+
+  /**
+   * Turns the three files into a sidecar, checking the JSON and both voice
+   * headers against the entry and the version record. Corrupt files are a
+   * miss, not a reason to remove the stems.
+   */
+  private readDuetSidecar(
+    entry: CachedEntry,
+    meta: CachedDuetMeta,
+    files: DuetFiles,
+  ): {
+    readonly sidecar: DuetSidecar;
+    readonly voice1: ParsedStemFile;
+    readonly voice2: ParsedStemFile;
+  } | null {
+    const sidecar = parseDuetSidecar(files.map);
+    if (sidecar === null) {
+      return null;
+    }
+    if (
+      sidecar.duetFormatVersion !== DUET_FORMAT_VERSION ||
+      sidecar.duetFormatVersion !== meta.duetFormatVersion ||
+      sidecar.helperVersion !== meta.helperVersion ||
+      sidecar.modelVersion !== (meta.modelVersion ?? null) ||
+      sidecar.frames !== entry.durationFrames ||
+      sidecar.sampleRate !== entry.sampleRate
+    ) {
+      return null;
+    }
+    const voice1 = parseStemFile(files.voice1, MONO_FILE_CHANNELS);
+    const voice2 = parseStemFile(files.voice2, MONO_FILE_CHANNELS);
+    if (voice1 === null || voice2 === null) {
+      return null;
+    }
+    for (const voice of [voice1, voice2]) {
+      if (
+        voice.header.sampleRate !== entry.sampleRate ||
+        voice.header.frames !== entry.durationFrames ||
+        voice.header.codecRate !== this.codec.codecRate ||
+        voice.header.delayFrames !== this.codec.delayFrames ||
+        voice.header.codecId !== this.codec.id
+      ) {
+        return null;
+      }
+    }
+    return { sidecar, voice1, voice2 };
+  }
+
+  private async readDuetFiles(
+    key: string,
+    entry: CachedEntry,
+    expectation?: DuetExpectation,
+  ): Promise<{
+    readonly meta: CachedDuetMeta;
+    readonly sidecar: DuetSidecar;
+    readonly voice1: ParsedStemFile;
+    readonly voice2: ParsedStemFile;
+  } | null> {
+    const meta = this.duetMetaMatches(entry, expectation);
+    if (meta === null) {
+      return null;
+    }
+    const files = await this.files.readDuet(key);
+    if (files === null) {
+      return null;
+    }
+    const parsed = this.readDuetSidecar(entry, meta, files);
+    if (parsed === null) {
+      return null;
+    }
+    return { meta, ...parsed };
+  }
+
+  async hasCachedDuet(
+    key: string,
+    expectation?: DuetExpectation,
+  ): Promise<boolean> {
+    try {
+      const entry = await this.cachedEntry(key);
+      if (entry === null) {
+        return false;
+      }
+      return (await this.readDuetFiles(key, entry, expectation)) !== null;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Reads the optional duet pair. Any problem on the sidecar path is a duet
+   * miss; the four stems and their metadata are untouched.
+   */
+  async readCachedDuet(
+    key: string,
+    expectation?: DuetExpectation,
+  ): Promise<CachedDuet | null> {
+    const entry = await this.cachedEntry(key);
+    if (entry === null) {
+      return null;
+    }
+    try {
+      const files = await this.readDuetFiles(key, entry, expectation);
+      if (files === null) {
+        return null;
+      }
+      const input: CodecInput = {
+        sampleRate: entry.sampleRate,
+        frames: entry.durationFrames,
+      };
+      const [voice1, voice2] = await Promise.all([
+        this.codec.decodeMono(files.voice1.packets, input),
+        this.codec.decodeMono(files.voice2.packets, input),
+      ]);
+      if (
+        voice1.length !== entry.durationFrames ||
+        voice2.length !== entry.durationFrames
+      ) {
+        return null;
+      }
+      await this.touch(key).catch(() => undefined);
+      return {
+        key,
+        sampleRate: entry.sampleRate,
+        frames: entry.durationFrames,
+        voices: duetVoicePair(voice1, voice2),
+        voice1,
+        voice2,
+        map: files.sidecar.map,
+        quality: files.sidecar.quality,
+        anchors: files.sidecar.anchors,
+        helperVersion: files.sidecar.helperVersion,
+        modelVersion: files.sidecar.modelVersion,
+        duetFormatVersion: files.sidecar.duetFormatVersion,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Writes both voices and the map as one sidecar. The voices are encoded
+   * before the lock is taken, then the OPFS writer keeps a partial marker
+   * until all three files and the map are complete.
+   */
+  async writeCachedDuet(
+    key: string,
+    input: CachedDuetInput,
+  ): Promise<CachedEntry> {
+    const entry = await this.cachedEntry(key);
+    if (entry === null) {
+      throw new CacheError('stem cache: the entry does not exist');
+    }
+    const voices = normaliseDuetVoices(input.voices);
+    if (voices === null) {
+      throw new CacheError('stem cache: the duet voices are not valid');
+    }
+    const [voice1, voice2] = voices;
+    if (
+      voice1.length !== entry.durationFrames ||
+      voice2.length !== entry.durationFrames
+    ) {
+      throw new CacheError('stem cache: the duet voices do not match the song');
+    }
+    if (!isInteger(input.duetFormatVersion, 0)) {
+      throw new CacheError('stem cache: the duet format version is not valid');
+    }
+    const helperVersion = normaliseDuetHelperVersion(input.helperVersion);
+    if (helperVersion === '') {
+      throw new CacheError('stem cache: the duet helper version is not valid');
+    }
+    const map = normaliseDuetMap(input.map);
+    const modelVersion =
+      normaliseDuetModelVersion(input.modelVersion) ||
+      normaliseDuetModelVersion(map['modelVersion']);
+    const sidecar = buildDuetSidecar({
+      sampleRate: entry.sampleRate,
+      frames: entry.durationFrames,
+      helperVersion,
+      modelVersion: modelVersion === '' ? null : modelVersion,
+      duetFormatVersion: input.duetFormatVersion,
+      map,
+    });
+    let mapJson: string;
+    try {
+      mapJson = JSON.stringify(sidecar);
+    } catch {
+      throw new CacheError('stem cache: the duet map cannot be saved');
+    }
+    const mapBytes = new TextEncoder().encode(mapJson).byteLength;
+    if (mapBytes > MAX_DUET_MAP_BYTES) {
+      throw new CacheError('stem cache: the duet map is too large');
+    }
+
+    const codecInput: CodecInput = {
+      sampleRate: entry.sampleRate,
+      frames: entry.durationFrames,
+    };
+    const estimatedBytes =
+      this.codec.estimateMonoBytes(codecInput) * 2 +
+      (HEADER_BASE_BYTES + this.codec.id.length) * 2 +
+      mapBytes;
+    const baseBytes = stemBytes(entry);
+    if (baseBytes + estimatedBytes > this.maxEntryBytes) {
+      throw new CacheError('stem cache: the entry is larger than the per-entry limit');
+    }
+
+    const encoders: MonoStemEncoder[] = [];
+    try {
+      encoders.push(await this.codec.createMonoEncoder(codecInput));
+      encoders.push(await this.codec.createMonoEncoder(codecInput));
+      for (const [index, voice] of [voice1, voice2].entries()) {
+        const encoder = encoders[index];
+        if (encoder === undefined) {
+          throw new CacheError('stem cache: no encoder for that voice');
+        }
+        await encoder.encode(voice);
+      }
+    } catch (error) {
+      for (const encoder of encoders) {
+        encoder.abort();
+      }
+      throw error;
+    }
+
+    const packets: Array<readonly Uint8Array[]> = [];
+    try {
+      for (const encoder of encoders) {
+        packets.push(await encoder.finish());
+      }
+    } catch (error) {
+      for (const encoder of encoders) {
+        encoder.abort();
+      }
+      throw error;
+    }
+
+    const header = encodeHeader(
+      {
+        sampleRate: entry.sampleRate,
+        frames: entry.durationFrames,
+        codecRate: this.codec.codecRate,
+        delayFrames: this.codec.delayFrames,
+        codecId: this.codec.id,
+      },
+      MONO_FILE_CHANNELS,
+    );
+    const firstPackets = packets[0];
+    const secondPackets = packets[1];
+    if (firstPackets === undefined || secondPackets === undefined) {
+      throw new CacheError('stem cache: the duet voices are incomplete');
+    }
+    const voice1Bytes = buildStemFile(header, firstPackets);
+    const voice2Bytes = buildStemFile(header, secondPackets);
+    const duetBytes =
+      voice1Bytes.byteLength + voice2Bytes.byteLength + mapBytes;
+    if (baseBytes + duetBytes > this.maxEntryBytes) {
+      throw new CacheError('stem cache: the entry is larger than the per-entry limit');
+    }
+    if (baseBytes + duetBytes > this.limitBytes) {
+      throw new CacheError('stem cache: the entry is larger than the cache');
+    }
+
+    const meta: CachedDuetMeta = {
+      bytes: duetBytes,
+      frames: entry.durationFrames,
+      sampleRate: entry.sampleRate,
+      duetFormatVersion: input.duetFormatVersion,
+      helperVersion,
+      ...(modelVersion === '' ? {} : { modelVersion }),
+    };
+
+    return this.serial(async () => {
+      let touched = false;
+      try {
+        const entries = await this.readEntries();
+        const index = entries.findIndex((item) => item.key === key);
+        const current = entries[index];
+        if (current === undefined) {
+          throw new CacheError('stem cache: the entry does not exist');
+        }
+        const currentBase = stemBytes(current);
+        if (currentBase + duetBytes > this.maxEntryBytes) {
+          throw new CacheError(
+            'stem cache: the entry is larger than the per-entry limit',
+          );
+        }
+        if (currentBase + duetBytes > this.limitBytes) {
+          throw new CacheError('stem cache: the entry is larger than the cache');
+        }
+
+        // The old sidecar is still counted in the metadata; its bytes are
+        // replaced, so they count as room already available.
+        const oldDuetBytes = current.duet?.bytes ?? 0;
+        await this.evictLocked(
+          this.limitBytes - duetBytes + oldDuetBytes,
+          key,
+        );
+        let written = false;
+        let committed = 0;
+        for (let attempt = 0; attempt < 2 && !written; attempt += 1) {
+          touched = true;
+          const writer = await this.files.beginDuet(key);
+          try {
+            await writer.writeVoice(1, voice1Bytes);
+            await writer.writeVoice(2, voice2Bytes);
+            await writer.writeMap(mapJson);
+            committed = await writer.commit();
+            written = true;
+          } catch (error) {
+            await writer.abort().catch(() => undefined);
+            if (attempt > 0 || !isQuotaExceeded(error)) {
+              throw error instanceof CacheError
+                ? error
+                : new CacheError('stem cache: the duet could not be written');
+            }
+            await this.evictLocked(
+              Math.max(
+                0,
+                this.limitBytes -
+                  duetBytes +
+                  oldDuetBytes -
+                  QUOTA_RETRY_HEADROOM_BYTES,
+              ),
+              key,
+            );
+          }
+        }
+        if (!written || committed <= 0) {
+          throw new CacheError('stem cache: the duet could not be written');
+        }
+        if (currentBase + committed > this.maxEntryBytes) {
+          throw new CacheError(
+            'stem cache: the entry is larger than the per-entry limit',
+          );
+        }
+        const now = this.now();
+        const next: CachedEntry = {
+          ...current,
+          bytes: currentBase + committed,
+          lastUsedAt: Math.max(now, current.lastUsedAt),
+          duet: { ...meta, bytes: committed },
+        };
+        const updated = [...entries];
+        updated[index] = next;
+        try {
+          await this.writeEntries(updated);
+        } catch (error) {
+          await this.files.removeDuet(key).catch(() => undefined);
+          throw error;
+        }
+        await this.evictLocked(this.limitBytes, key).catch(() => 0);
+        return next;
+      } catch (error) {
+        if (touched) {
+          await this.files.removeDuet(key).catch(() => undefined);
+          await this.dropDuetRecord(key).catch(() => undefined);
+        }
+        throw error;
+      }
+    });
+  }
+
+  private async dropDuetRecord(key: string): Promise<void> {
+    const entries = await this.readEntries();
+    const index = entries.findIndex((entry) => entry.key === key);
+    const current = entries[index];
+    if (current === undefined || current.duet === undefined || current.duet === null) {
+      return;
+    }
+    const updated = [...entries];
+    updated[index] = withoutDuet(current);
+    await this.writeEntries(updated);
+  }
+
+  /** Removes the duet sidecar and its byte record, keeping the stems. */
+  async removeCachedDuet(key: string): Promise<void> {
+    await this.serial(async () => {
+      await this.files.removeDuet(key).catch(() => undefined);
+      await this.dropDuetRecord(key).catch(() => undefined);
+    });
+  }
+
   async evictUntilUnder(limitBytes: number, protectedKey?: string): Promise<number> {
     return this.serial(() => this.evictLocked(limitBytes, protectedKey));
   }
@@ -661,11 +1117,29 @@ export class StemCache {
       }
       const present: CachedEntry[] = [];
       let removed = 0;
+      let changed = false;
       for (const entry of entries) {
         const complete = await this.files
           .hasComplete(entry.key)
           .catch(() => false);
         if (complete) {
+          if (entry.duet !== undefined && entry.duet !== null) {
+            const duet = await this.readDuetFiles(entry.key, entry).catch(
+              () => null,
+            );
+            if (duet === null) {
+              // The stems are still complete; only the optional sidecar is
+              // gone or stale, so drop the sidecar record and keep the entry.
+              await this.files.removeDuet(entry.key).catch(() => undefined);
+              present.push(withoutDuet(entry));
+              changed = true;
+              continue;
+            }
+          } else if (await this.files.hasDuet(entry.key).catch(() => false)) {
+            // A crash between the sidecar commit and the metadata write leaves
+            // bytes no record accounts for; remove them rather than adopt them.
+            await this.files.removeDuet(entry.key).catch(() => undefined);
+          }
           present.push(entry);
         } else {
           removed += 1;
@@ -676,7 +1150,7 @@ export class StemCache {
           }
         }
       }
-      if (present.length !== entries.length) {
+      if (changed || present.length !== entries.length) {
         await this.writeEntries(present);
       }
       try {

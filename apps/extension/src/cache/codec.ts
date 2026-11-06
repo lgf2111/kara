@@ -21,6 +21,11 @@ export const OPUS_CODEC_ID = 'opus';
 export const OPUS_CODEC_RATE = 48000;
 export const OPUS_BITRATE = 128_000;
 /**
+ * A Duet voice is mono. 112 kbps sits inside the 96–128 kbps the product
+ * asks for and keeps a four-minute pair near seven megabytes.
+ */
+export const OPUS_MONO_BITRATE = 112_000;
+/**
  * Chrome's Opus decoder returns the encoder's 312-sample pre-roll. The encoder
  * is always fed 48 kHz audio, so this is a constant rather than a function of
  * the source rate. It is written into each file header so a later format can
@@ -44,6 +49,16 @@ export interface StemEncoder {
   abort(): void;
 }
 
+/** One mono voice's worth of packets, ready to be framed and stored. */
+export interface MonoStemEncoder {
+  /** Feeds one contiguous block of source-rate mono audio. */
+  encode(mono: Float32Array): Promise<void>;
+  /** Flushes the encoder and returns every packet in order. */
+  finish(): Promise<readonly Uint8Array[]>;
+  /** Releases the codec without producing a usable stream. */
+  abort(): void;
+}
+
 export interface StemCodec {
   readonly id: string;
   /** The rate every stored packet decodes at. */
@@ -54,6 +69,13 @@ export interface StemCodec {
   estimateStemBytes(input: CodecInput): number;
   createEncoder(input: CodecInput): Promise<StemEncoder>;
   decode(packets: readonly Uint8Array[], input: CodecInput): Promise<StereoChannels>;
+  /** The same codec for one voice; the Duet sidecar stores mono. */
+  estimateMonoBytes(input: CodecInput): number;
+  createMonoEncoder(input: CodecInput): Promise<MonoStemEncoder>;
+  decodeMono(
+    packets: readonly Uint8Array[],
+    input: CodecInput,
+  ): Promise<Float32Array>;
 }
 
 /** Catmull-Rom interpolation, with the four taps around one output sample. */
@@ -330,11 +352,113 @@ class OpusStemEncoder implements StemEncoder {
   }
 }
 
+class OpusMonoEncoder implements MonoStemEncoder {
+  private readonly encoder: AudioEncoder;
+  private readonly resampler: StreamingCubicResampler | null;
+  private readonly packets: Uint8Array[] = [];
+  private failure: Error | null = null;
+  private encodedFrames = 0;
+  private closed = false;
+
+  constructor(input: CodecInput) {
+    this.encoder = new AudioEncoder({
+      output: (chunk) => {
+        const bytes = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(bytes);
+        this.packets.push(bytes);
+      },
+      error: (error) => {
+        this.failure ??= codecFailure(error);
+      },
+    });
+    this.encoder.configure({
+      codec: OPUS_CODEC_ID,
+      sampleRate: OPUS_CODEC_RATE,
+      numberOfChannels: 1,
+      bitrate: OPUS_MONO_BITRATE,
+    });
+    this.resampler =
+      input.sampleRate === OPUS_CODEC_RATE
+        ? null
+        : new StreamingCubicResampler(input.sampleRate, OPUS_CODEC_RATE);
+  }
+
+  private check(): void {
+    if (this.failure !== null) {
+      throw this.failure;
+    }
+  }
+
+  private feed(mono: Float32Array): void {
+    if (mono.length === 0) {
+      return;
+    }
+    const planar = new Float32Array(mono.length);
+    planar.set(mono);
+    const data = new AudioData({
+      format: 'f32-planar',
+      sampleRate: OPUS_CODEC_RATE,
+      numberOfFrames: planar.length,
+      numberOfChannels: 1,
+      timestamp: Math.round((this.encodedFrames / OPUS_CODEC_RATE) * 1e6),
+      data: planar,
+    });
+    this.encodedFrames += mono.length;
+    try {
+      this.encoder.encode(data);
+    } finally {
+      data.close();
+    }
+  }
+
+  encode(mono: Float32Array): Promise<void> {
+    try {
+      this.check();
+      const resampled =
+        this.resampler === null ? mono : this.resampler.push(mono, mono).left;
+      this.feed(resampled);
+      this.check();
+      return Promise.resolve();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  async finish(): Promise<readonly Uint8Array[]> {
+    this.check();
+    if (this.resampler !== null) {
+      this.feed(this.resampler.finish().left);
+    }
+    try {
+      await this.encoder.flush();
+    } catch (error) {
+      this.failure = codecFailure(error);
+      throw this.failure;
+    }
+    this.closed = true;
+    this.encoder.close();
+    this.check();
+    return this.packets;
+  }
+
+  abort(): void {
+    if (!this.closed) {
+      this.closed = true;
+      try {
+        this.encoder.close();
+      } catch {
+        // Closing an encoder that already failed is allowed to throw.
+      }
+    }
+  }
+}
+
 class OpusStemCodec implements StemCodec {
   readonly id = OPUS_CODEC_ID;
   readonly codecRate = OPUS_CODEC_RATE;
   readonly delayFrames = OPUS_DELAY_FRAMES;
   private supported: Promise<boolean> | null = null;
+  private monoSupported: Promise<boolean> | null = null;
 
   private async checkSupport(): Promise<void> {
     if (
@@ -368,6 +492,38 @@ class OpusStemCodec implements StemCodec {
     }
   }
 
+  private async checkMonoSupport(): Promise<void> {
+    if (
+      typeof AudioEncoder === 'undefined' ||
+      typeof AudioDecoder === 'undefined' ||
+      typeof AudioEncoder.isConfigSupported !== 'function' ||
+      typeof AudioDecoder.isConfigSupported !== 'function'
+    ) {
+      throw supportError('Opus');
+    }
+    this.monoSupported ??= (async () => {
+      try {
+        const encoder = await AudioEncoder.isConfigSupported({
+          codec: OPUS_CODEC_ID,
+          sampleRate: OPUS_CODEC_RATE,
+          numberOfChannels: 1,
+          bitrate: OPUS_MONO_BITRATE,
+        });
+        const decoder = await AudioDecoder.isConfigSupported({
+          codec: OPUS_CODEC_ID,
+          sampleRate: OPUS_CODEC_RATE,
+          numberOfChannels: 1,
+        });
+        return encoder.supported === true && decoder.supported === true;
+      } catch {
+        return false;
+      }
+    })();
+    if (!(await this.monoSupported)) {
+      throw supportError('Opus');
+    }
+  }
+
   estimateStemBytes(input: CodecInput): number {
     const seconds = input.frames / input.sampleRate;
     const payload = (seconds * OPUS_BITRATE) / 8;
@@ -378,9 +534,21 @@ class OpusStemCodec implements StemCodec {
     return Math.ceil(payload * 1.05) + packets + 256;
   }
 
+  estimateMonoBytes(input: CodecInput): number {
+    const seconds = input.frames / input.sampleRate;
+    const payload = (seconds * OPUS_MONO_BITRATE) / 8;
+    const packets = Math.ceil(seconds / OPUS_PACKET_SECONDS) * 4;
+    return Math.ceil(payload * 1.05) + packets + 256;
+  }
+
   async createEncoder(input: CodecInput): Promise<StemEncoder> {
     await this.checkSupport();
     return new OpusStemEncoder(input);
+  }
+
+  async createMonoEncoder(input: CodecInput): Promise<MonoStemEncoder> {
+    await this.checkMonoSupport();
+    return new OpusMonoEncoder(input);
   }
 
   async decode(
@@ -456,6 +624,77 @@ class OpusStemCodec implements StemCodec {
       left: resampleChannel(trimmedLeft, OPUS_CODEC_RATE, input.sampleRate, input.frames),
       right: resampleChannel(trimmedRight, OPUS_CODEC_RATE, input.sampleRate, input.frames),
     };
+  }
+
+  async decodeMono(
+    packets: readonly Uint8Array[],
+    input: CodecInput,
+  ): Promise<Float32Array> {
+    await this.checkMonoSupport();
+    let failure: Error | null = null;
+    const pieces: Float32Array[] = [];
+    const decoder = new AudioDecoder({
+      output: (data) => {
+        try {
+          const mono = new Float32Array(data.numberOfFrames);
+          data.copyTo(mono, { planeIndex: 0, format: 'f32-planar' });
+          pieces.push(mono);
+        } catch (error) {
+          failure ??= codecFailure(error);
+        } finally {
+          data.close();
+        }
+      },
+      error: (error) => {
+        failure ??= codecFailure(error);
+      },
+    });
+    decoder.configure({
+      codec: OPUS_CODEC_ID,
+      sampleRate: OPUS_CODEC_RATE,
+      numberOfChannels: 1,
+    });
+    try {
+      for (const [index, packet] of packets.entries()) {
+        decoder.decode(
+          new EncodedAudioChunk({
+            type: 'key',
+            timestamp: index * OPUS_PACKET_SECONDS * 1e6,
+            data: packet,
+          }),
+        );
+      }
+      await decoder.flush();
+    } finally {
+      try {
+        decoder.close();
+      } catch {
+        // The decoder may already be closed after a failed flush.
+      }
+    }
+    if (failure !== null) {
+      throw failure;
+    }
+
+    let total = 0;
+    for (const piece of pieces) {
+      total += piece.length;
+    }
+    if (total <= OPUS_DELAY_FRAMES) {
+      throw new Error('stem cache: the audio stream is empty');
+    }
+    const mono = new Float32Array(total);
+    let at = 0;
+    for (const piece of pieces) {
+      mono.set(piece, at);
+      at += piece.length;
+    }
+    return resampleChannel(
+      mono.subarray(OPUS_DELAY_FRAMES),
+      OPUS_CODEC_RATE,
+      input.sampleRate,
+      input.frames,
+    );
   }
 }
 

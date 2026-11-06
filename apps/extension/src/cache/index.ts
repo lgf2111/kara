@@ -1,6 +1,11 @@
 import { createOpusStemCodec } from './codec.ts';
 import type { PracticeNote } from '../audio/practice.ts';
 import type { SongFacts } from '../audio/song-analysis.ts';
+import type {
+  CachedDuet,
+  CachedDuetInput,
+  DuetExpectation,
+} from './duet.ts';
 import {
   createStemCache,
   type CacheEntryQuery,
@@ -9,6 +14,7 @@ import {
   type StemWriter,
   type StemWriterOptions,
 } from './store.ts';
+import type { CachedEntry } from './entry.ts';
 import { createOpfsCacheMetadata } from './metadata-opfs.ts';
 import { createOpfsCacheFiles } from './opfs.ts';
 
@@ -84,6 +90,31 @@ export function readCachedStems(key: string) {
   return stemCache().readCachedStems(key);
 }
 
+export function hasCachedDuet(
+  key: string,
+  expectation?: DuetExpectation,
+): Promise<boolean> {
+  return stemCache().hasCachedDuet(key, expectation);
+}
+
+export function readCachedDuet(
+  key: string,
+  expectation?: DuetExpectation,
+): Promise<CachedDuet | null> {
+  return stemCache().readCachedDuet(key, expectation);
+}
+
+export function writeCachedDuet(
+  key: string,
+  input: CachedDuetInput,
+): Promise<CachedEntry> {
+  return stemCache().writeCachedDuet(key, input);
+}
+
+export function removeCachedDuet(key: string): Promise<void> {
+  return stemCache().removeCachedDuet(key);
+}
+
 export function touch(key: string): Promise<void> {
   return stemCache().touch(key);
 }
@@ -153,6 +184,20 @@ export {
   type CachedStemChannels,
   type StereoChannels,
 } from './entry.ts';
+export {
+  DUET_FORMAT_VERSION,
+  MAX_DUET_MAP_BYTES,
+  type CachedDuet,
+  type CachedDuetInput,
+  type CachedDuetMeta,
+  type CachedDuetVoicePair,
+  type DuetAnchor,
+  type DuetExpectation,
+  type DuetMap,
+  type DuetQuality,
+  type DuetSidecar,
+  type DuetVoices,
+} from './duet.ts';
 export type { CacheMetadata } from './metadata-contract.ts';
 export {
   CACHE_INDEX_DIRECTORY,
@@ -177,6 +222,12 @@ export {
   type StemCacheOptions,
   type StemWriterOptions,
 } from './store.ts';
-export type { CacheFiles, EntryWriter } from './opfs.ts';
-export type { StemCodec, StemEncoder } from './codec.ts';
+export type {
+  CacheFiles,
+  DuetFiles,
+  DuetVoice,
+  DuetWriter,
+  EntryWriter,
+} from './opfs.ts';
+export type { MonoStemEncoder, StemCodec, StemEncoder } from './codec.ts';
 export type { StemCache, StemWriter, CacheUsage };

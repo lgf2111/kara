@@ -7,6 +7,7 @@ import {
   normaliseCacheMetadata,
   normaliseCachedEntry,
 } from '../src/cache/entry.ts';
+import { DUET_FORMAT_VERSION } from '../src/cache/duet.ts';
 import { seedEntry } from './cache-fakes.ts';
 
 describe('cacheKey', () => {
@@ -133,6 +134,43 @@ describe('normaliseCachedEntry', () => {
     expect(parsed).toEqual(entry);
     expect(parsed?.analysis).toBeUndefined();
     expect(parsed?.practiceNotes).toBeUndefined();
+  });
+
+  it('keeps an entry without a duet valid', () => {
+    const entry = seedEntry('abcdefghijk');
+    const parsed = normaliseCachedEntry(entry);
+    expect(parsed).toEqual(entry);
+    expect(parsed?.duet).toBeUndefined();
+  });
+
+  it('keeps a valid duet record and drops a malformed one alone', () => {
+    const entry = seedEntry('abcdefghijk');
+    const duet = {
+      bytes: 300,
+      frames: entry.durationFrames,
+      sampleRate: entry.sampleRate,
+      duetFormatVersion: DUET_FORMAT_VERSION,
+      helperVersion: 'helper-1',
+      modelVersion: 'unmixx-1',
+    };
+    const withDuet = { ...entry, bytes: entry.bytes + duet.bytes, duet };
+
+    expect(normaliseCachedEntry(withDuet)?.duet).toEqual(duet);
+
+    const malformed = normaliseCachedEntry({
+      ...withDuet,
+      duet: { ...duet, frames: duet.frames + 1 },
+    });
+    expect(malformed).not.toBeNull();
+    expect(malformed?.bytes).toBe(entry.bytes + duet.bytes);
+    expect(malformed?.duet).toBeUndefined();
+
+    const impossible = normaliseCachedEntry({
+      ...withDuet,
+      duet: { ...duet, bytes: entry.bytes + duet.bytes },
+    });
+    expect(impossible).not.toBeNull();
+    expect(impossible?.duet).toBeUndefined();
   });
 });
 

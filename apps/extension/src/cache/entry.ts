@@ -3,6 +3,12 @@ import type { SongFacts } from '../audio/song-analysis.ts';
 import { normalisePracticeNotes } from '../audio/practice.ts';
 import { normaliseSongFacts } from '../audio/song-analysis.ts';
 import type { Stem } from '../audio/stems.ts';
+import {
+  normaliseCachedDuetMeta,
+  type CachedDuetMeta,
+} from './duet.ts';
+
+export { DUET_FORMAT_VERSION } from './duet.ts';
 
 /**
  * What a cached stem set is, and the small record that remembers it.
@@ -83,6 +89,11 @@ export interface CachedEntry {
    * has not run yet.
    */
   readonly practiceNotes?: readonly PracticeNote[] | null;
+  /**
+   * The optional Duet sidecar. It is independent of the stems and its own
+   * version: a missing or outdated duet never makes the stems a miss.
+   */
+  readonly duet?: CachedDuetMeta | null;
 }
 
 /** Four stereo channels in the model's order, which is the player's order. */
@@ -232,6 +243,15 @@ export function normaliseCachedEntry(raw: unknown): CachedEntry | null {
   const practiceNotes =
     notes !== null && notes.length <= MAX_CACHED_PRACTICE_NOTES ? notes : null;
 
+  // The duet is a second layer inside the same record. A malformed one is
+  // dropped while the stems stay usable; a duet cannot be the whole entry, so
+  // it must account for less than the total bytes.
+  const duet = normaliseCachedDuetMeta(stored['duet'], {
+    frames: durationFrames,
+    sampleRate,
+  });
+  const validDuet = duet !== undefined && duet.bytes < bytes ? duet : undefined;
+
   return {
     key,
     videoId,
@@ -248,6 +268,7 @@ export function normaliseCachedEntry(raw: unknown): CachedEntry | null {
     complete: true,
     ...(analysis === null ? {} : { analysis }),
     ...(practiceNotes === null ? {} : { practiceNotes }),
+    ...(validDuet === undefined ? {} : { duet: validDuet }),
   };
 }
 

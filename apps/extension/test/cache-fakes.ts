@@ -5,18 +5,37 @@ import {
   type CachedEntry,
   type StereoChannels,
 } from '../src/cache/entry.ts';
-import type { CodecInput, StemCodec, StemEncoder } from '../src/cache/codec.ts';
-import type { CacheFiles, EntryWriter } from '../src/cache/opfs.ts';
+import type {
+  CodecInput,
+  MonoStemEncoder,
+  StemCodec,
+  StemEncoder,
+} from '../src/cache/codec.ts';
+import type {
+  CacheFiles,
+  DuetFiles,
+  DuetVoice,
+  DuetWriter,
+  EntryWriter,
+} from '../src/cache/opfs.ts';
 import type { CacheMetadata } from '../src/cache/metadata-contract.ts';
 
 /**
- * The OPFS stand-in: a map of entries, each with four byte arrays and a
- * complete flag. It copies what it is given, so a test that mutates a buffer
- * after writing is testing the cache rather than the fake.
+ * The OPFS stand-in: a map of entries, each with four byte arrays, an optional
+ * duet sidecar and a complete flag. It copies what it is given, so a test that
+ * mutates a buffer after writing is testing the cache rather than the fake.
  */
+export interface FakeDuetEntry {
+  voice1: Uint8Array;
+  voice2: Uint8Array;
+  map: string;
+  partial: boolean;
+}
+
 export interface FakeFileEntry {
   complete: boolean;
   readonly stems: Map<Stem, Uint8Array[]>;
+  duet: FakeDuetEntry | null;
 }
 
 function join(chunks: readonly Uint8Array[]): Uint8Array {
@@ -37,10 +56,17 @@ export class FakeCacheFiles implements CacheFiles {
   readonly entries = new Map<string, FakeFileEntry>();
   /** Commit attempts that throw QuotaExceededError before succeeding. */
   quotaFailures = 0;
+  /** Duet commit attempts that fail, leaving the partial sidecar behind. */
+  duetFailures = 0;
   begins = 0;
+  duetBegins = 0;
 
   seed(key: string, complete = true): FakeFileEntry {
-    const entry: FakeFileEntry = { complete, stems: new Map() };
+    const entry: FakeFileEntry = {
+      complete,
+      stems: new Map(),
+      duet: null,
+    };
     this.entries.set(key, entry);
     return entry;
   }
@@ -88,6 +114,94 @@ export class FakeCacheFiles implements CacheFiles {
     return Promise.resolve(join(entry.stems.get(stem) ?? []));
   }
 
+  readDuet(key: string): Promise<DuetFiles | null> {
+    const entry = this.entries.get(key);
+    if (entry === undefined || !entry.complete || entry.duet === null) {
+      return Promise.resolve(null);
+    }
+    const { duet } = entry;
+    if (duet.partial) {
+      return Promise.resolve(null);
+    }
+    return Promise.resolve({
+      voice1: new Uint8Array(duet.voice1),
+      voice2: new Uint8Array(duet.voice2),
+      map: duet.map,
+    });
+  }
+
+  hasDuet(key: string): Promise<boolean> {
+    const entry = this.entries.get(key);
+    return Promise.resolve(
+      entry !== undefined &&
+        entry.complete &&
+        entry.duet !== null &&
+        !entry.duet.partial,
+    );
+  }
+
+  beginDuet(key: string): Promise<DuetWriter> {
+    const entry = this.entries.get(key);
+    if (entry === undefined || !entry.complete) {
+      return Promise.reject(new Error('the entry is not available for a duet'));
+    }
+    this.duetBegins += 1;
+    entry.duet = {
+      voice1: new Uint8Array(),
+      voice2: new Uint8Array(),
+      map: '',
+      partial: true,
+    };
+    const duet = entry.duet;
+    let settled = false;
+    return Promise.resolve({
+      writeVoice: (voice: DuetVoice, bytes: Uint8Array<ArrayBuffer>) => {
+        if (voice === 1) {
+          duet.voice1 = new Uint8Array(bytes);
+        } else {
+          duet.voice2 = new Uint8Array(bytes);
+        }
+        return Promise.resolve();
+      },
+      writeMap: (json: string) => {
+        duet.map = json;
+        return Promise.resolve();
+      },
+      commit: () => {
+        if (this.duetFailures > 0) {
+          this.duetFailures -= 1;
+          return Promise.reject(
+            new DOMException('the disk is full', 'QuotaExceededError'),
+          );
+        }
+        if (duet.map === '') {
+          return Promise.reject(new Error('the duet map was not written'));
+        }
+        duet.partial = false;
+        settled = true;
+        return Promise.resolve(
+          duet.voice1.byteLength +
+            duet.voice2.byteLength +
+            new TextEncoder().encode(duet.map).byteLength,
+        );
+      },
+      abort: () => {
+        if (!settled) {
+          entry.duet = null;
+        }
+        return Promise.resolve();
+      },
+    });
+  }
+
+  removeDuet(key: string): Promise<void> {
+    const entry = this.entries.get(key);
+    if (entry !== undefined) {
+      entry.duet = null;
+    }
+    return Promise.resolve();
+  }
+
   hasComplete(key: string): Promise<boolean> {
     return Promise.resolve(this.entries.get(key)?.complete === true);
   }
@@ -104,6 +218,8 @@ export class FakeCacheFiles implements CacheFiles {
       if (!valid.has(key) || !entry.complete) {
         this.entries.delete(key);
         removed += 1;
+      } else if (entry.duet?.partial === true) {
+        entry.duet = null;
       }
     }
     return Promise.resolve(removed);
@@ -171,6 +287,56 @@ export class FakeCodec implements StemCodec {
 
   estimateStemBytes(input: CodecInput): number {
     return this.estimateBytes ?? input.frames * this.bytesPerFrame + 32;
+  }
+
+  estimateMonoBytes(input: CodecInput): number {
+    return (
+      this.estimateBytes ?? input.frames * (this.bytesPerFrame / 2) + 32
+    );
+  }
+
+  createMonoEncoder(): Promise<MonoStemEncoder> {
+    const packets: Uint8Array[] = [];
+    return Promise.resolve({
+      encode: (mono) => {
+        if (this.failEncode) {
+          return Promise.reject(new Error('the fake codec failed'));
+        }
+        const samples = new Int16Array(mono.length);
+        for (let index = 0; index < mono.length; index += 1) {
+          samples[index] = Math.round(
+            Math.max(-1, Math.min(1, mono[index] ?? 0)) * 32767,
+          );
+        }
+        packets.push(new Uint8Array(samples.buffer));
+        return Promise.resolve();
+      },
+      finish: () => Promise.resolve(packets),
+      abort: () => {
+        packets.length = 0;
+      },
+    });
+  }
+
+  decodeMono(
+    packets: readonly Uint8Array[],
+    input: CodecInput,
+  ): Promise<Float32Array> {
+    const mono = new Float32Array(input.frames);
+    let at = 0;
+    for (const packet of packets) {
+      const view = new DataView(
+        packet.buffer,
+        packet.byteOffset,
+        packet.byteLength,
+      );
+      const frames = packet.byteLength / 2;
+      for (let index = 0; index < frames && at + index < input.frames; index += 1) {
+        mono[at + index] = view.getInt16(index * 2, true) / 32767;
+      }
+      at += frames;
+    }
+    return Promise.resolve(mono);
   }
 
   createEncoder(): Promise<StemEncoder> {
