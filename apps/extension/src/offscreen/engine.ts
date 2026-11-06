@@ -23,8 +23,10 @@ import {
   type DuetStatus,
 } from '../audio/duet.ts';
 import { encodeWavMono } from '../audio/wav.ts';
+import { IDLE_MIC_STATUS, type MicFx } from '../audio/mic-fx.ts';
 import type { PracticeNote } from '../audio/practice.ts';
 import { SONG_ANALYSIS_RATE } from '../audio/song-analysis.ts';
+import { MicRoom } from './mic-room.ts';
 import { startPractice as startPracticeSession, type PracticeHandle } from './practice.ts';
 import type {
   SongAnalysisCommand,
@@ -59,7 +61,7 @@ import type {
   StatusReport,
   StreamInfo,
 } from '../protocol.ts';
-import { NO_METRICS } from '../protocol.ts';
+import { NO_METRICS, packet } from '../protocol.ts';
 import { medianMs, planJob } from '../../../web/src/separation/job.ts';
 
 /**
@@ -163,6 +165,12 @@ export interface Engine {
   startPractice(): void;
   /** Release the microphone and forget the analysis. */
   stopPractice(): void;
+  /** The microphone desk: level, monitor, effects and compression. */
+  setMicFx(fx: MicFx): void;
+  /** Begin a take on the stems-and-microphone recording bus. */
+  startRecording(): void;
+  /** Stop and flush the take. */
+  stopRecording(): void;
   dominantHz(): number | null;
   /** The loudest frequency within `spread` Hz of `hz`, for a known partial. */
   peakHz(hz: number, spread?: number): number | null;
@@ -465,6 +473,8 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
   let vocalsMono: Float32Array | null = null;
   /** The opt-in practice desk, or null when nobody has asked for it. */
   let practice: PracticeHandle | null = null;
+  /** The microphone, effects and recorder; null until the graph is made. */
+  let mic: MicRoom | null = null;
   /**
    * The melody the last practice pass found. Kept for the session so Sing
    * again after the video ends can open the microphone at once instead of
@@ -577,6 +587,12 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     const next = nextStatus(state, event);
     if (next !== state) {
       state = next;
+      // A dead end is a dead end for the take too: flush it while the context
+      // is still alive rather than leaving the recorder running for a session
+      // that has stopped.
+      if (next.status === 'error' || next.status === 'unsupported') {
+        void mic?.stopRecording();
+      }
       tellStatus();
     }
   };
@@ -590,6 +606,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     mode,
     mix,
     duet,
+    mic: mic?.status() ?? IDLE_MIC_STATUS,
     semitones,
     analyzedSeconds: stemEnd > 0 ? stemEnd / SAMPLE_RATE : null,
     videoId: options.stream.videoId,
@@ -599,6 +616,28 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
   const tellStatus = (): void => {
     options.onStatus(report());
   };
+
+  /**
+   * The microphone desk lives beside the stems and records through its own
+   * bus: the pitch-shifted stems are connected into it, and the processed
+   * microphone joins them there. Monitoring is a second, separate connection
+   * to the speakers that starts shut.
+   */
+  mic = new MicRoom({
+    context,
+    videoId: options.stream.videoId,
+    nowMs: wallNowMs,
+    openStream: (constraints) => navigator.mediaDevices.getUserMedia({ audio: constraints }),
+    onStatus: () => {
+      tellStatus();
+    },
+    onDownload: (url, filename) => {
+      chrome.runtime
+        .sendMessage(packet('background', { type: 'request-download', url, filename }))
+        .catch(() => undefined);
+    },
+  });
+  pitch.connect(mic.recordInput);
 
   /**
    * Live metrics are a debug-harness thing. Ten a second relayed through the
@@ -957,6 +996,17 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     if (practice?.running() === true) {
       return;
     }
+    const room = mic;
+    if (room === null) {
+      options.onPractice?.({
+        type: 'practice-analysis',
+        state: 'error',
+        progress: null,
+        notes: null,
+        detail: 'The microphone desk is not ready.',
+      });
+      return;
+    }
     if (vocalsMono === null || sampleCount === 0 || stemEnd < sampleCount) {
       options.onPractice?.({
         type: 'practice-analysis',
@@ -977,6 +1027,12 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       sampleRate: context.sampleRate,
       media: () => latest,
       notes: cached,
+      microphone: {
+        acquire: () => room.acquire('practice'),
+        release: () => {
+          room.release('practice');
+        },
+      },
       onReport: (report) => {
         if (
           report.type === 'practice-analysis' &&
@@ -1522,6 +1578,18 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
 
     stopPractice,
 
+    setMicFx(next) {
+      mic?.setFx(next);
+    },
+
+    startRecording() {
+      void mic?.beginRecording();
+    },
+
+    stopRecording() {
+      void mic?.stopRecording();
+    },
+
     dominantHz,
 
     peakHz,
@@ -1584,6 +1652,13 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       analysis?.terminate();
       analysisBuffers = null;
       analysisInputs = null;
+      // Flush any take before the context and the document go away. The
+      // recorder's busy loop requests a final chunk and waits for it.
+      const room = mic;
+      mic = null;
+      if (room !== null) {
+        await room.dispose();
+      }
       if (duetJobId !== null && duetClient !== null) {
         void duetClient.cancel(duetJobId).catch(() => undefined);
       }

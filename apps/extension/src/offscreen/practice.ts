@@ -1,5 +1,5 @@
 import { projectMediaSeconds, type MediaSample } from '../audio/media-time.ts';
-import { MIC_CONSTRAINTS, microphoneErrorText } from '../audio/microphone.ts';
+import { microphoneErrorText } from '../audio/microphone.ts';
 import {
   PITCH_CLARITY,
   PITCH_MAX_HZ,
@@ -67,6 +67,17 @@ export interface PracticeDeps {
   /** The last media report, projected to now by this module. */
   readonly media: () => MediaSample | null;
   /**
+   * The engine's microphone desk. Practice shares its stream rather than
+   * opening a second one, and takes a reference for as long as it listens.
+   */
+  readonly microphone: {
+    readonly acquire: () => Promise<{
+      readonly stream: MediaStream;
+      readonly context: AudioContext;
+    }>;
+    readonly release: () => void;
+  };
+  /**
    * A melody already learnt for this stem. Sing again reuses it so a second
    * run opens the microphone at once rather than showing the learning state.
    */
@@ -84,12 +95,13 @@ export function startPractice(deps: PracticeDeps): PracticeHandle {
   let stopped = false;
   let active = true;
   let worker: Worker | null = null;
-  let stream: MediaStream | null = null;
   let context: AudioContext | null = null;
   let source: MediaStreamAudioSourceNode | null = null;
   let analyser: AnalyserNode | null = null;
   let buffer: Float32Array<ArrayBuffer> | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
+  /** Whether this run holds a reference on the engine's shared microphone. */
+  let holdsMicrophone = false;
   let notes: readonly PracticeNote[] = [];
   let state: PracticeScoreState = newPracticeScore([]);
   let lastReportMs = 0;
@@ -125,16 +137,10 @@ export function startPractice(deps: PracticeDeps): PracticeHandle {
     analyser?.disconnect();
     analyser = null;
     buffer = null;
-    if (stream !== null) {
-      for (const track of stream.getTracks()) {
-        track.stop();
-      }
-      stream = null;
-    }
-    const running = context;
     context = null;
-    if (running !== null) {
-      void running.close().catch(() => undefined);
+    if (holdsMicrophone) {
+      holdsMicrophone = false;
+      deps.microphone.release();
     }
   };
 
@@ -242,21 +248,20 @@ export function startPractice(deps: PracticeDeps): PracticeHandle {
   };
 
   const openMicrophone = async (): Promise<void> => {
+    let shared: { readonly stream: MediaStream; readonly context: AudioContext };
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: MIC_CONSTRAINTS });
+      shared = await deps.microphone.acquire();
     } catch (cause) {
       fail(microphoneMessage(cause));
       return;
     }
+    holdsMicrophone = true;
     if (stopped) {
-      for (const track of stream.getTracks()) {
-        track.stop();
-      }
-      stream = null;
+      releaseMicrophone();
       return;
     }
     try {
-      context = new AudioContext({ latencyHint: 'interactive' });
+      context = shared.context;
       if (context.state === 'suspended') {
         await context.resume();
       }
@@ -264,10 +269,10 @@ export function startPractice(deps: PracticeDeps): PracticeHandle {
         releaseMicrophone();
         return;
       }
-      source = context.createMediaStreamSource(stream);
+      source = context.createMediaStreamSource(shared.stream);
       analyser = new AnalyserNode(context, { fftSize: 2048, smoothingTimeConstant: 0 });
-      // Only the analyser is connected. Nothing from the microphone reaches
-      // the speakers, so practice cannot feed back into itself.
+      // Only the analyser is connected. The shared microphone is not routed
+      // anywhere here; the desk's monitor switch decides that separately.
       source.connect(analyser);
       buffer = new Float32Array(analyser.fftSize);
     } catch (cause) {

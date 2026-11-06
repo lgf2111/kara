@@ -4,7 +4,12 @@ import { buildManifest } from '../src/manifest.ts';
 
 describe('buildManifest', () => {
   it('asks for the permissions the audio side needs and no more', () => {
-    expect(buildManifest().permissions).toEqual(['offscreen', 'storage', 'audioCapture']);
+    expect(buildManifest().permissions).toEqual([
+      'offscreen',
+      'storage',
+      'audioCapture',
+      'downloads',
+    ]);
   });
 
   it('is on youtube.com plus the local duet helper by default', () => {
@@ -55,5 +60,9 @@ describe('buildManifest', () => {
     const policy = buildManifest().content_security_policy.extension_pages;
 
     expect(policy).toBe("script-src 'self' 'wasm-unsafe-eval'; object-src 'self'");
+  });
+
+  it('may save the finished recording, because only it can', () => {
+    expect(buildManifest().permissions).toContain('downloads');
   });
 });

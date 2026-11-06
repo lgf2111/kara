@@ -1,4 +1,10 @@
 import { canNudge, KEY_DEFAULT, keyLabel, nudgeKey } from '../audio/key.ts';
+import {
+  DEFAULT_MIC_FX,
+  MONITOR_WARNING,
+  normaliseMicFx,
+  type MicFx,
+} from '../audio/mic-fx.ts';
 import { progressPercent } from '../audio/progress.ts';
 import {
   DEFAULT_DUET_MIX,
@@ -65,6 +71,17 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /** The three stems behind the disclosure; the vocal is always on screen. */
 const BACKING = ['drums', 'bass', 'other'] as const;
+
+/** The microphone desk's five sliders, in the order they are drawn. */
+type MicSlider = 'level' | 'reverb' | 'echo' | 'tone' | 'compression';
+
+const MIC_SLIDERS: readonly { readonly key: MicSlider; readonly label: string }[] = [
+  { key: 'level', label: 'Level' },
+  { key: 'reverb', label: 'Reverb' },
+  { key: 'echo', label: 'Echo' },
+  { key: 'tone', label: 'Tone' },
+  { key: 'compression', label: 'Compress' },
+];
 
 /** One 24 × 24 outline vocabulary, drawn in the panel's own colours. */
 const ICONS: Readonly<Record<string, readonly string[]>> = {
@@ -560,6 +577,123 @@ button[hidden] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.mic-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--kara-border);
+  border-radius: var(--kara-radius);
+  background: var(--kara-surface);
+}
+.mic-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--kara-control);
+}
+.mic-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kara-text);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mic-button {
+  height: var(--kara-control);
+  padding: 0 10px;
+  border-color: var(--kara-border-strong);
+  color: var(--kara-text);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.mic-button:hover {
+  border-color: var(--kara-accent);
+  color: var(--kara-accent);
+}
+.mic-button[aria-pressed='true'] {
+  border-color: var(--kara-accent);
+  background: var(--kara-accent-tint);
+  color: var(--kara-accent);
+}
+.mic-warning {
+  margin: 0;
+  color: var(--kara-faint);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.mic-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mic-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mic-name {
+  width: 66px;
+  overflow: hidden;
+  color: var(--kara-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mic-row .slider {
+  flex: 1;
+}
+.mic-value {
+  width: 28px;
+  color: var(--kara-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.record-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.record-button {
+  flex: 1;
+  height: var(--kara-control);
+  padding: 0 10px;
+  border-color: var(--kara-border-strong);
+  color: var(--kara-text);
+  font-size: 11px;
+  font-weight: 650;
+}
+.record-button:hover {
+  border-color: var(--kara-accent);
+  color: var(--kara-accent);
+}
+.record-button[data-active='true'] {
+  border-color: rgba(229, 139, 139, 0.55);
+  background: var(--kara-danger-tint);
+  color: var(--kara-danger);
+}
+.record-time {
+  width: 48px;
+  color: var(--kara-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.mic-detail {
+  margin: 0;
+  color: var(--kara-faint);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.mic-detail[data-tone='error'] {
+  color: var(--kara-danger);
+}
 .duet-panel {
   display: flex;
   flex-direction: column;
@@ -813,6 +947,10 @@ export interface PanelHandlers {
   readonly onPracticeStart: () => void;
   /** Release the microphone and put the video back. */
   readonly onPracticeStop: () => void;
+  /** The microphone desk as a whole; the monitor switch is part of it. */
+  readonly onMicFx: (fx: MicFx) => void;
+  readonly onRecordStart: () => void;
+  readonly onRecordStop: () => void;
 }
 
 export interface Panel {
@@ -1138,6 +1276,111 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   const songTransposeCell = songRow('Suggested');
   songBox.append(songHead, songFacts);
   mixer.append(songBox);
+
+  /**
+   * The microphone desk. The monitor starts off and the warning is always
+   * beside the switch, because the one mistake this panel must not invite is
+   * a microphone through the same speakers as the backing. Recording is
+   * independent: it takes the processed microphone whether the monitor is on
+   * or not, mixed with whatever the stems are playing.
+   */
+  const micBox = div('mic-panel');
+  const micHead = div('mic-head');
+  const micTitle = span('mic-title');
+  micTitle.textContent = 'Mic & recording';
+  const monitor = button('Monitor off', 'mic-button');
+  monitor.setAttribute('aria-pressed', 'false');
+  monitor.setAttribute('aria-label', 'Monitor the microphone in the speakers');
+  monitor.title = MONITOR_WARNING;
+  micHead.append(micTitle, monitor);
+
+  const micWarning = paragraph('mic-warning');
+  micWarning.textContent = MONITOR_WARNING;
+
+  const micRows = div('mic-rows');
+  interface MicControl {
+    readonly input: HTMLInputElement;
+    readonly fill: HTMLDivElement;
+    readonly value: HTMLSpanElement;
+  }
+  const micControls = new Map<MicSlider, MicControl>();
+
+  const paintMic = (control: MicControl, percent: number): void => {
+    control.input.value = String(percent);
+    control.value.textContent = String(percent);
+    control.fill.style.width = `${String(percent)}%`;
+  };
+
+  const micFromControls = (): MicFx => {
+    const percent = (key: MicSlider): number =>
+      Number(micControls.get(key)?.input.value ?? 0);
+    return normaliseMicFx({
+      level: stemFromPercent(percent('level')),
+      monitor: monitor.getAttribute('aria-pressed') === 'true',
+      reverb: stemFromPercent(percent('reverb')),
+      echo: stemFromPercent(percent('echo')),
+      tone: stemFromPercent(percent('tone')),
+      compression: stemFromPercent(percent('compression')),
+    });
+  };
+
+  for (const { key, label } of MIC_SLIDERS) {
+    const row = div('mic-row');
+    const name = span('mic-name');
+    name.textContent = label;
+    const slider = div('slider');
+    const track = div('track');
+    const sliderFill = div('slider-fill');
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = '0';
+    input.max = '100';
+    input.step = '1';
+    input.setAttribute('aria-label', `Mic ${label.toLowerCase()}`);
+    slider.append(track, sliderFill, input);
+    const value = span('mic-value');
+    row.append(name, slider, value);
+    const control: MicControl = { input, fill: sliderFill, value };
+    micControls.set(key, control);
+    paintMic(control, stemPercent(DEFAULT_MIC_FX[key]));
+    input.addEventListener('input', () => {
+      paintMic(control, Number(input.value));
+      handlers.onMicFx(micFromControls());
+    });
+    micRows.append(row);
+  }
+
+  const recordRow = div('record-row');
+  const recordButton = button('Record', 'record-button');
+  recordButton.setAttribute('aria-label', 'Record the performance');
+  recordButton.title = 'Record the backing and the processed microphone to a WebM file';
+  const recordTime = span('record-time');
+  recordTime.textContent = '0:00';
+  recordTime.setAttribute('role', 'timer');
+  recordTime.setAttribute('aria-live', 'off');
+  recordRow.append(recordButton, recordTime);
+
+  const micDetail = paragraph('mic-detail');
+  micDetail.hidden = true;
+
+  micBox.append(micHead, micWarning, micRows, recordRow, micDetail);
+  mixer.append(micBox);
+
+  monitor.addEventListener('click', () => {
+    const pressed = monitor.getAttribute('aria-pressed') !== 'true';
+    monitor.setAttribute('aria-pressed', String(pressed));
+    handlers.onMicFx(micFromControls());
+  });
+  recordButton.addEventListener('click', () => {
+    if (recordButton.disabled) {
+      return;
+    }
+    if (lastView?.recordActive === true) {
+      handlers.onRecordStop();
+    } else {
+      handlers.onRecordStart();
+    }
+  });
 
   /**
    * The duet panel. It is a second desk, shown only after the helper has
@@ -1649,6 +1892,46 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
       songRangeCell.value.textContent = view.songRange ?? '';
       songTransposeCell.value.textContent = view.songTranspose ?? '';
     }
+
+    micBox.hidden = !view.controls;
+    monitor.setAttribute('aria-pressed', String(view.monitorOn));
+    monitor.textContent = view.monitorOn ? 'Monitor on' : 'Monitor off';
+    monitor.setAttribute(
+      'aria-label',
+      view.monitorOn ? 'Stop monitoring the microphone' : 'Monitor the microphone in the speakers',
+    );
+    monitor.title = view.monitorOn
+      ? `${view.micWarning} Monitoring is on.`
+      : view.micWarning;
+    for (const { key } of MIC_SLIDERS) {
+      const control = micControls.get(key);
+      if (control === undefined) {
+        continue;
+      }
+      const percent = stemPercent(view.mic[key]);
+      if (root.activeElement !== control.input) {
+        paintMic(control, percent);
+      } else {
+        control.value.textContent = String(percent);
+      }
+    }
+    recordButton.textContent = view.recordLabel;
+    recordButton.dataset['active'] = String(view.recordActive);
+    recordButton.disabled = view.recordBusy;
+    recordButton.setAttribute(
+      'aria-label',
+      view.recordActive ? 'Stop recording' : view.recordLabel,
+    );
+    recordButton.title = view.recordActive
+      ? 'Stop and save the recording'
+      : view.recordBusy
+        ? 'Finishing the recording'
+        : 'Record the backing and the processed microphone to a WebM file';
+    recordTime.textContent = view.recordTimer;
+    recordTime.dataset['active'] = String(view.recordActive);
+    micDetail.textContent = view.micDetail ?? '';
+    micDetail.hidden = view.micDetail === null;
+    micDetail.dataset['tone'] = view.micError ? 'error' : 'hint';
 
     for (const index of [0, 1] as const) {
       const control = duetControls.get(index);

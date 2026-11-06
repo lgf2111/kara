@@ -2,6 +2,11 @@ import { analyzedFraction } from './audio/analysis.ts';
 import { isRunning } from './audio/status.ts';
 import type { DuetMix } from './audio/duet.ts';
 import {
+  normaliseMicFx,
+  normaliseMicStatus,
+  type MicFx,
+} from './audio/mic-fx.ts';
+import {
   normalisePracticeAnalysis,
   normalisePracticeLive,
   normalisePracticeScore,
@@ -476,7 +481,8 @@ function unmount(): void {
     practiceFrame = null;
   }
   // A replaced player, a navigation or a closed page must never leave the
-  // microphone open or the video darkened.
+  // microphone open, a take running or the video darkened.
+  toOffscreen({ type: 'record-stop' });
   stopPractice();
   // Leaving a video muted after the panel is gone would be the extension
   // taking something with it.
@@ -537,6 +543,15 @@ function mount(): void {
     },
     onPracticeStop: () => {
       stopPractice();
+    },
+    onMicFx: (fx) => {
+      setMicFx(fx);
+    },
+    onRecordStart: () => {
+      toOffscreen({ type: 'record-start' });
+    },
+    onRecordStop: () => {
+      toOffscreen({ type: 'record-stop' });
     },
   });
   mounted = {
@@ -624,6 +639,25 @@ function setKey(semitones: number): void {
   toOffscreen({ type: 'key', semitones });
   if (report !== null) {
     report = { ...report, semitones };
+    refresh();
+  }
+}
+
+/**
+ * The microphone desk answers immediately, like the mixer. The monitor is the
+ * one field worth predicting: the button has already been pressed, and waiting
+ * for the round trip would put it back under the thumb. A refusal from the
+ * engine's report will turn it off again in a moment.
+ */
+function setMicFx(fx: MicFx): void {
+  const tidy = normaliseMicFx(fx);
+  toOffscreen({ type: 'mic', fx: tidy });
+  if (report !== null) {
+    const current = normaliseMicStatus(report.mic);
+    report = {
+      ...report,
+      mic: { ...current, fx: tidy, monitor: tidy.monitor },
+    };
     refresh();
   }
 }
@@ -785,8 +819,10 @@ setInterval(() => {
   refresh();
 }, TICK_MS);
 
-// A page that is being torn down must not leave the microphone open behind it.
+// A page that is being torn down must not leave the microphone open behind it,
+// and a take in progress is flushed rather than lost.
 window.addEventListener('pagehide', () => {
+  toOffscreen({ type: 'record-stop' });
   if (practiceVisible()) {
     stopPractice();
   }

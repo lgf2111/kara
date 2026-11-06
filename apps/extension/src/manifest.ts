@@ -66,7 +66,7 @@ export function buildManifest(options: ManifestOptions = {}): Manifest {
     // This needs a WebGPU adapter with shader-f16, which is a much later
     // Chrome in practice.
     minimum_chrome_version: '116',
-    permissions: ['offscreen', 'storage', 'audioCapture'],
+    permissions: ['offscreen', 'storage', 'audioCapture', 'downloads'],
     // The audio streams YouTube serves live on googlevideo.com, so reading one
     // is a host permission; it is read by extension contexts only.
     host_permissions: [...matches, GOOGLEVIDEO, DUET_HELPER],

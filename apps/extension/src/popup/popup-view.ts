@@ -254,6 +254,9 @@ function diagnosticsOf(
               ? '—'
               : decimalSeconds(metrics.stemFrames / pipeline.sampleRate),
         },
+        { label: 'Mic', value: report?.mic?.enabled === true ? 'open' : 'off' },
+        { label: 'Monitor', value: report?.mic?.monitor === true ? 'on' : 'off' },
+        { label: 'Recording', value: report?.mic?.recording.state ?? 'idle' },
       ],
     },
   ];

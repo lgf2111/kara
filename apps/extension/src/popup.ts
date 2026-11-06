@@ -414,7 +414,7 @@ micEnable.addEventListener('click', () => {
     .getUserMedia({ audio: MIC_CONSTRAINTS })
     .then((stream) => {
       stopMicrophone(stream);
-      micStatus.textContent = 'Microphone enabled. Start Practice from the player.';
+      micStatus.textContent = 'Microphone enabled. Use Monitor or Record in the player.';
       micEnable.textContent = 'Microphone enabled';
     })
     .catch((cause: unknown) => {

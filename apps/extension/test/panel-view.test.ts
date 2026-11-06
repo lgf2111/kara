@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import { DEFAULT_DUET_MIX, type DuetStatus } from '../src/audio/duet.ts';
+import { DEFAULT_MIC_FX, normaliseMicStatus } from '../src/audio/mic-fx.ts';
 import type { PracticeAnalysis } from '../src/audio/practice.ts';
 import type { SongAnalysis } from '../src/audio/song-analysis.ts';
+import { IDLE_RECORDING } from '../src/audio/recording.ts';
 import { DEFAULT_MIX, withMute, withSolo, withStem } from '../src/audio/stems.ts';
 import { panelView, prepareDetail } from '../src/content/panel-view.ts';
 import { report, separating } from './report.ts';
@@ -135,6 +137,102 @@ describe('panelView', () => {
 describe('prepareDetail', () => {
   it('is nothing at all when nothing is being prepared', () => {
     expect(prepareDetail(report())).toBeNull();
+  });
+});
+
+describe('the microphone desk', () => {
+  function mic(patch: Record<string, unknown> = {}): ReturnType<typeof normaliseMicStatus> {
+    return normaliseMicStatus({
+      fx: DEFAULT_MIC_FX,
+      enabled: true,
+      monitor: false,
+      error: null,
+      recording: IDLE_RECORDING,
+      ...patch,
+    });
+  }
+
+  it('starts with the monitor off and says why', () => {
+    const view = panelView({ report: report({ status: 'ready' }) });
+
+    expect(view.mic).toEqual(DEFAULT_MIC_FX);
+    expect(view.micOn).toBe(false);
+    expect(view.monitorOn).toBe(false);
+    expect(view.micWarning).toContain('headphones');
+    expect(view.recordLabel).toBe('Record');
+    expect(view.recordTimer).toBe('0:00');
+    expect(view.recordActive).toBe(false);
+  });
+
+  it('shows the monitor only once the engine says it is audible', () => {
+    const view = panelView({
+      report: report({
+        status: 'ready',
+        mic: mic({ fx: { ...DEFAULT_MIC_FX, monitor: true }, monitor: true }),
+      }),
+    });
+
+    expect(view.micOn).toBe(true);
+    expect(view.monitorOn).toBe(true);
+  });
+
+  it('counts a take and calls the button Stop', () => {
+    const view = panelView({
+      report: report({
+        status: 'ready',
+        mic: mic({
+          recording: {
+            state: 'recording',
+            startedAtMs: 1,
+            seconds: 65,
+            filename: 'kara-x.webm',
+            detail: null,
+          },
+        }),
+      }),
+    });
+
+    expect(view.recordingState).toBe('recording');
+    expect(view.recordActive).toBe(true);
+    expect(view.recordLabel).toBe('Stop');
+    expect(view.recordTimer).toBe('1:05');
+  });
+
+  it('names the saved file and keeps a failure in the panel', () => {
+    const saved = panelView({
+      report: report({
+        status: 'ready',
+        mic: mic({
+          recording: {
+            state: 'saved',
+            startedAtMs: null,
+            seconds: 12,
+            filename: 'kara-x.webm',
+            detail: null,
+          },
+        }),
+      }),
+    });
+    const failed = panelView({
+      report: report({
+        status: 'ready',
+        mic: mic({
+          recording: {
+            state: 'error',
+            startedAtMs: null,
+            seconds: 12,
+            filename: 'kara-x.webm',
+            detail: 'The recorder stopped.',
+          },
+        }),
+      }),
+    });
+
+    expect(saved.recordLabel).toBe('Record again');
+    expect(saved.micDetail).toContain('kara-x.webm');
+    expect(saved.micError).toBe(false);
+    expect(failed.micError).toBe(true);
+    expect(failed.micDetail).toBe('The recorder stopped.');
   });
 });
 

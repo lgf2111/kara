@@ -1,5 +1,12 @@
 import { clampKey, KEY_DEFAULT, keyLabel } from '../audio/key.ts';
+import {
+  IDLE_MIC_STATUS,
+  MONITOR_WARNING,
+  normaliseMicStatus,
+  type MicFx,
+} from '../audio/mic-fx.ts';
 import { aboutText, prepareLabel } from '../audio/progress.ts';
+import { recordingTimer, type RecordingState } from '../audio/recording.ts';
 import { DEFAULT_MIX, normaliseMix, type StemMix } from '../audio/stems.ts';
 import {
   IDLE_DUET,
@@ -93,6 +100,20 @@ export interface PanelView {
   readonly songTranspose: string | null;
   /** The one line shown while the analysis runs or after it stops. */
   readonly songDetail: string | null;
+  /** The microphone desk: five controls and a monitor that starts shut. */
+  readonly mic: MicFx;
+  readonly micWarning: string;
+  /** Whether the stream is open, and whether the monitor is actually audible. */
+  readonly micOn: boolean;
+  readonly monitorOn: boolean;
+  /** A microphone failure or the last saved filename, in one line. */
+  readonly micDetail: string | null;
+  readonly micError: boolean;
+  readonly recordingState: RecordingState;
+  readonly recordLabel: string;
+  readonly recordTimer: string;
+  readonly recordActive: boolean;
+  readonly recordBusy: boolean;
 }
 
 export interface PanelInput {
@@ -186,6 +207,27 @@ export function panelView(input: PanelInput): PanelView {
       : songAnalysisState === 'error'
         ? (analysis?.detail ?? 'The song could not be read.')
         : null;
+  const micDesk = normaliseMicStatus(report?.mic ?? IDLE_MIC_STATUS);
+  const recording = micDesk.recording;
+  const recordLabel =
+    recording.state === 'recording'
+      ? 'Stop'
+      : recording.state === 'saving'
+        ? 'Saving…'
+        : recording.state === 'saved'
+          ? 'Record again'
+          : recording.state === 'error'
+            ? 'Try again'
+            : 'Record';
+  const recordActive = recording.state === 'recording';
+  const recordBusy = recording.state === 'saving';
+  const micDetail =
+    micDesk.error ??
+    (recording.state === 'error'
+      ? (recording.detail ?? 'The recording stopped.')
+      : recording.state === 'saved'
+        ? `Saved ${recording.filename ?? 'the take'}.`
+        : null);
   const quiet = {
     progress: null,
     detail: null,
@@ -219,6 +261,17 @@ export function panelView(input: PanelInput): PanelView {
     songRange,
     songTranspose,
     songDetail,
+    mic: micDesk.fx,
+    micWarning: MONITOR_WARNING,
+    micOn: micDesk.enabled,
+    monitorOn: micDesk.monitor,
+    micDetail,
+    micError: micDesk.error !== null || recording.state === 'error',
+    recordingState: recording.state,
+    recordLabel,
+    recordTimer: recordingTimer(recording.seconds),
+    recordActive,
+    recordBusy,
   };
 
   if (report === null || report.status === 'idle') {

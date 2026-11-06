@@ -169,6 +169,15 @@ function accept(command: Command): void {
     case 'practice-stop':
       engine?.stopPractice();
       return;
+    case 'mic':
+      engine?.setMicFx(command.fx);
+      return;
+    case 'record-start':
+      engine?.startRecording();
+      return;
+    case 'record-stop':
+      engine?.stopRecording();
+      return;
     case 'key':
       if (engine === null) {
         pendingKey = command.semitones;
@@ -190,7 +199,7 @@ function accept(command: Command): void {
   }
 }
 
-chrome.runtime.onMessage.addListener((message: unknown) => {
+chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   const received = packetFor('offscreen', message);
   if (received === null) {
     return false;
@@ -199,6 +208,20 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
   if (!isCommand(body)) {
     // A report or a request addressed here is nothing to act on.
     return false;
+  }
+  if (body.type === 'stop') {
+    accept(body);
+    // The service worker waits for this before closing the document, so a
+    // recording in progress has time to flush its last chunk and be saved.
+    turn.then(
+      () => {
+        sendResponse(null);
+      },
+      () => {
+        sendResponse(null);
+      },
+    );
+    return true;
   }
   accept(body);
   return false;

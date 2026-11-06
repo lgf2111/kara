@@ -55,17 +55,18 @@ const OFFSCREEN_PAGE = 'offscreen.html';
  * lifetime-free, and this one is honest: the document owns the separation
  * worker as well as the audio context.
  *
- * `USER_MEDIA` is there for pitch practice. A microphone is only opened when
- * a person asks for practice and has already granted it from the popup; the
- * document itself makes no request until then. Both reasons keep the document
- * alive for the session rather than tying it to sound or to a device.
+ * `USER_MEDIA` is there for the microphone desk. A microphone is only opened
+ * when a person asks for monitoring, recording or practice, and has already
+ * granted it from the popup; the document itself makes no request until then.
+ * All three share one stream. The reasons keep the document alive for the
+ * session rather than tying it to sound or to a device.
  */
-const OFFSCREEN_REASONS = ['WORKERS', 'USER_MEDIA'] as const;
+const OFFSCREEN_REASONS = ['WORKERS', 'USER_MEDIA', 'BLOBS'] as const;
 const JUSTIFICATION =
   'Reading, separating and playing a video audio track needs fetch, an ' +
-  'AudioContext and a dedicated worker; pitch practice also analyses a copied ' +
-  'vocal stem in a worker and reads the microphone the person enabled. A ' +
-  'service worker has none of these.';
+  'AudioContext and a dedicated worker; the microphone desk and pitch practice ' +
+  'need user media, and a finished recording becomes a Blob URL for the ' +
+  'service worker to download. A service worker has none of these.';
 
 const SESSION_KEY = 'kara.session';
 
@@ -245,9 +246,23 @@ async function show(status: Status, tabId: number | null): Promise<void> {
 
 async function stop(): Promise<void> {
   const active = await session();
-  // Best effort, so the tracks are released promptly. Closing the document is
-  // what actually guarantees it.
-  send(packet('offscreen', { type: 'stop' }, active?.tabId ?? null));
+  // Wait for the offscreen document to finish stopping. A take being recorded
+  // is flushed and handed to the downloader in that window; closing the
+  // document first would cut the file off at its last chunk.
+  const stopping = active?.tabId ?? null;
+  try {
+    await Promise.race([
+      chrome.runtime.sendMessage(packet('offscreen', { type: 'stop' }, stopping)),
+      new Promise<void>((resolve) => {
+        // A start still in preparation is queued ahead of the stop. Waiting
+        // for it to finish would hold the document open for no reason; the
+        // recording can only exist after a start has returned.
+        setTimeout(resolve, 3000);
+      }),
+    ]);
+  } catch {
+    // The document may already be gone. Closing it below is the backstop.
+  }
   await remember(null);
   if (await offscreenOpen()) {
     await chrome.offscreen.closeDocument();
@@ -364,6 +379,26 @@ chrome.runtime.onMessage.addListener((message: unknown, sender) => {
     if (tabId !== undefined) {
       keepStream(tabId, body.stream);
     }
+  }
+  if (body.type === 'request-download') {
+    // The offscreen document cannot call `chrome.downloads`, so it hands the
+    // finished take over as an object URL and this context saves it. Only a
+    // local blob is accepted: this route must never become a fetch of
+    // something on the network. The URL is revoked by the offscreen document
+    // after the download has started.
+    if (!body.url.startsWith('blob:')) {
+      return false;
+    }
+    chrome.downloads
+      .download({
+        url: body.url,
+        filename: body.filename,
+        saveAs: false,
+        conflictAction: 'uniquify',
+      })
+      .catch((cause: unknown) => {
+        console.error('kara: the recording could not be saved:', reasonText(cause));
+      });
   }
   if (body.type === 'request-stop') {
     stop().catch((cause: unknown) => {

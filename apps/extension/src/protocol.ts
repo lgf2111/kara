@@ -4,6 +4,7 @@ import type { PlayMode } from './audio/mix-gain.ts';
 import type { PrepareProgress } from './audio/progress.ts';
 import type { Status } from './audio/status.ts';
 import { IDLE_DUET, type DuetMix, type DuetStatus } from './audio/duet.ts';
+import { IDLE_MIC_STATUS, type MicFx, type MicStatus } from './audio/mic-fx.ts';
 import { DEFAULT_MIX, type StemMix } from './audio/stems.ts';
 import type { PracticeAnalysis, PracticeLive } from './audio/practice.ts';
 import type { SongAnalysis } from './audio/song-analysis.ts';
@@ -30,6 +31,8 @@ export type { PlayMode } from './audio/mix-gain.ts';
 export type { PrepareProgress, PrepareStage } from './audio/progress.ts';
 export type { Status } from './audio/status.ts';
 export type { DuetMix, DuetPhase, DuetProgress, DuetState, DuetStatus } from './audio/duet.ts';
+export type { MicFx, MicStatus } from './audio/mic-fx.ts';
+export type { RecordingState, RecordingStatus } from './audio/recording.ts';
 export type {
   PracticeAnalysis,
   PracticeAnalysisState,
@@ -104,6 +107,16 @@ export type Command =
   /** Release the microphone, stop analysing and put the video back. */
   | { readonly type: 'practice-stop' }
   /**
+   * The microphone desk: level, monitor, reverb, echo, tone and compression.
+   * The whole desk travels, like the stem mix, so a status report and the
+   * controls can never describe two different settings.
+   */
+  | { readonly type: 'mic'; readonly fx: MicFx }
+  /** Start a take on the recording bus: stems plus the processed microphone. */
+  | { readonly type: 'record-start' }
+  /** Stop and flush the take. */
+  | { readonly type: 'record-stop' }
+  /**
    * The key, in semitones. It belongs to the session rather than to the
    * video, so a seek, a pause or an ad leaves it exactly where the person put
    * it; only another one of these moves it.
@@ -134,6 +147,9 @@ const COMMANDS: Readonly<Record<Command['type'], true>> = {
   'duet-clear': true,
   'practice-start': true,
   'practice-stop': true,
+  mic: true,
+  'record-start': true,
+  'record-stop': true,
   key: true,
   media: true,
   debug: true,
@@ -160,7 +176,16 @@ export type Request =
     }
   | { readonly type: 'request-stop' }
   /** The page found the audio stream of the video it is watching. */
-  | { readonly type: 'request-stream'; readonly stream: StreamInfo };
+  | { readonly type: 'request-stream'; readonly stream: StreamInfo }
+  /**
+   * Save a finished recording. The offscreen document owns the blob and its
+   * object URL; only the service worker may call `chrome.downloads`.
+   */
+  | {
+      readonly type: 'request-download';
+      readonly url: string;
+      readonly filename: string;
+    };
 
 export interface Metrics {
   /** Where the stems are playing in the song, or null before they are. */
@@ -211,6 +236,8 @@ export interface StatusReport {
   readonly mix: StemMix;
   /** The opt-in Voice 1 / Voice 2 pair, or off before anyone asks. */
   readonly duet?: DuetStatus;
+  /** The microphone desk, its monitor and its recorder. */
+  readonly mic?: MicStatus;
   /** The key the stems are played in, in whole semitones. */
   readonly semitones: number;
   /**
@@ -353,6 +380,7 @@ export const IDLE_REPORT: StatusReport = {
   mode: 'original',
   mix: DEFAULT_MIX,
   duet: IDLE_DUET,
+  mic: IDLE_MIC_STATUS,
   semitones: KEY_DEFAULT,
   analyzedSeconds: null,
   videoId: null,
