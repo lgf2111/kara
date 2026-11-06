@@ -263,6 +263,8 @@ describe('pitch practice', () => {
     expect(view.practiceCanStart).toBe(true);
     expect(view.practiceActive).toBe(false);
     expect(view.practiceLabel).toBe('Practice');
+    expect(view.practiceHint).toBeNull();
+    expect(view.practiceTooltip).toBeNull();
   });
 
   it('keeps the entry point disabled while the stem is still arriving', () => {
@@ -271,6 +273,10 @@ describe('pitch practice', () => {
     expect(view.controls).toBe(true);
     expect(view.practiceCanStart).toBe(false);
     expect(view.practiceState).toBe('off');
+    expect(view.practiceHint).toBe('Waiting for the whole song to be analyzed.');
+    expect(view.practiceTooltip).toBe(
+      'Practice unlocks when the whole song has been analyzed.',
+    );
   });
 
   it('shows the learning pass with its bar and no way to start twice', () => {
@@ -281,6 +287,8 @@ describe('pitch practice', () => {
     expect(view.practiceProgress).toBeCloseTo(0.42);
     expect(view.practiceDetail).toContain('Learning');
     expect(view.practiceCanStart).toBe(false);
+    expect(view.practiceHint).toBeNull();
+    expect(view.practiceTooltip).toBeNull();
   });
 
   it('says headphones once the microphone is listening', () => {
@@ -291,6 +299,8 @@ describe('pitch practice', () => {
     expect(view.practiceDetail).toContain('headphones');
     expect(view.practiceActive).toBe(true);
     expect(view.practiceCanStart).toBe(false);
+    expect(view.practiceHint).toBeNull();
+    expect(view.practiceTooltip).toBeNull();
   });
 
   it('keeps a microphone refusal in the panel where it can be read', () => {
@@ -300,6 +310,8 @@ describe('pitch practice', () => {
     expect(view.practiceDetail).toContain('Enable microphone');
     expect(view.practiceActive).toBe(false);
     expect(view.practiceCanStart).toBe(true);
+    expect(view.practiceHint).toBeNull();
+    expect(view.practiceTooltip).toBeNull();
   });
 });
 

@@ -495,6 +495,37 @@ button[hidden] {
   gap: 8px;
   min-height: var(--kara-control);
 }
+.practice-action {
+  position: relative;
+  display: flex;
+}
+.practice-tooltip {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 1;
+  width: max-content;
+  max-width: 220px;
+  padding: 6px 8px;
+  border: 1px solid var(--kara-border-strong);
+  border-radius: var(--kara-radius);
+  background: var(--kara-raised);
+  color: var(--kara-text);
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: left;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    visibility 120ms ease;
+}
+.practice-action:hover .practice-tooltip,
+.practice-action:focus-within .practice-tooltip {
+  opacity: 1;
+  visibility: visible;
+}
 .practice-title {
   flex: 1;
   min-width: 0;
@@ -523,7 +554,8 @@ button[hidden] {
   background: var(--kara-accent-tint);
   color: var(--kara-accent);
 }
-.practice-detail {
+.practice-detail,
+.practice-hint {
   margin: 0;
   color: var(--kara-faint);
   font-size: 11px;
@@ -958,7 +990,8 @@ button[hidden] {
   :host,
   button,
   .bar .fill,
-  .chevron {
+  .chevron,
+  .practice-tooltip {
     transition: none;
   }
 }
@@ -1318,10 +1351,22 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   const practiceHead = div('practice-head');
   const practiceTitle = span('practice-title');
   practiceTitle.textContent = 'Pitch practice';
+  const practiceAction = div('practice-action');
+  practiceAction.setAttribute('role', 'group');
+  practiceAction.setAttribute('aria-label', 'Pitch practice');
+  practiceAction.tabIndex = -1;
   const practiceButton = button('Practice', 'practice-button');
   practiceButton.title = 'Score your singing against the guide melody';
   practiceButton.setAttribute('aria-label', 'Start pitch practice');
-  practiceHead.append(practiceTitle, practiceButton);
+  const practiceTooltip = span('practice-tooltip');
+  practiceTooltip.id = 'kara-practice-tooltip';
+  practiceTooltip.setAttribute('role', 'tooltip');
+  practiceTooltip.hidden = true;
+  practiceAction.append(practiceButton, practiceTooltip);
+  practiceHead.append(practiceTitle, practiceAction);
+
+  const practiceHint = paragraph('practice-hint');
+  practiceHint.hidden = true;
 
   const practiceBar = div('bar');
   practiceBar.setAttribute('role', 'progressbar');
@@ -1332,7 +1377,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   practiceBar.append(practiceBarFill);
 
   const practiceDetail = paragraph('practice-detail');
-  practiceBox.append(practiceHead, practiceBar, practiceDetail);
+  practiceBox.append(practiceHead, practiceHint, practiceBar, practiceDetail);
   practiceSection.body.append(practiceBox);
 
   /**
@@ -1933,15 +1978,32 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
         : 'Practice';
     practiceButton.dataset['active'] = String(view.practiceActive);
     practiceButton.disabled = !view.practiceActive && !view.practiceCanStart;
-    practiceButton.title = view.practiceActive
-      ? 'Stop practice and release the microphone'
-      : view.practiceCanStart
-        ? 'Score your singing against the guide melody'
-        : 'Finish preparing karaoke first';
+    const practiceTip = view.practiceTooltip;
+    if (practiceTip === null) {
+      practiceAction.tabIndex = -1;
+      practiceAction.removeAttribute('aria-describedby');
+      practiceButton.removeAttribute('aria-describedby');
+      practiceButton.title = view.practiceActive
+        ? 'Stop practice and release the microphone'
+        : 'Score your singing against the guide melody';
+      practiceTooltip.textContent = '';
+      practiceTooltip.hidden = true;
+    } else {
+      // A disabled button cannot take focus, so the wrapper is the keyboard
+      // stop that reveals the tooltip and carries its description.
+      practiceAction.tabIndex = 0;
+      practiceAction.setAttribute('aria-describedby', practiceTooltip.id);
+      practiceButton.setAttribute('aria-describedby', practiceTooltip.id);
+      practiceButton.removeAttribute('title');
+      practiceTooltip.textContent = practiceTip;
+      practiceTooltip.hidden = false;
+    }
     practiceButton.setAttribute(
       'aria-label',
       view.practiceActive ? 'Stop pitch practice' : 'Start pitch practice',
     );
+    practiceHint.textContent = view.practiceHint ?? '';
+    practiceHint.hidden = view.practiceHint === null;
     practiceBar.hidden = view.practiceProgress === null;
     if (view.practiceProgress !== null) {
       const practicePercent = Math.round(view.practiceProgress * 100);

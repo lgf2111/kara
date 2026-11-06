@@ -81,6 +81,10 @@ export interface PanelView {
   readonly practiceState: 'off' | 'analyzing' | 'ready' | 'error';
   readonly practiceLabel: string;
   readonly practiceDetail: string | null;
+  /** The line the Practice section shows while the song is still preparing. */
+  readonly practiceHint: string | null;
+  /** Why the Practice button cannot start yet, for its tooltip, or null. */
+  readonly practiceTooltip: string | null;
   /** Nought to one while the melody is being learnt, or null when it is not. */
   readonly practiceProgress: number | null;
   /** Whether the Practice button can begin a new run. */
@@ -166,6 +170,12 @@ export function panelView(input: PanelInput): PanelView {
   const practice = input.practice ?? null;
   const practiceState: PanelView['practiceState'] = practice?.state ?? 'off';
   const practiceActive = practiceState === 'analyzing' || practiceState === 'ready';
+  // Practice reads the whole vocal stem, so the same readiness the engine
+  // guards on is what unlocks the button here.
+  const practiceCanStart =
+    report !== null &&
+    (report.status === 'ready' || report.status === 'paused') &&
+    !practiceActive;
   const practiceLabel =
     practiceState === 'analyzing'
       ? 'Learning the melody'
@@ -182,6 +192,14 @@ export function panelView(input: PanelInput): PanelView {
         : practiceState === 'ready'
           ? 'Wear headphones for accuracy.'
           : null;
+  const practiceHint =
+    report?.status === 'preparing' && !practiceActive
+      ? 'Waiting for the whole song to be analyzed.'
+      : null;
+  const practiceTooltip =
+    practiceActive || practiceCanStart
+      ? null
+      : 'Practice unlocks when the whole song has been analyzed.';
   const practiceProgress =
     practiceState === 'analyzing' && practice?.progress !== null && practice?.progress !== undefined
       ? Math.min(1, Math.max(0, practice.progress))
@@ -245,11 +263,10 @@ export function panelView(input: PanelInput): PanelView {
     practiceState,
     practiceLabel,
     practiceDetail,
+    practiceHint,
+    practiceTooltip,
     practiceProgress,
-    practiceCanStart:
-      report !== null &&
-      (report.status === 'ready' || report.status === 'paused') &&
-      !practiceActive,
+    practiceCanStart,
     practiceActive,
     songAnalysisState,
     songKey,
