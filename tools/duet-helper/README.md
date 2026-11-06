@@ -29,9 +29,20 @@ uv pip install -r requirements.txt
 ./setup.sh
 ```
 
-`setup.sh` clones UNMIXX into `.vendor/unmixx`, removes two optional training
-imports from the vendored copy, and downloads the ECAPA speaker model used by
-the voice map into `.cache/ecapa`.
+`setup.sh` checks out the pinned UNMIXX revision into `.vendor/unmixx`,
+removes two optional training imports from the vendored copy, applies the small
+MPS STFT patch in `patches/unmixx-mps.patch`, and downloads the ECAPA speaker
+model used by the voice map into `.cache/ecapa`. It is safe to rerun: the patch
+step detects an already-patched checkout.
+
+The runtime pins are deliberate. UNMIXX was validated on torch 2.5.1, and
+speechbrain 1.1.2 requires torch 2.7.1 or newer. `requirements.txt` therefore
+uses speechbrain 1.1.1, the newest release with the same ECAPA
+`EncoderClassifier` API that still supports torch 2.5.1. CI resolves the runtime
+matrix on every pull request.
+
+If the patch check fails, delete `.vendor/unmixx` and rerun `./setup.sh`; the
+vendored checkout is disposable.
 
 ## Package layout
 
@@ -47,6 +58,7 @@ kara_duet/
   bridge.py        loopback HTTP bridge
 helper.py          CLI wrapper
 bridge.py          bridge wrapper
+patches/           reviewed changes to the pinned UNMIXX checkout
 tests/             pure tests; no UNMIXX, torch or remote model
 ```
 

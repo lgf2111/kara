@@ -41,7 +41,9 @@ weights and cannot separate anything.
 
 The helper is native Python and is not installed by `pnpm install`. See
 [tools/duet-helper/README.md](tools/duet-helper/README.md). Its unit tests do not download UNMIXX,
-torch, or the ECAPA model.
+torch, or the ECAPA model. When changing runtime pins, check the matrix with
+`uv pip compile requirements.txt --python-version 3.12` before committing; CI runs the same
+resolution.
 
 ## House rules
 

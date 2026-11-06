@@ -4,7 +4,15 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
   {
-    ignores: ['**/dist/**', '**/coverage/**', '**/.wrangler/**'],
+    ignores: [
+      '**/dist/**',
+      '**/coverage/**',
+      '**/.wrangler/**',
+      // Native helper environments and vendored models are not repo source.
+      'tools/duet-helper/.venv/**',
+      'tools/duet-helper/.vendor/**',
+      'tools/duet-helper/.cache/**',
+    ],
   },
   js.configs.recommended,
   tseslint.configs.recommended,
