@@ -1,8 +1,9 @@
 import type { PracticeOverlayView } from './practice-view.ts';
 
 /**
- * The practice picture: a dark wash, a field of note rectangles over the video,
- * a playhead, the singer's marker, a small scoreboard, and the end card.
+ * The practice picture: a dark wash, a faint pitch grid, a field of note
+ * rectangles over the video, a playhead, the singer's marker, a small
+ * scoreboard, and the end card.
  *
  * It lives inside the player element, which is what makes fullscreen work
  * without a second document. The host is `pointer-events: none`, so every
@@ -32,6 +33,7 @@ const STYLE = `
   --kara-danger: #e58b8b;
   --kara-ink: #21140b;
   --kara-radius: 12px;
+  --kara-note-radius: 8px;
   color: var(--kara-text);
   font: 500 13px/1.4 "Avenir Next", "Segoe UI", system-ui, sans-serif;
 }
@@ -54,6 +56,30 @@ const STYLE = `
   height: 47%;
   pointer-events: none;
 }
+.grid {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    transparent 0,
+    #000 1.4%,
+    #000 98.6%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(90deg, transparent 0, #000 1.4%, #000 98.6%, transparent 100%);
+  pointer-events: none;
+}
+.grid-line {
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: rgba(247, 239, 230, 0.055);
+}
+.grid-line[data-strong='true'] {
+  background: rgba(247, 239, 230, 0.12);
+}
 .notes {
   position: absolute;
   inset: 0;
@@ -73,33 +99,44 @@ const STYLE = `
   display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 2px;
-  padding: 0 5px;
+  min-width: 3px;
+  padding: 0 7px;
   overflow: hidden;
-  border: 1px solid rgba(247, 239, 230, 0.42);
-  border-radius: 7px;
-  background: rgba(20, 12, 16, 0.5);
-  color: rgba(247, 239, 230, 0.9);
+  border: 1px solid rgba(195, 176, 166, 0.38);
+  border-radius: var(--kara-note-radius);
+  background:
+    linear-gradient(180deg, rgba(247, 239, 230, 0.06), rgba(247, 239, 230, 0.01)),
+    rgba(27, 17, 22, 0.66);
+  color: rgba(247, 239, 230, 0.86);
   font-size: 11px;
   font-weight: 650;
-  letter-spacing: 0.01em;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  letter-spacing: 0.015em;
+  line-height: 1;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
   white-space: nowrap;
   transition:
     background-color 120ms ease,
     border-color 120ms ease,
     opacity 120ms ease;
 }
+.note:empty {
+  padding: 0;
+}
 .note[data-past='true'] {
-  opacity: 0.34;
+  border-color: rgba(195, 176, 166, 0.2);
+  background: rgba(20, 12, 16, 0.42);
+  color: rgba(247, 239, 230, 0.6);
+  opacity: 0.38;
 }
 .note[data-current='true'] {
   border-color: rgba(232, 184, 109, 0.95);
-  background: rgba(232, 184, 109, 0.3);
+  background:
+    linear-gradient(180deg, rgba(232, 184, 109, 0.42), rgba(232, 184, 109, 0.2)),
+    rgba(27, 17, 22, 0.5);
   color: #fff;
   box-shadow:
-    0 0 0 1px rgba(232, 184, 109, 0.28),
-    0 0 22px rgba(232, 184, 109, 0.3); /* taste-skill-ignore: video overlay */
+    0 0 0 1px rgba(232, 184, 109, 0.22),
+    0 0 18px rgba(232, 184, 109, 0.24); /* taste-skill-ignore: video overlay */
 }
 .playhead {
   position: absolute;
@@ -110,11 +147,10 @@ const STYLE = `
   background: linear-gradient(
     180deg,
     rgba(232, 184, 109, 0) 0,
-    rgba(232, 184, 109, 0.9) 5%,
-    rgba(232, 184, 109, 0.9) 95%,
+    rgba(232, 184, 109, 0.72) 8%,
+    rgba(232, 184, 109, 0.72) 92%,
     rgba(232, 184, 109, 0) 100%
   );
-  box-shadow: 0 0 12px rgba(232, 184, 109, 0.4);
   pointer-events: none;
 }
 .playhead::before {
@@ -122,35 +158,52 @@ const STYLE = `
   position: absolute;
   top: 0;
   left: 50%;
-  width: 7px;
-  height: 7px;
+  width: 5px;
+  height: 5px;
+  box-sizing: border-box;
+  border: 1px solid rgba(20, 12, 16, 0.85);
   border-radius: 50%;
   background: var(--kara-accent);
-  box-shadow: 0 0 10px rgba(232, 184, 109, 0.6);
   transform: translate(-50%, -50%);
 }
 .marker {
   position: absolute;
-  width: 16px;
-  height: 16px;
-  margin: -8px 0 0 -8px;
-  border: 2px solid rgba(20, 12, 16, 0.94);
+  z-index: 1;
+  box-sizing: border-box;
+  width: 15px;
+  height: 15px;
+  margin: -7.5px 0 0 -7.5px;
+  border: 2px solid rgba(20, 12, 16, 0.95);
   border-radius: 50%;
   background: var(--kara-faint);
+  box-shadow: 0 0 0 1px rgba(247, 239, 230, 0.38);
   transition: top 70ms linear;
   pointer-events: none;
 }
+.marker::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.22);
+}
 .marker[data-tone='perfect'] {
   background: var(--kara-perfect);
-  box-shadow: 0 0 16px rgba(123, 216, 143, 0.8);
+  box-shadow:
+    0 0 0 1px rgba(247, 239, 230, 0.4),
+    0 0 14px rgba(123, 216, 143, 0.65);
 }
 .marker[data-tone='good'] {
   background: var(--kara-good);
-  box-shadow: 0 0 16px rgba(232, 184, 109, 0.75);
+  box-shadow:
+    0 0 0 1px rgba(247, 239, 230, 0.4),
+    0 0 14px rgba(232, 184, 109, 0.6);
 }
 .marker[data-tone='off'] {
   background: var(--kara-off);
-  box-shadow: 0 0 16px rgba(229, 139, 139, 0.75);
+  box-shadow:
+    0 0 0 1px rgba(247, 239, 230, 0.4),
+    0 0 14px rgba(229, 139, 139, 0.6);
 }
 .marker[data-tone='idle'] {
   background: var(--kara-faint);
@@ -441,10 +494,11 @@ export function mountPracticeOverlay(
 
   const field = div('field');
   const now = span('now');
+  const grid = div('grid');
   const notesLayer = div('notes');
   const playhead = div('playhead');
   const marker = div('marker');
-  field.append(notesLayer, playhead, marker, now);
+  field.append(grid, notesLayer, playhead, marker, now);
 
   const hud = div('hud');
   const scoreRow = div('score-row');
@@ -524,6 +578,30 @@ export function mountPracticeOverlay(
 
   let noteKey = '';
   const noteEls = new Map<number, HTMLDivElement>();
+  let gridKey = '';
+  const gridEls = new Map<number, HTMLDivElement>();
+
+  const drawGrid = (view: PracticeOverlayView): void => {
+    const key = view.grid.map((line) => line.midi).join(',');
+    if (key !== gridKey) {
+      gridKey = key;
+      gridEls.clear();
+      grid.replaceChildren();
+      for (const line of view.grid) {
+        const element = div('grid-line');
+        grid.append(element);
+        gridEls.set(line.midi, element);
+      }
+    }
+    for (const line of view.grid) {
+      const element = gridEls.get(line.midi);
+      if (element === undefined) {
+        continue;
+      }
+      element.style.top = percent(line.y);
+      element.dataset['strong'] = String(line.strong);
+    }
+  };
 
   const drawNotes = (view: PracticeOverlayView): void => {
     const key = view.notes.map((note) => note.index).join(',');
@@ -548,8 +626,9 @@ export function mountPracticeOverlay(
       element.style.height = percent(note.height);
       element.dataset['past'] = String(note.past);
       element.dataset['current'] = String(note.current);
-      if (element.textContent !== note.name) {
-        element.textContent = note.name;
+      const label = note.label ? note.name : '';
+      if (element.textContent !== label) {
+        element.textContent = label;
       }
     }
   };
@@ -597,6 +676,7 @@ export function mountPracticeOverlay(
     if (!listening) {
       return;
     }
+    drawGrid(view);
     drawNotes(view);
     playhead.style.left = percent(view.playhead);
     now.style.left = `calc(${percent(view.playhead)} + 10px)`;
@@ -648,6 +728,7 @@ export function mountPracticeOverlay(
     destroy() {
       host.remove();
       noteEls.clear();
+      gridEls.clear();
     },
   };
 }

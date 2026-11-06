@@ -7,12 +7,17 @@ import {
   type PracticeNote,
 } from '../src/audio/practice.ts';
 import {
+  PRACTICE_LABEL_MIN_WIDTH,
+  PRACTICE_MIN_NOTE_WIDTH,
   PRACTICE_PLAYHEAD,
   PRACTICE_WINDOW_SECONDS,
+  practiceNoteLabels,
   practiceOverlayView,
+  practicePitchGrid,
   practicePitchRange,
   practiceTone,
   type PracticeLaneNote,
+  type PracticeNoteBox,
 } from '../src/content/practice-view.ts';
 
 const notes: PracticeNote[] = [
@@ -45,6 +50,18 @@ function guideNote(
   index: number,
 ): PracticeLaneNote | undefined {
   return view.notes.find((note) => note.index === index);
+}
+
+function noteBox(patch: Partial<PracticeNoteBox> & { readonly index: number }): PracticeNoteBox {
+  return {
+    left: 0.1,
+    width: 0.1,
+    top: 0.4,
+    height: 0.05,
+    current: false,
+    past: false,
+    ...patch,
+  };
 }
 
 describe('practiceOverlayView', () => {
@@ -130,6 +147,29 @@ describe('practiceOverlayView', () => {
     );
   });
 
+  it('keeps a tiny note inside the field and hides a clipped label', () => {
+    const tiny: PracticeAnalysis = {
+      state: 'ready',
+      progress: 1,
+      notes: [{ start: 5.4, end: 5.41, midi: 60, confidence: 0.9 }],
+      detail: null,
+    };
+    const clipped: PracticeAnalysis = {
+      state: 'ready',
+      progress: 1,
+      notes: [{ start: 1, end: 4.6, midi: 64, confidence: 0.9 }],
+      detail: null,
+    };
+    const edge = guideNote(practiceOverlayView({ analysis: tiny, live: null, at: 0 }), 0);
+    const sliver = guideNote(practiceOverlayView({ analysis: clipped, live: null, at: 7 }), 0);
+
+    expect(edge?.width).toBeGreaterThanOrEqual(PRACTICE_MIN_NOTE_WIDTH);
+    expect(edge?.label).toBe(false);
+    expect((edge?.left ?? 1) + (edge?.width ?? 0)).toBeLessThanOrEqual(1);
+    expect(sliver?.width).toBeCloseTo(0.02);
+    expect(sliver?.label).toBe(false);
+  });
+
   it('holds the picture still while playback is paused', () => {
     const paused = practiceOverlayView({
       analysis: listening,
@@ -168,6 +208,28 @@ describe('practiceOverlayView', () => {
     expect(second?.current).toBe(true);
     expect(second?.past).toBe(false);
     expect(view.currentName).toBe('E4');
+  });
+
+  it('marks only the target under the playhead as current when notes overlap', () => {
+    const overlapping: PracticeAnalysis = {
+      state: 'ready',
+      progress: 1,
+      notes: [
+        { start: 0, end: 2, midi: 60, confidence: 0.6 },
+        { start: 0.5, end: 1.5, midi: 64, confidence: 0.9 },
+      ],
+      detail: null,
+    };
+    const view = practiceOverlayView({
+      analysis: overlapping,
+      live: live({ target: { index: 0, midi: 60, start: 0, end: 2 } }),
+      at: 1,
+    });
+
+    expect(view.notes.filter((note) => note.current).map((note) => note.index)).toEqual([1]);
+    expect(view.currentName).toBe('E4');
+    // The wider note is not current yet, so it is still upcoming rather than past.
+    expect(guideNote(view, 0)?.past).toBe(false);
   });
 
   it('stops highlighting once a note is gone and the field reaches a rest', () => {
@@ -215,6 +277,48 @@ describe('practiceOverlayView', () => {
     expect(far).toEqual({ low: 57.5, high: 69.5 });
   });
 
+  it('labels only rectangles wide enough to hold the note name', () => {
+    const boxes = [
+      noteBox({ index: 0, left: 0, width: PRACTICE_LABEL_MIN_WIDTH - 0.001 }),
+      noteBox({ index: 1, left: 0.2, width: PRACTICE_LABEL_MIN_WIDTH }),
+    ];
+
+    expect(practiceNoteLabels(boxes)).toEqual([1]);
+  });
+
+  it('thins labels in a dense phrase and keeps the current note’s label', () => {
+    const dense = [0, 1, 2, 3].map((index) =>
+      noteBox({
+        index,
+        left: index * 0.04,
+        current: index === 1,
+        past: index === 0,
+      }),
+    );
+    const sparse = [0, 1, 2].map((index) => noteBox({ index, left: index * 0.2 }));
+
+    expect(practiceNoteLabels(dense)).toEqual([1]);
+    expect(practiceNoteLabels(sparse)).toEqual([0, 1, 2]);
+  });
+
+  it('never lets the current note barge past the width rule', () => {
+    const boxes = [
+      noteBox({ index: 0, width: PRACTICE_LABEL_MIN_WIDTH - 0.01, current: true }),
+      noteBox({ index: 1, left: 0.2 }),
+    ];
+
+    expect(practiceNoteLabels(boxes)).toEqual([1]);
+  });
+
+  it('keeps labels on notes stacked at different pitches', () => {
+    const chord = [
+      noteBox({ index: 0, top: 0.2 }),
+      noteBox({ index: 1, top: 0.5 }),
+    ];
+
+    expect(practiceNoteLabels(chord)).toEqual([0, 1]);
+  });
+
   it('keeps every rectangle inside the field and the marker on the singer’s pitch', () => {
     const wide: PracticeAnalysis = {
       state: 'ready',
@@ -237,6 +341,9 @@ describe('practiceOverlayView', () => {
     const high = guideNote(view, 1);
 
     for (const note of view.notes) {
+      expect(note.left).toBeGreaterThanOrEqual(0);
+      expect(note.left + note.width).toBeLessThanOrEqual(1);
+      expect(note.width).toBeGreaterThanOrEqual(PRACTICE_MIN_NOTE_WIDTH);
       expect(note.top).toBeGreaterThanOrEqual(0);
       expect(note.top + note.height).toBeLessThanOrEqual(1);
       expect(note.height).toBeGreaterThan(0);
@@ -244,6 +351,26 @@ describe('practiceOverlayView', () => {
     expect(view.marker?.x).toBe(PRACTICE_PLAYHEAD);
     expect(view.marker?.y).toBeCloseTo((high?.top ?? 0) + (high?.height ?? 0) / 2);
     expect(view.marker?.y).toBeLessThan((low?.top ?? 0) + (low?.height ?? 0) / 2);
+  });
+
+  it('lays a pitch row on every semitone and picks out the Cs', () => {
+    const grid = practicePitchGrid(59, 71);
+
+    expect(grid.map((line) => line.midi)).toEqual([60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70]);
+    for (const line of grid) {
+      expect(line.y).toBeCloseTo((71 - line.midi) / 12);
+      expect(line.y).toBeGreaterThan(0);
+      expect(line.y).toBeLessThan(1);
+    }
+    expect(grid.find((line) => line.midi === 60)?.strong).toBe(true);
+    expect(grid.find((line) => line.midi === 61)?.strong).toBe(false);
+
+    const view = practiceOverlayView({ analysis: listening, live: live(), at: 0.5 });
+    for (const line of view.grid) {
+      expect(line.y).toBeGreaterThan(0);
+      expect(line.y).toBeLessThan(1);
+    }
+    expect(view.grid.length).toBeGreaterThan(0);
   });
 
   it('colours the marker by the cents error', () => {

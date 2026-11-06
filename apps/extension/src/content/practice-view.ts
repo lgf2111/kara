@@ -32,6 +32,20 @@ const MIN_SEMITONES = 12;
 const MIN_NOTE_HEIGHT = 0.035;
 const MAX_NOTE_HEIGHT = 0.18;
 
+/** The narrowest a note draws, so a short or clipped note still reads as one. */
+export const PRACTICE_MIN_NOTE_WIDTH = 0.012;
+
+/** The narrowest note that can carry a pitch label without cropping it. */
+export const PRACTICE_LABEL_MIN_WIDTH = 0.06;
+
+/**
+ * How close two notes can sit before one of them gives up its label. The
+ * horizontal gap is a fraction of the field; the vertical one keeps labels on
+ * neighbouring pitch rows from crowding each other.
+ */
+const LABEL_GAP_X = 0.014;
+const LABEL_GAP_Y = 0.02;
+
 export type PracticeTone = 'perfect' | 'good' | 'off' | 'idle';
 
 export interface PracticeLaneNote {
@@ -47,6 +61,16 @@ export interface PracticeLaneNote {
   readonly height: number;
   readonly current: boolean;
   readonly past: boolean;
+  /** Whether the pitch name fits inside the rectangle. */
+  readonly label: boolean;
+}
+
+/** A horizontal rule of the pitch grid, positioned like a note. */
+export interface PracticeGridLine {
+  readonly midi: number;
+  readonly y: number;
+  /** C rows are a little stronger than the semitones between them. */
+  readonly strong: boolean;
 }
 
 export interface PracticeMarker {
@@ -61,6 +85,8 @@ export interface PracticeMarker {
 export interface PracticeOverlayView {
   readonly mode: 'hidden' | 'learning' | 'listening' | 'ended' | 'error';
   readonly notes: readonly PracticeLaneNote[];
+  /** The faint pitch rows behind the notes, positioned across the field. */
+  readonly grid: readonly PracticeGridLine[];
   /** Where the playhead is across the field, nought to one. */
   readonly playhead: number;
   readonly marker: PracticeMarker | null;
@@ -147,6 +173,77 @@ export function practicePitchRange(
   return { low: centre - span / 2, high: centre + span / 2 };
 }
 
+/** A pitch row for every semitone in the range, with C rows picked out. */
+export function practicePitchGrid(
+  low: number,
+  high: number,
+): readonly PracticeGridLine[] {
+  const span = high - low;
+  if (!Number.isFinite(span) || span <= 0) {
+    return [];
+  }
+  const lines: PracticeGridLine[] = [];
+  for (let midi = Math.ceil(low); midi <= Math.floor(high); midi += 1) {
+    const y = (high - midi) / span;
+    // A line on the very edge would sit under the field's mask and look like a
+    // border rather than a pitch row.
+    if (y <= 0.001 || y >= 0.999) {
+      continue;
+    }
+    lines.push({ midi, y, strong: midi % 12 === 0 });
+  }
+  return lines;
+}
+
+/** Just enough of a lane note for the label planner: no names or times. */
+export type PracticeNoteBox = Pick<
+  PracticeLaneNote,
+  'index' | 'left' | 'width' | 'top' | 'height' | 'current' | 'past'
+>;
+
+/**
+ * Chooses which rectangles wear a pitch label.
+ *
+ * A label needs room, so narrow notes never get one. In a dense run the
+ * current note keeps its label first, then the wider and earlier upcoming
+ * notes; a note gives way when another chosen label sits within a label's
+ * width and height of it. That keeps labels off clipped short notes and stops
+ * a trill or a fast phrase from turning into a wall of text.
+ */
+export function practiceNoteLabels(notes: readonly PracticeNoteBox[]): readonly number[] {
+  const rank = (note: PracticeNoteBox): number =>
+    note.current ? 2 : note.past ? 0 : 1;
+  const order = notes
+    .filter((note) => Number.isFinite(note.width) && note.width >= PRACTICE_LABEL_MIN_WIDTH)
+    .slice()
+    .sort(
+      (a, b) =>
+        rank(b) - rank(a) ||
+        b.width - a.width ||
+        a.index - b.index,
+    );
+  const chosen: PracticeNoteBox[] = [];
+  for (const note of order) {
+    const crowded = chosen.some((other) => {
+      const gapX = Math.max(
+        other.left - (note.left + note.width),
+        note.left - (other.left + other.width),
+        0,
+      );
+      const gapY = Math.max(
+        other.top - (note.top + note.height),
+        note.top - (other.top + other.height),
+        0,
+      );
+      return gapX < LABEL_GAP_X && gapY < LABEL_GAP_Y;
+    });
+    if (!crowded) {
+      chosen.push(note);
+    }
+  }
+  return chosen.map((note) => note.index).sort((a, b) => a - b);
+}
+
 export function practiceOverlayView(input: PracticeOverlayInput): PracticeOverlayView {
   const analysis = input.analysis;
   const live = input.live;
@@ -170,6 +267,7 @@ export function practiceOverlayView(input: PracticeOverlayInput): PracticeOverla
     return {
       mode,
       notes: [],
+      grid: [],
       playhead: PRACTICE_PLAYHEAD,
       marker: null,
       currentName: null,
@@ -185,6 +283,7 @@ export function practiceOverlayView(input: PracticeOverlayInput): PracticeOverla
     return {
       mode,
       notes: [],
+      grid: [],
       playhead: PRACTICE_PLAYHEAD,
       marker: null,
       currentName: null,
@@ -203,6 +302,7 @@ export function practiceOverlayView(input: PracticeOverlayInput): PracticeOverla
     return {
       mode,
       notes: [],
+      grid: [],
       playhead: PRACTICE_PLAYHEAD,
       marker: null,
       currentName: null,
@@ -226,8 +326,9 @@ export function practiceOverlayView(input: PracticeOverlayInput): PracticeOverla
     micMidi,
   );
   const span = Math.max(1e-6, range.high - range.low);
+  const grid = practicePitchGrid(range.low, range.high);
 
-  const lane: PracticeLaneNote[] = [];
+  const geometry: Omit<PracticeLaneNote, 'label'>[] = [];
   for (const [index, note] of notes.entries()) {
     if (note.end < leftTime || note.start > rightTime) {
       continue;
@@ -237,20 +338,26 @@ export function practiceOverlayView(input: PracticeOverlayInput): PracticeOverla
     const height = Math.max(MIN_NOTE_HEIGHT, Math.min(MAX_NOTE_HEIGHT, 0.8 / span));
     const top = clamp((range.high - note.midi) / span - height / 2, 0, 1 - height);
     const current = targetIndex === index;
-    lane.push({
+    const width = Math.max(PRACTICE_MIN_NOTE_WIDTH, (to - from) / windowSeconds);
+    geometry.push({
       index,
       midi: note.midi,
       name: noteName(note.midi),
       start: note.start,
       end: note.end,
-      left: (from - leftTime) / windowSeconds,
-      width: Math.max(0.006, (to - from) / windowSeconds),
+      left: clamp((from - leftTime) / windowSeconds, 0, 1 - width),
+      width,
       top,
       height,
       current,
       past: !current && note.end < at,
     });
   }
+  const labelled = new Set(practiceNoteLabels(geometry));
+  const lane: PracticeLaneNote[] = geometry.map((note) => ({
+    ...note,
+    label: labelled.has(note.index),
+  }));
 
   const targetMidi = target?.note.midi ?? null;
   const marker =
@@ -267,6 +374,7 @@ export function practiceOverlayView(input: PracticeOverlayInput): PracticeOverla
   return {
     mode,
     notes: lane,
+    grid,
     playhead: PRACTICE_PLAYHEAD,
     marker,
     currentName: targetMidi === null ? null : noteName(targetMidi),
