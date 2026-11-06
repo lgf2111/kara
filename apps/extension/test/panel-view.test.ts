@@ -134,6 +134,20 @@ describe('panelView', () => {
   });
 });
 
+describe('the compact key row', () => {
+  it('labels the original key and both ends of the slider', () => {
+    const original = panelView({ report: report({ status: 'ready', semitones: 0 }) });
+    const down = panelView({ report: report({ status: 'ready', semitones: -6 }) });
+    const up = panelView({ report: report({ status: 'ready', semitones: 6 }) });
+
+    expect(original.keyLabel).toBe('Original key');
+    expect(down.semitones).toBe(-6);
+    expect(down.keyLabel).toBe('Key −6');
+    expect(up.semitones).toBe(6);
+    expect(up.keyLabel).toBe('Key +6');
+  });
+});
+
 describe('prepareDetail', () => {
   it('is nothing at all when nothing is being prepared', () => {
     expect(prepareDetail(report())).toBeNull();
@@ -236,7 +250,7 @@ describe('the microphone desk', () => {
   });
 });
 
-describe('pitch practice', () => {
+describe('the compact practice row', () => {
   const learning: PracticeAnalysis = {
     state: 'analyzing',
     progress: 0.42,
@@ -315,7 +329,7 @@ describe('pitch practice', () => {
   });
 });
 
-describe('the song card', () => {
+describe('the compact song row', () => {
   const ready: SongAnalysis = {
     state: 'ready',
     progress: 1,
@@ -357,6 +371,27 @@ describe('the song card', () => {
     expect(view.songDetail).toBeNull();
   });
 
+  it('keeps each compact fact only when the analysis is sure of it', () => {
+    const view = panelView({
+      report: report({ status: 'ready' }),
+      analysis: {
+        state: 'ready',
+        progress: 1,
+        facts: {
+          key: null,
+          bpm: 98.6,
+          bpmConfidence: 0.8,
+          range: null,
+        },
+        detail: null,
+      },
+    });
+
+    expect(view.songKey).toBeNull();
+    expect(view.songBpm).toBe(99);
+    expect(view.songRange).toBeNull();
+  });
+
   it('asks rather than guessing when the key and tempo are unsure', () => {
     const view = panelView({ report: report({ status: 'ready' }), analysis: unsure });
 
@@ -382,7 +417,7 @@ describe('the song card', () => {
   });
 });
 
-describe('the duet desk', () => {
+describe('the compact duet row', () => {
   const preparing: DuetStatus = {
     state: 'preparing',
     progress: { phase: 'separating', done: 5, total: 20 },
@@ -422,6 +457,13 @@ describe('the duet desk', () => {
     expect(view.duetState).toBe('off');
     expect(view.duetCanStart).toBe(true);
     expect(view.duetProgress).toBeNull();
+  });
+
+  it('keeps the inline start row unavailable before karaoke runs', () => {
+    const view = panelView({ report: null });
+
+    expect(view.duetState).toBe('off');
+    expect(view.duetCanStart).toBe(false);
   });
 
   it('shows the second bar while the helper runs, without taking the vocal row', () => {

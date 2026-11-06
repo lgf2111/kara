@@ -1,4 +1,4 @@
-import { canNudge, KEY_DEFAULT, keyLabel, nudgeKey } from '../audio/key.ts';
+import { KEY_DEFAULT, KEY_MAX, KEY_MIN, keyLabel, nudgeKey } from '../audio/key.ts';
 import {
   DEFAULT_MIC_FX,
   MONITOR_WARNING,
@@ -52,10 +52,12 @@ import type { PanelView } from './panel-view.ts';
  * with the one accent while the stems are live.
  *
  * **Advanced is one door.** Backing, song facts, pitch practice, the
- * microphone, duet and key are each their own disclosure inside it, so the
- * default panel is the vocal and the switch rather than a settings page. The
- * master and every section remember whether they were open for the session,
- * and only what is already in use is offered inside them.
+ * microphone, duet and key live inside it, but it is one parent surface with
+ * inset rows rather than a stack of identical cards. Only the groups that
+ * actually open and close — backing, microphone and key — keep a disclosure;
+ * song facts, practice and duet are single compact rows. The master and every
+ * disclosure remember whether they were open for the session, and only what is
+ * already in use is offered inside them.
  *
  * **Nothing says paused.** A pause is visible in the video; the panel keeps
  * its controls and drops the status line instead of announcing a state the
@@ -77,6 +79,13 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 
 /** The three stems behind the disclosure; the vocal is always on screen. */
 const BACKING = ['drums', 'bass', 'other'] as const;
+
+/** One quiet glyph per backing stem, in the Lucide vocabulary. */
+const BACKING_ICONS: Readonly<Record<(typeof BACKING)[number], string>> = {
+  drums: 'drum',
+  bass: 'guitar',
+  other: 'audio',
+};
 
 /** Which disclosures were left open, remembered for this tab's session. */
 const OPEN_DISCLOSURES = new Set<string>();
@@ -107,8 +116,20 @@ const ICONS: Readonly<Record<string, readonly string[]>> = {
   ],
   power: ['M12 2v10', 'M18.4 6.6a9 9 0 1 1-12.8 0'],
   chevron: ['m9 18 6-6-6-6'],
-  minus: ['M5 12h14'],
-  plus: ['M12 5v14', 'M5 12h14'],
+  drum: [
+    'm2 2 8 8',
+    'm22 2-8 8',
+    'M2 9v8a10 5 0 0 0 20 0V9',
+    'M7 13.4v7.9',
+    'M12 14v8',
+    'M17 13.4v7.9',
+  ],
+  guitar: [
+    'm11.9 12.1 4.514-4.514',
+    'M20.1 2.3a1 1 0 0 0-1.4 0l-1.114 1.114A2 2 0 0 0 17 4.828v1.344a2 2 0 0 1-.586 1.414A2 2 0 0 1 17.828 7h1.344a2 2 0 0 0 1.414-.586L21.7 5.3a1 1 0 0 0 0-1.4z',
+    'm6 16 2 2',
+    'M8.23 9.85A3 3 0 0 1 11 8a5 5 0 0 1 5 5 3 3 0 0 1-1.85 2.77l-.92.38A2 2 0 0 0 12 18a4 4 0 0 1-4 4 6 6 0 0 1-6-6 4 4 0 0 1 4-4 2 2 0 0 0 1.85-1.23z',
+  ],
   reset: ['M3 12a9 9 0 1 0 3-6.7L3 8', 'M3 3v5h5'],
   clock: ['M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18', 'M12 7.5V12l3 2'],
   warn: ['M12 9v4', 'M12 17h.01', 'm10.3 3.9-8 13.9A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3.2l-8-13.9a2 2 0 0 0-3.4 0Z'],
@@ -367,6 +388,15 @@ button[hidden] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.stem-glyph {
+  display: flex;
+  flex: 0 0 auto;
+  color: var(--kara-faint);
+}
+.stem-glyph svg {
+  width: 14px;
+  height: 14px;
+}
 .switches {
   display: flex;
   gap: 4px;
@@ -480,14 +510,6 @@ button[hidden] {
   display: flex;
   flex-direction: column;
   gap: 7px;
-  padding: 8px;
-  border: 1px solid var(--kara-border);
-  border-radius: var(--kara-radius);
-  background: var(--kara-surface);
-}
-.practice-panel[data-state='analyzing'],
-.practice-panel[data-state='ready'] {
-  border-color: rgba(232, 184, 109, 0.45);
 }
 .practice-head {
   display: flex;
@@ -567,40 +589,20 @@ button[hidden] {
 .song-panel {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid var(--kara-border);
-  border-radius: var(--kara-radius);
-  background: var(--kara-surface);
-}
-.song-panel[data-state='analyzing'] {
-  border-color: rgba(232, 184, 109, 0.3);
-}
-.song-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-.song-title {
-  color: var(--kara-text);
-  font-size: 12px;
-  font-weight: 600;
-}
-.song-detail {
-  color: var(--kara-faint);
-  font-size: 10px;
-  line-height: 1.4;
-  text-align: right;
-}
-.song-facts {
-  display: grid;
-  grid-template-columns: 64px minmax(0, 1fr);
-  gap: 4px 8px;
-  align-items: baseline;
+  gap: 4px;
 }
 .song-row {
-  display: contents;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+  min-height: var(--kara-control);
+}
+.song-fact {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
 }
 .song-label {
   color: var(--kara-faint);
@@ -618,14 +620,16 @@ button[hidden] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.song-detail {
+  margin: 0;
+  color: var(--kara-faint);
+  font-size: 10px;
+  line-height: 1.4;
+}
 .mic-panel {
   display: flex;
   flex-direction: column;
   gap: 7px;
-  padding: 8px;
-  border: 1px solid var(--kara-border);
-  border-radius: var(--kara-radius);
-  background: var(--kara-surface);
 }
 .mic-head {
   display: flex;
@@ -633,17 +637,8 @@ button[hidden] {
   gap: 8px;
   min-height: var(--kara-control);
 }
-.mic-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--kara-text);
-  font-size: 12px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .mic-button {
+  flex: 1;
   height: var(--kara-control);
   padding: 0 10px;
   border-color: var(--kara-border-strong);
@@ -739,10 +734,6 @@ button[hidden] {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 8px;
-  border: 1px solid var(--kara-border);
-  border-radius: var(--kara-radius);
-  background: var(--kara-surface);
 }
 .duet-ready,
 .duet-rows {
@@ -887,73 +878,86 @@ button[hidden] {
   flex-direction: column;
   gap: 8px;
 }
-.advanced-body {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+/* Advanced is the one parent surface: a bordered group whose children are
+   quiet inset rows, not a stack of identical cards. */
+.advanced {
+  gap: 0;
+  border: 1px solid var(--kara-border);
+  border-radius: var(--kara-radius);
+  background: var(--kara-surface);
 }
-.advanced-body > .section {
-  padding-top: 6px;
+.advanced > .section-head {
+  gap: 0;
+}
+.advanced > .section-head .disclosure {
+  padding: 0 10px;
+  border-color: transparent;
+}
+.advanced > .section-head .disclosure:hover {
+  border-color: transparent;
+  background: var(--kara-raised);
+}
+.advanced[data-open='true'] > .section-head {
+  border-bottom: 1px solid var(--kara-border);
+}
+.advanced-body {
+  gap: 0;
+  padding: 4px;
+}
+.advanced-body > .section:not([hidden]) ~ .section:not([hidden]) {
   border-top: 1px solid var(--kara-border);
 }
-.advanced-body > .section:first-child {
-  padding-top: 0;
-  border-top: 0;
+.advanced-body .disclosure {
+  padding: 0 8px;
+  border-color: transparent;
+}
+.advanced-body .disclosure:hover {
+  border-color: transparent;
+  background: var(--kara-raised);
+}
+.advanced-body .section-body {
+  padding: 0 8px 8px;
+}
+.advanced-body > .section.flat {
+  padding: 6px 8px;
 }
 .duet-idle {
   display: flex;
-  flex-direction: column;
-  gap: 7px;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--kara-control);
 }
 .duet-idle .duet-button {
-  align-self: flex-start;
+  margin-left: auto;
 }
 .key-row {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.key-name {
-  width: 26px;
-  color: var(--kara-muted);
-  font-size: 11px;
-  font-weight: 600;
-}
-.key-stepper {
-  display: flex;
+.key-row .slider {
   flex: 1;
-  align-items: center;
-  height: var(--kara-control);
-  overflow: hidden;
-  border: 1px solid var(--kara-border);
-  border-radius: var(--kara-radius);
 }
-.key-button {
-  width: var(--kara-control);
-  height: 100%;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  color: var(--kara-muted);
-}
-.key-button:hover {
-  background: var(--kara-surface);
-  color: var(--kara-text);
-}
-.key-button:focus-visible {
-  outline-offset: -2px;
+.key-slider .track::after {
+  position: absolute;
+  top: -2px;
+  left: 50%;
+  width: 1px;
+  height: 8px;
+  background: var(--kara-border-strong);
+  content: '';
 }
 .key-value {
-  flex: 1;
-  overflow: hidden;
+  flex: 0 0 auto;
+  min-width: 58px;
   color: var(--kara-text);
-  font-size: 11px;
+  font-size: 10px;
   font-variant-numeric: tabular-nums;
-  text-align: center;
-  text-overflow: ellipsis;
+  text-align: right;
   white-space: nowrap;
 }
 .key-reset {
+  flex: 0 0 auto;
   border-color: var(--kara-border);
 }
 .note {
@@ -1162,6 +1166,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
       } else {
         OPEN_DISCLOSURES.delete(key);
       }
+      box.dataset['open'] = String(open);
       toggle.setAttribute('aria-expanded', String(open));
       toggle.title = `${open ? 'Hide' : 'Show'} ${title.toLowerCase()}`;
       body.hidden = !open;
@@ -1177,17 +1182,17 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   advanced.box.classList.add('advanced');
   advanced.body.classList.add('advanced-body');
   const backingSection = disclosure('advanced-backing', 'Backing', 'Drums, bass, other');
-  const songSection = disclosure('advanced-song', 'Song', 'Key, tempo, range');
-  const practiceSection = disclosure('advanced-practice', 'Pitch practice', 'Learn the melody');
   const micSection = disclosure('advanced-mic', 'Mic & recording', 'Monitor and record');
-  const duetSection = disclosure('advanced-duet', 'Duet', 'Split two singers');
   const keySection = disclosure('advanced-key', 'Key', 'Transpose the song');
+  const songSection = div('section flat');
+  const practiceSection = div('section flat');
+  const duetSection = div('section flat');
   advanced.body.append(
     backingSection.box,
-    songSection.box,
-    practiceSection.box,
+    songSection,
+    practiceSection,
     micSection.box,
-    duetSection.box,
+    duetSection,
     keySection.box,
   );
 
@@ -1280,11 +1285,16 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     control.fill.style.width = `${String(percent)}%`;
   };
 
-  const stemRow = (stem: Stem, featured: boolean): HTMLDivElement => {
+  const stemRow = (stem: Stem, featured: boolean, glyph?: string): HTMLDivElement => {
     const row = div(featured ? 'stem featured' : 'stem');
     row.setAttribute('role', 'group');
     row.setAttribute('aria-label', STEM_LABEL[stem]);
     const head = div('stem-head');
+    if (glyph !== undefined) {
+      const mark = span('stem-glyph');
+      mark.append(icon(glyph));
+      head.append(mark);
+    }
     const name = span('stem-name');
     name.textContent = STEM_LABEL[stem];
     const switches = div('switches');
@@ -1341,13 +1351,12 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   mixer.append(vocalsRow, advanced.box);
 
   /**
-   * Pitch practice, beside the vocal row it analyses. The button stays
-   * disabled until the whole vocal stem exists, because analysis reads all of
-   * it; the box then carries the learning bar and, once ready, the headphone
-   * advice. Nothing here touches the mixer's four levels.
+   * Pitch practice, inside Advanced. The button stays disabled until the whole
+   * vocal stem exists, because analysis reads all of it; the row then carries
+   * the learning bar and, once ready, the headphone advice. Nothing here
+   * touches the mixer's four levels.
    */
   const practiceBox = div('practice-panel');
-  practiceBox.dataset['state'] = 'off';
   const practiceHead = div('practice-head');
   const practiceTitle = span('practice-title');
   practiceTitle.textContent = 'Pitch practice';
@@ -1378,24 +1387,19 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
 
   const practiceDetail = paragraph('practice-detail');
   practiceBox.append(practiceHead, practiceHint, practiceBar, practiceDetail);
-  practiceSection.body.append(practiceBox);
+  practiceSection.append(practiceBox);
 
   /**
-   * The song card. It is information rather than a control: it only says what
-   * the separated audio appears to be. A key the analysis is not sure of is a
-   * question mark, and a tempo it is not sure of is absent, so an unsure read
-   * never looks like a fact.
+   * The song row. It is information rather than a control: it only says what
+   * the separated audio appears to be, in one compact line. A key the analysis
+   * is not sure of is a question mark, and a tempo it is not sure of is
+   * absent, so an unsure read never looks like a fact.
    */
   const songBox = div('song-panel');
-  const songHead = div('song-head');
-  const songTitle = span('song-title');
-  songTitle.textContent = 'Song';
-  const songDetail = span('song-detail');
-  songHead.append(songTitle, songDetail);
-  const songFacts = div('song-facts');
+  const songFacts = div('song-row');
 
-  const songRow = (label: string): { readonly row: HTMLDivElement; readonly value: HTMLSpanElement } => {
-    const row = div('song-row');
+  const songRow = (label: string): { readonly row: HTMLSpanElement; readonly value: HTMLSpanElement } => {
+    const row = span('song-fact');
     const name = span('song-label');
     name.textContent = label;
     const value = span('song-value');
@@ -1406,8 +1410,10 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   const songKeyCell = songRow('Key');
   const songBpmCell = songRow('BPM');
   const songRangeCell = songRow('Range');
-  songBox.append(songHead, songFacts);
-  songSection.body.append(songBox);
+  const songDetail = paragraph('song-detail');
+  songDetail.hidden = true;
+  songBox.append(songFacts, songDetail);
+  songSection.append(songBox);
 
   /**
    * The microphone desk. The monitor starts off and the warning is always
@@ -1418,13 +1424,11 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
    */
   const micBox = div('mic-panel');
   const micHead = div('mic-head');
-  const micTitle = span('mic-title');
-  micTitle.textContent = 'Mic & recording';
   const monitor = button('Monitor off', 'mic-button');
   monitor.setAttribute('aria-pressed', 'false');
   monitor.setAttribute('aria-label', 'Monitor the microphone in the speakers');
   monitor.title = MONITOR_WARNING;
-  micHead.append(micTitle, monitor);
+  micHead.append(monitor);
 
   const micWarning = paragraph('mic-warning');
   micWarning.textContent = MONITOR_WARNING;
@@ -1522,15 +1526,15 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   const duetBox = div('duet-panel');
 
   const duetIdle = div('duet-idle');
+  const duetIdleLabel = span('section-label');
+  duetIdleLabel.textContent = 'Duet';
   const duetStart = button('Start duet', 'duet-button');
   duetStart.title = 'Duet (beta) — split the two singers';
   duetStart.setAttribute('aria-label', 'Start duet (beta)');
   duetStart.addEventListener('click', () => {
     handlers.onDuetStart();
   });
-  const duetIdleNote = paragraph('duet-note');
-  duetIdleNote.textContent = 'Uses the local Duet helper to separate two voices.';
-  duetIdle.append(duetStart, duetIdleNote);
+  duetIdle.append(duetIdleLabel, duetStart);
 
   const duetProgress = div('loading');
   const duetProgressHead = div('loading-head');
@@ -1704,13 +1708,13 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   duetError.hidden = true;
 
   duetBox.append(duetIdle, duetProgress, duetReady, duetError);
-  duetSection.body.append(duetBox);
+  duetSection.append(duetBox);
 
   const reset = button('Reset', 'reset');
   reset.title = 'Backing stems to full, unmuted and unsoloed';
   backingSection.head.append(reset);
   for (const stem of BACKING) {
-    backingSection.body.append(stemRow(stem, false));
+    backingSection.body.append(stemRow(stem, false, BACKING_ICONS[stem]));
   }
   const syncReset = (): void => {
     reset.hidden = backingSection.toggle.getAttribute('aria-expanded') !== 'true';
@@ -1719,24 +1723,45 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   syncReset();
 
   const keyRow = div('key-row');
-  const keyName = span('key-name');
-  keyName.textContent = 'Key';
-  const keyStepper = div('key-stepper');
-  keyStepper.setAttribute('role', 'group');
-  keyStepper.setAttribute('aria-label', 'Key');
-  const keyDown = iconButton('minus', 'key-button', 'Down a semitone');
-  keyDown.title = 'Down a semitone ([)';
+  /** The last key drawn, which is what a slider move or a shortcut moves from. */
+  let semitones = KEY_DEFAULT;
+  const keySlider = div('slider key-slider');
+  const keyTrack = div('track');
+  const keyFill = div('slider-fill');
+  const keyInput = document.createElement('input');
+  keyInput.type = 'range';
+  keyInput.min = String(KEY_MIN);
+  keyInput.max = String(KEY_MAX);
+  keyInput.step = '1';
+  keyInput.value = String(KEY_DEFAULT);
+  keyInput.setAttribute('aria-label', 'Song key');
+  keyInput.title = 'Transpose the song; [ and ] step one semitone';
+  keySlider.append(keyTrack, keyFill, keyInput);
   const keyValue = span('key-value');
   keyValue.setAttribute('role', 'status');
   keyValue.setAttribute('aria-live', 'polite');
   keyValue.textContent = keyLabel(KEY_DEFAULT);
-  const keyUp = iconButton('plus', 'key-button', 'Up a semitone');
-  keyUp.title = 'Up a semitone (])';
-  keyStepper.append(keyDown, keyValue, keyUp);
   const keyClear = iconButton('reset', 'icon-button key-reset', 'Back to the original key');
   keyClear.hidden = true;
-  keyRow.append(keyName, keyStepper, keyClear);
+  keyRow.append(keySlider, keyValue, keyClear);
   keySection.body.append(keyRow);
+
+  const paintKey = (value: number): void => {
+    keyInput.value = String(value);
+    keyValue.textContent = keyLabel(value);
+    keyInput.setAttribute('aria-valuetext', keyLabel(value));
+    keyClear.hidden = value === KEY_DEFAULT;
+    const percent = ((value - KEY_MIN) / (KEY_MAX - KEY_MIN)) * 100;
+    keyFill.style.left = `${String(Math.min(50, percent))}%`;
+    keyFill.style.width = `${String(Math.abs(percent - 50))}%`;
+  };
+  paintKey(KEY_DEFAULT);
+  keyInput.addEventListener('input', () => {
+    const value = Number(keyInput.value);
+    semitones = value;
+    paintKey(value);
+    handlers.onKey(value);
+  });
 
   const note = div('note');
   const noteGlyph = span('note-glyph');
@@ -1767,8 +1792,6 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
 
   let autohidden = false;
   let hovering = false;
-  /** The last key drawn, which is what a step or a shortcut moves from. */
-  let semitones = KEY_DEFAULT;
   let lastView: PanelView | null = null;
 
   /**
@@ -1837,7 +1860,9 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
       return;
     }
     event.preventDefault();
-    handlers.onKey(nudgeKey(semitones, step));
+    semitones = nudgeKey(semitones, step);
+    paintKey(semitones);
+    handlers.onKey(semitones);
   };
 
   for (const kind of ['click', 'pointerdown', 'pointerup', 'dblclick', 'contextmenu']) {
@@ -1867,12 +1892,6 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     } else {
       handlers.onPracticeStart();
     }
-  });
-  keyDown.addEventListener('click', () => {
-    handlers.onKey(nudgeKey(semitones, -1));
-  });
-  keyUp.addEventListener('click', () => {
-    handlers.onKey(nudgeKey(semitones, 1));
   });
   keyClear.addEventListener('click', () => {
     handlers.onKey(KEY_DEFAULT);
@@ -1969,8 +1988,6 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
       duetFixPanel.hidden = true;
     }
 
-    practiceBox.dataset['state'] = view.practiceState;
-    practiceTitle.textContent = view.practiceLabel;
     practiceButton.textContent = view.practiceActive
       ? 'Stop'
       : view.practiceState === 'error'
@@ -2015,9 +2032,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     practiceDetail.hidden = view.practiceDetail === null;
     practiceDetail.dataset['tone'] = view.practiceState === 'error' ? 'error' : 'hint';
 
-    songSection.box.hidden = view.songAnalysisState === 'off';
-    songBox.dataset['state'] = view.songAnalysisState;
-    songTitle.textContent = view.songAnalysisState === 'ready' ? 'Song' : 'Song analysis';
+    songSection.hidden = view.songAnalysisState === 'off';
     songDetail.textContent = view.songDetail ?? '';
     songDetail.hidden = view.songDetail === null;
     songFacts.hidden = view.songAnalysisState !== 'ready';
@@ -2103,9 +2118,11 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     }
 
     semitones = view.semitones;
-    keyValue.textContent = view.keyLabel;
-    keyDown.disabled = !canNudge(semitones, -1);
-    keyUp.disabled = !canNudge(semitones, 1);
+    if (root.activeElement !== keyInput) {
+      paintKey(semitones);
+    } else {
+      keyValue.textContent = view.keyLabel;
+    }
     keyClear.hidden = semitones === KEY_DEFAULT;
   }
 
