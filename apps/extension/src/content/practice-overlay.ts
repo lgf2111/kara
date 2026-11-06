@@ -341,6 +341,8 @@ const STYLE = `
 export interface PracticeOverlayHandlers {
   /** Start another run from the beginning with the same guide melody. */
   readonly onSingAgain: () => void;
+  /** Render this run's score card as a PNG and download it. */
+  readonly onShare: () => void;
   /** Release the microphone and take the overlay away. */
   readonly onClose: () => void;
 }
@@ -465,8 +467,11 @@ export function mountPracticeOverlay(
   const statStreak = stat('Longest streak', 'stat-streak');
   const summaryActions = div('actions');
   const again = button('Sing again', 'primary');
+  const share = button('Share score', 'secondary');
+  share.title = 'Download this score as a PNG card';
+  share.setAttribute('aria-label', 'Share score card');
   const close = button('Close', 'secondary');
-  summaryActions.append(again, close);
+  summaryActions.append(again, share, close);
   summary.append(summaryScore, summaryTitle, stats, summaryActions);
 
   const error = div('card');
@@ -581,6 +586,9 @@ export function mountPracticeOverlay(
 
   again.addEventListener('click', () => {
     handlers.onSingAgain();
+  });
+  share.addEventListener('click', () => {
+    handlers.onShare();
   });
   close.addEventListener('click', () => {
     handlers.onClose();

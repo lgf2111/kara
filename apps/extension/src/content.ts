@@ -16,9 +16,12 @@ import { mountPanel, type Panel } from './content/panel.ts';
 import { mountPracticeOverlay, type PracticeOverlay } from './content/practice-overlay.ts';
 import { practiceOverlayView } from './content/practice-view.ts';
 import { shouldMuteVideo } from './content/video-mute.ts';
-import { findPlayer, isAdShowing, isAutohidden, watchPlayer } from './content/youtube.ts';
+import { findPlayer, isAdShowing, isAutohidden, pageSong, watchPlayer } from './content/youtube.ts';
 import { wallNowMs } from './picture/wall-clock.ts';
-import { isVideoId } from './stream/player.ts';
+import { normaliseScoreRun, type PracticeRun } from './practice/history.ts';
+import { sharePracticeRun } from './practice/score-card-canvas.ts';
+import { readSingerName, saveScoreRun } from './practice/score-store.ts';
+import { currentVideoId, isVideoId } from './stream/player.ts';
 import {
   packet,
   packetFor,
@@ -104,6 +107,12 @@ let moaned = false;
 let practice: PracticeAnalysis | null = null;
 let practiceLive: PracticeLive | null = null;
 let practiceSummary: PracticeScore | null = null;
+/**
+ * The finished run, once it has a video id and the page's title. It is a
+ * promise because the singer's name is read from storage, and sharing may be
+ * pressed before that read has answered.
+ */
+let practiceRun: Promise<PracticeRun | null> | null = null;
 let practiceFrame: number | null = null;
 /** The score with every note still unhit, for a run that ended before singing. */
 const NO_PRACTICE_SCORE = normalisePracticeScore(null);
@@ -179,6 +188,7 @@ function startPractice(): void {
     return;
   }
   practiceSummary = null;
+  practiceRun = null;
   practiceLive = null;
   practice = {
     state: 'analyzing',
@@ -201,6 +211,7 @@ function stopPractice(notify = true): void {
   practice = null;
   practiceLive = null;
   practiceSummary = null;
+  practiceRun = null;
   if (notify) {
     toOffscreen({ type: 'practice-stop' });
   }
@@ -220,15 +231,62 @@ function stopPractice(notify = true): void {
  * so Sing again can start at once.
  */
 function finishPractice(): void {
-  if (!practiceVisible()) {
+  if (!practiceVisible() || practiceSummary !== null) {
     return;
   }
-  practiceSummary = practiceLive?.score ?? NO_PRACTICE_SCORE;
+  const summary = normalisePracticeScore(practiceLive?.score ?? NO_PRACTICE_SCORE);
+  practiceSummary = summary;
   practice = null;
   practiceLive = null;
   toOffscreen({ type: 'practice-stop' });
+  if (summary.notesTotal > 0) {
+    const run = rememberPracticeRun(summary);
+    practiceRun = run;
+    void run.then((record) => {
+      if (record !== null) {
+        void saveScoreRun(record);
+      }
+    });
+  }
   refresh();
   startPracticeLoop();
+}
+
+/** The completed run as a record: the page's words, the score, the singer. */
+async function rememberPracticeRun(score: PracticeScore): Promise<PracticeRun | null> {
+  const videoId = report?.videoId ?? currentVideoId(location.href);
+  if (videoId === null) {
+    return null;
+  }
+  const song = pageSong();
+  if (song === null) {
+    return null;
+  }
+  const singer = await readSingerName();
+  return normaliseScoreRun({
+    videoId,
+    title: song.title,
+    artist: song.artist,
+    singer: singer === '' ? null : singer,
+    score: score.score,
+    accuracy: score.accuracy,
+    notesHit: score.notesHit,
+    notesTotal: score.notesTotal,
+    longestStreak: score.longestStreak,
+    at: Date.now(),
+  });
+}
+
+/** Renders and downloads the card for the run this end card is showing. */
+async function shareFinishedPractice(): Promise<void> {
+  const pending = practiceRun;
+  if (pending === null) {
+    return;
+  }
+  const run = await pending;
+  if (run !== null) {
+    await sharePracticeRun(run);
+  }
 }
 
 function singAgain(): void {
@@ -238,6 +296,7 @@ function singAgain(): void {
   }
   here.video.currentTime = 0;
   practiceSummary = null;
+  practiceRun = null;
   practiceLive = null;
   practice = {
     state: 'analyzing',
@@ -457,6 +516,9 @@ function mount(): void {
     practiceOverlay: mountPracticeOverlay(parts.player, {
       onSingAgain: () => {
         singAgain();
+      },
+      onShare: () => {
+        void shareFinishedPractice();
       },
       onClose: () => {
         stopPractice();

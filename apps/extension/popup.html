@@ -230,7 +230,8 @@
         line-height: 1.45;
       }
       #duet,
-      #practice-permission {
+      #practice-permission,
+      #scores {
         margin-top: 12px;
         padding: 10px;
         border: 1px solid var(--kara-border);
@@ -307,6 +308,96 @@
       }
       #mic-status {
         margin-top: 7px;
+      }
+      .singer-field {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .singer-field span {
+        width: 38px;
+        color: var(--kara-faint);
+        font-size: 11px;
+      }
+      .singer-field input {
+        flex: 1;
+        min-width: 0;
+        height: var(--kara-control);
+        padding: 0 8px;
+        border: 1px solid var(--kara-border);
+        border-radius: var(--kara-radius);
+        background: var(--kara-ground);
+        color: var(--kara-text);
+        font: inherit;
+        font-size: 11px;
+      }
+      .singer-field input:focus-visible {
+        outline: 2px solid var(--kara-accent);
+        outline-offset: 1px;
+      }
+      .score-heading {
+        margin: 8px 0 4px;
+        color: var(--kara-faint);
+        font-size: 10px;
+        font-weight: 650;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+      .score-heading:first-child {
+        margin-top: 0;
+      }
+      .score-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .score-row {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        min-height: 22px;
+        min-width: 0;
+      }
+      .score-rank {
+        width: 14px;
+        color: var(--kara-faint);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+      .score-label {
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .score-song {
+        overflow: hidden;
+        color: var(--kara-text);
+        font-size: 11px;
+        font-weight: 600;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .score-meta {
+        overflow: hidden;
+        color: var(--kara-faint);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .score-value {
+        color: var(--kara-accent);
+        font-size: 13px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+      #scores-empty {
+        margin: 0;
       }
       #diagnostics-toggle {
         display: flex;
@@ -490,6 +581,27 @@
       </p>
       <button id="mic-enable" type="button">Enable microphone</button>
       <p id="mic-status" class="hint" role="status" aria-live="polite" hidden></p>
+    </section>
+
+    <section id="scores" aria-label="Score history">
+      <h2 class="section-title">Score history</h2>
+      <label class="singer-field">
+        <span>Singer</span>
+        <input
+          id="singer-name"
+          type="text"
+          maxlength="40"
+          spellcheck="false"
+          placeholder="Optional name for share cards"
+        />
+      </label>
+      <p id="scores-empty" class="hint">Finish a practice run and its score lands here.</p>
+      <div id="scores-body" hidden>
+        <h3 class="score-heading">Best per song</h3>
+        <ol id="scores-best" class="score-list"></ol>
+        <h3 class="score-heading">Recent</h3>
+        <ol id="scores-recent" class="score-list"></ol>
+      </div>
     </section>
 
     <section id="duet" aria-label="Duet helper">

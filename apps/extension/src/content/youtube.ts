@@ -9,11 +9,12 @@
  * than a YouTube one — so a broken selector here costs the picture and the
  * panel, and never the sound.
  *
- * Four things are wanted from the page and no more. The video that is playing,
- * the element to hang an overlay on, whether an ad is on screen, and whether
- * the player has hidden its own controls. Each one fails to null or false
- * rather than throwing, and each failure is logged once: a selector that
- * stopped matching would otherwise fill the console at sixty lines a second.
+ * Five things are wanted from the page and no more. The video that is playing,
+ * the element to hang an overlay on, whether an ad is on screen, whether the
+ * player has hidden its own controls, and the song's title and artist for a
+ * score card. Each one fails to null or false rather than throwing, and each
+ * selector failure is logged once: a selector that stopped matching would
+ * otherwise fill the console at sixty lines a second.
  *
  * There is nothing here that reads a stream, a URL, a player response or any
  * other part of how the page gets its media, and nothing copied from the
@@ -110,6 +111,63 @@ export function isAdShowing(player: HTMLElement): boolean {
 /** Whether the player has hidden its controls, so the panel can too. */
 export function isAutohidden(player: HTMLElement): boolean {
   return player.classList.contains(AUTOHIDE_CLASS);
+}
+
+/** The song as the watch page names it, for a saved score and its card. */
+export interface PageSong {
+  readonly title: string;
+  readonly artist: string | null;
+}
+
+const TITLE_SELECTORS = [
+  'h1.ytd-watch-metadata yt-formatted-string',
+  '#title h1 yt-formatted-string',
+  'ytd-video-primary-info-renderer h1',
+];
+
+const ARTIST_SELECTORS = [
+  'ytd-video-owner-renderer #channel-name a',
+  '#owner #channel-name a',
+  '#channel-name a',
+];
+
+function cleanLine(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const text = value.replace(/\s+/gu, ' ').trim();
+  return text === '' ? null : text;
+}
+
+function firstText(selectors: readonly string[]): string | null {
+  for (const selector of selectors) {
+    const text = cleanLine(document.querySelector(selector)?.textContent);
+    if (text !== null) {
+      return text;
+    }
+  }
+  return null;
+}
+
+/**
+ * The title and channel of the video being watched, or null when the page
+ * does not name one.
+ *
+ * The heading is the honest answer when it is there; the meta title and the
+ * document title are the fallbacks for pages that restyle or lazy-load their
+ * metadata. The channel is optional: a score card with a title and no artist
+ * still reads, and the browser's own UI is not something this file should
+ * guess at beyond these selectors.
+ */
+export function pageSong(): PageSong | null {
+  const heading = firstText(TITLE_SELECTORS);
+  const meta = cleanLine(document.querySelector('meta[name="title"]')?.getAttribute('content'));
+  const documentTitle = cleanLine(document.title.replace(/\s+-\s+YouTube$/u, ''));
+  const title = heading ?? meta ?? documentTitle;
+  if (title === null) {
+    return null;
+  }
+  return { title, artist: firstText(ARTIST_SELECTORS) };
 }
 
 /**

@@ -11,6 +11,21 @@ import {
 import { debugReportText } from './debug-report.ts';
 import { popupView, type PopupView } from './popup/popup-view.ts';
 import {
+  SCORE_HISTORY_KEY,
+  SCORE_SINGER_KEY,
+  bestScores,
+  formatRunDate,
+  normaliseScoreHistory,
+  normaliseSinger,
+  recentRuns,
+  type PracticeRun,
+} from './practice/history.ts';
+import {
+  readScoreHistory,
+  readSingerName,
+  writeSingerName,
+} from './practice/score-store.ts';
+import {
   DEBUG_KEY,
   packet,
   STATUS_KEY,
@@ -82,6 +97,11 @@ const duetTest = need<HTMLButtonElement>('#duet-test');
 const duetStatus = need<HTMLParagraphElement>('#duet-status');
 const micEnable = need<HTMLButtonElement>('#mic-enable');
 const micStatus = need<HTMLParagraphElement>('#mic-status');
+const singerName = need<HTMLInputElement>('#singer-name');
+const scoresEmpty = need<HTMLParagraphElement>('#scores-empty');
+const scoresBody = need<HTMLDivElement>('#scores-body');
+const scoresBest = need<HTMLOListElement>('#scores-best');
+const scoresRecent = need<HTMLOListElement>('#scores-recent');
 
 let tabId: number | null = null;
 let url: string | undefined;
@@ -95,6 +115,8 @@ let failure: string | null = null;
 let pipeline: PipelineDebug | null = null;
 /** Whether the diagnostics disclosure is open. It starts closed every time. */
 let diagnosticsOpen = false;
+/** The local score history, newest first once `normaliseScoreHistory` has run. */
+let scores: PracticeRun[] = [];
 
 function send(body: Request): void {
   chrome.runtime.sendMessage(packet('background', body, tabId)).catch(() => undefined);
@@ -206,6 +228,62 @@ function draw(): void {
   } else if (diagnosticsOpen) {
     renderDiagnostics(shown.diagnostics);
   }
+}
+
+/** One row of the local leaderboard: rank, song, the words under it, score. */
+function scoreItem(run: PracticeRun, rank: number | null, meta: string): HTMLLIElement {
+  const item = document.createElement('li');
+  item.className = 'score-row';
+  if (rank !== null) {
+    const rankEl = document.createElement('span');
+    rankEl.className = 'score-rank';
+    rankEl.textContent = String(rank);
+    item.append(rankEl);
+  }
+  const label = document.createElement('div');
+  label.className = 'score-label';
+  const song = document.createElement('span');
+  song.className = 'score-song';
+  song.textContent = run.title;
+  song.title = run.artist === null ? run.title : `${run.title} — ${run.artist}`;
+  const line = document.createElement('span');
+  line.className = 'score-meta';
+  line.textContent = meta;
+  label.append(song, line);
+  const value = document.createElement('span');
+  value.className = 'score-value';
+  value.textContent = String(Math.round(run.score));
+  value.title = 'Score out of 100';
+  item.append(label, value);
+  return item;
+}
+
+/** The compact leaderboard: best per song above the newest runs. */
+function drawScores(): void {
+  const best = bestScores(scores, 3);
+  const recent = recentRuns(scores, 4);
+  scoresEmpty.hidden = scores.length > 0;
+  scoresBody.hidden = scores.length === 0;
+  scoresBest.replaceChildren(
+    ...best.map((run, index) =>
+      scoreItem(
+        run,
+        index + 1,
+        run.artist === null ? formatRunDate(run.at) : run.artist,
+      ),
+    ),
+  );
+  scoresRecent.replaceChildren(
+    ...recent.map((run) =>
+      scoreItem(
+        run,
+        null,
+        `${formatRunDate(run.at)} · ${String(Math.round(run.accuracy))}%${
+          run.singer === null ? '' : ` · ${run.singer}`
+        }`,
+      ),
+    ),
+  );
 }
 
 /**
@@ -347,6 +425,11 @@ micEnable.addEventListener('click', () => {
     });
 });
 
+singerName.addEventListener('change', () => {
+  singerName.value = normaliseSinger(singerName.value);
+  void writeSingerName(singerName.value);
+});
+
 function showDuetStatus(text: string): void {
   duetStatus.hidden = text === '';
   duetStatus.textContent = text;
@@ -416,6 +499,16 @@ chrome.storage.onChanged.addListener((changes, area) => {
     key = parseSettings(changes[SETTINGS_KEY]?.newValue).key;
     draw();
   }
+  if (area === 'local' && Object.hasOwn(changes, SCORE_HISTORY_KEY)) {
+    scores = normaliseScoreHistory(changes[SCORE_HISTORY_KEY]?.newValue);
+    drawScores();
+  }
+  if (area === 'local' && Object.hasOwn(changes, SCORE_SINGER_KEY)) {
+    const next = normaliseSinger(changes[SCORE_SINGER_KEY]?.newValue);
+    if (document.activeElement !== singerName) {
+      singerName.value = next;
+    }
+  }
 });
 
 async function open(): Promise<void> {
@@ -424,6 +517,10 @@ async function open(): Promise<void> {
   url = tab?.url;
   const settings = await readSettings();
   key = settings.key;
+  const [history, singer] = await Promise.all([readScoreHistory(), readSingerName()]);
+  scores = history;
+  singerName.value = singer;
+  drawScores();
   await loadDuetConfig();
   take((await chrome.storage.session.get(STATUS_KEY))[STATUS_KEY]);
   takeDebug((await chrome.storage.session.get(DEBUG_KEY))[DEBUG_KEY]);
