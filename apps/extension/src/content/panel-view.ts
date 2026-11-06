@@ -9,6 +9,12 @@ import {
   type DuetState,
 } from '../audio/duet.ts';
 import type { PracticeAnalysis } from '../audio/practice.ts';
+import {
+  keyName,
+  rangeLabel,
+  transposeLabel,
+  type SongAnalysis,
+} from '../audio/song-analysis.ts';
 import type { PlayMode, StatusReport } from '../protocol.ts';
 
 /**
@@ -75,12 +81,26 @@ export interface PanelView {
   readonly practiceCanStart: boolean;
   /** Whether practice is the thing the player is showing right now. */
   readonly practiceActive: boolean;
+  /** Key, tempo and range of the separated song, or the state of the read. */
+  readonly songAnalysisState: 'off' | 'analyzing' | 'ready' | 'error';
+  /** E.g. `G major`, or null when the key was not clear enough to show. */
+  readonly songKey: string | null;
+  /** Beats per minute, or null when the pulse was not clear enough to show. */
+  readonly songBpm: number | null;
+  /** E.g. `C3–E5`, or null when the vocal had too little to measure. */
+  readonly songRange: string | null;
+  /** E.g. `+2 semitones`, or the neutral `Original key`. */
+  readonly songTranspose: string | null;
+  /** The one line shown while the analysis runs or after it stops. */
+  readonly songDetail: string | null;
 }
 
 export interface PanelInput {
   readonly report: StatusReport | null;
   /** The practice analysis from the offscreen document, when one was asked for. */
   readonly practice?: PracticeAnalysis | null;
+  /** The song analysis from the offscreen document, when it has one. */
+  readonly analysis?: SongAnalysis | null;
 }
 
 /** The stage and the estimate on one line, which is all there is room for. */
@@ -148,6 +168,24 @@ export function panelView(input: PanelInput): PanelView {
     practiceState === 'analyzing' && practice?.progress !== null && practice?.progress !== undefined
       ? Math.min(1, Math.max(0, practice.progress))
       : null;
+  const analysis = input.analysis ?? null;
+  const songAnalysisState: PanelView['songAnalysisState'] = analysis?.state ?? 'off';
+  const songFacts = songAnalysisState === 'ready' ? (analysis?.facts ?? null) : null;
+  const songKey = songFacts?.key === null || songFacts?.key === undefined
+    ? null
+    : keyName(songFacts.key);
+  const songBpm =
+    songFacts?.bpm === null || songFacts?.bpm === undefined ? null : Math.round(songFacts.bpm);
+  const songRange = songFacts?.range === null || songFacts?.range === undefined
+    ? null
+    : rangeLabel(songFacts.range);
+  const songTranspose = songFacts === null ? null : transposeLabel(songFacts.transpose);
+  const songDetail =
+    songAnalysisState === 'analyzing'
+      ? (analysis?.detail ?? 'Reading the song.')
+      : songAnalysisState === 'error'
+        ? (analysis?.detail ?? 'The song could not be read.')
+        : null;
   const quiet = {
     progress: null,
     detail: null,
@@ -175,6 +213,12 @@ export function panelView(input: PanelInput): PanelView {
       (report.status === 'ready' || report.status === 'paused') &&
       !practiceActive,
     practiceActive,
+    songAnalysisState,
+    songKey,
+    songBpm,
+    songRange,
+    songTranspose,
+    songDetail,
   };
 
   if (report === null || report.status === 'idle') {

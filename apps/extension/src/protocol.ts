@@ -6,6 +6,7 @@ import type { Status } from './audio/status.ts';
 import { IDLE_DUET, type DuetMix, type DuetStatus } from './audio/duet.ts';
 import { DEFAULT_MIX, type StemMix } from './audio/stems.ts';
 import type { PracticeAnalysis, PracticeLive } from './audio/practice.ts';
+import type { SongAnalysis } from './audio/song-analysis.ts';
 import type { Backend } from '../../web/src/separation/protocol.ts';
 import type { StreamInfo } from './stream/player.ts';
 
@@ -38,6 +39,13 @@ export type {
   PracticeNote,
   PracticeScore,
 } from './audio/practice.ts';
+export type {
+  SongAnalysis,
+  SongAnalysisState,
+  SongFacts,
+  SongKey,
+  SongRange,
+} from './audio/song-analysis.ts';
 
 export type Side = 'background' | 'offscreen' | 'tab';
 
@@ -261,12 +269,25 @@ export type PracticeLiveReport = PracticeLive & {
   readonly type: 'practice-live';
 };
 
+/**
+ * The key, tempo and vocal range of the separated song. It arrives once when
+ * the analysis starts, as it progresses, and once when it is ready or has
+ * failed. The facts travel only with the ready report, so a page never draws a
+ * half-read key; the video id lets a late report for the previous song be
+ * ignored rather than shown over the next one.
+ */
+export type SongAnalysisReport = SongAnalysis & {
+  readonly type: 'song-analysis';
+  readonly videoId: string;
+};
+
 export type Report =
   | StatusReport
   | MetricsReport
   | DebugReportMessage
   | PracticeAnalysisReport
-  | PracticeLiveReport;
+  | PracticeLiveReport
+  | SongAnalysisReport;
 
 export type Body = Command | Report | Request;
 

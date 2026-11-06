@@ -350,7 +350,8 @@ chrome.runtime.onMessage.addListener((message: unknown, sender) => {
     body.type === 'metrics' ||
     body.type === 'debug-log' ||
     body.type === 'practice-analysis' ||
-    body.type === 'practice-live'
+    body.type === 'practice-live' ||
+    body.type === 'song-analysis'
   ) {
     relay(body, received.tabId);
   }

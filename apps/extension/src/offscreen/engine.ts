@@ -24,7 +24,12 @@ import {
 } from '../audio/duet.ts';
 import { encodeWavMono } from '../audio/wav.ts';
 import type { PracticeNote } from '../audio/practice.ts';
+import { SONG_ANALYSIS_RATE } from '../audio/song-analysis.ts';
 import { startPractice as startPracticeSession, type PracticeHandle } from './practice.ts';
+import type {
+  SongAnalysisCommand,
+  SongAnalysisEvent,
+} from './song-analysis-messages.ts';
 import {
   advanceProgress,
   NO_TIMINGS,
@@ -50,6 +55,7 @@ import type {
   PipelineDebug,
   PracticeAnalysisReport,
   PracticeLiveReport,
+  SongAnalysisReport,
   StatusReport,
   StreamInfo,
 } from '../protocol.ts';
@@ -135,6 +141,8 @@ export interface EngineOptions {
   readonly onMetrics: (metrics: Metrics) => void;
   /** Practice analysis and live reports, when a person has opted in. */
   readonly onPractice?: (report: PracticeAnalysisReport | PracticeLiveReport) => void;
+  /** The song's key, tempo and vocal range, once separation has finished. */
+  readonly onSongAnalysis?: (report: SongAnalysisReport) => void;
 }
 
 export interface Engine {
@@ -346,6 +354,76 @@ async function readWholeStream(
   return { bytes: bytes.buffer, totalBytes: totalBytes ?? doneBytes };
 }
 
+/**
+ * The mono analysis copies of the separated stems.
+ *
+ * They are accumulated at {@link SONG_ANALYSIS_RATE} as the blocks arrive, so
+ * three four-minute stems cost about forty megabytes rather than three times
+ * that. Nothing here is played: the player's own buffers are the sound, and
+ * these are the inputs the song-analysis worker is handed.
+ */
+interface AnalysisBuffers {
+  readonly harmonic: Float32Array;
+  readonly percussive: Float32Array;
+  readonly vocals: Float32Array;
+  readonly harmonicCounts: Float32Array;
+  readonly percussiveCounts: Float32Array;
+  readonly vocalCounts: Float32Array;
+}
+
+/** A stereo pair out of a separated block; either side may be missing. */
+type StemPair = readonly [Float32Array | undefined, Float32Array | undefined];
+
+/**
+ * Adds one separated block to a mono analysis buffer.
+ *
+ * The block is averaged by source position rather than by index within the
+ * block, so a block boundary cannot become a click, and the count is kept
+ * separately because a bucket on a boundary can be shared by two blocks. The
+ * division is done once, when the last block is in.
+ */
+function appendAnalysisBlock(
+  pairs: readonly StemPair[],
+  startSample: number,
+  frames: number,
+  target: Float32Array,
+  counts: Float32Array,
+  inputRate: number,
+): void {
+  if (pairs.length === 0 || frames <= 0 || target.length === 0) {
+    return;
+  }
+  const ratio = inputRate / SONG_ANALYSIS_RATE;
+  if (!Number.isFinite(ratio) || ratio <= 0) {
+    return;
+  }
+  const first = Math.max(0, Math.floor(startSample / ratio));
+  const last = Math.min(target.length, Math.ceil((startSample + frames) / ratio));
+  for (let out = first; out < last; out += 1) {
+    const from = Math.max(startSample, Math.floor(out * ratio));
+    const to = Math.min(startSample + frames, Math.max(from + 1, Math.floor((out + 1) * ratio)));
+    let sum = 0;
+    for (let at = from; at < to; at += 1) {
+      const frame = at - startSample;
+      for (const [left, right] of pairs) {
+        sum += ((left?.[frame] ?? 0) + (right?.[frame] ?? 0)) / 2;
+      }
+    }
+    target[out] = (target[out] ?? 0) + sum;
+    counts[out] = (counts[out] ?? 0) + (to - from);
+  }
+}
+
+/** Turns the sums above into averages, once every block has arrived. */
+function finishAnalysisBuffer(target: Float32Array, counts: Float32Array): void {
+  for (let index = 0; index < target.length; index += 1) {
+    const count = counts[index] ?? 0;
+    if (count > 0) {
+      target[index] = (target[index] ?? 0) / count;
+    }
+  }
+}
+
 export async function startEngine(options: EngineOptions): Promise<Engine> {
   const context = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: 'playback' });
   await context.audioWorklet.addModule(options.playbackWorkletUrl);
@@ -393,6 +471,22 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
    * making the singer wait through the same analysis a second time.
    */
   let practiceNotes: readonly PracticeNote[] | null = null;
+  /**
+   * The analysis copies being filled while separation runs, then the inputs
+   * the worker is given, then nothing once the result is in. Three states
+   * rather than one: a cancelled run can be retried without re-reading a stem
+   * that no longer exists.
+   */
+  let analysisBuffers: AnalysisBuffers | null = null;
+  let analysisInputs: {
+    readonly harmonic: Float32Array;
+    readonly percussive: Float32Array;
+    readonly vocals: Float32Array;
+  } | null = null;
+  /** The last song-analysis report, and whether asking again would help. */
+  let songAnalysis: SongAnalysisReport | null = null;
+  let songAnalysisWorker: Worker | null = null;
+  let songAnalysisDone = false;
 
   /** The pitch shifter's delay, which the player has to read ahead by. */
   async function reportedLatency(shifter: StretchNode): Promise<number> {
@@ -896,6 +990,169 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     });
   };
 
+  const tellSongAnalysis = (report: SongAnalysisReport): void => {
+    songAnalysis = report;
+    options.onSongAnalysis?.(report);
+  };
+
+  /**
+   * The analysis failed, which is a missing card and not a dead session. The
+   * stems keep playing; the person simply gets no key, tempo or range.
+   */
+  const failSongAnalysis = (detail: string): void => {
+    if (stopped) {
+      return;
+    }
+    songAnalysisDone = true;
+    const running = songAnalysisWorker;
+    songAnalysisWorker = null;
+    running?.terminate();
+    analysisInputs = null;
+    tellSongAnalysis({
+      type: 'song-analysis',
+      videoId: options.stream.videoId,
+      state: 'error',
+      progress: null,
+      facts: null,
+      detail,
+    });
+  };
+
+  /**
+   * Stops the worker without throwing its inputs away. An ad is the reason
+   * this exists: the work must not run through one, and leaving it at the
+   * pause means the analysis resumes where it can rather than never finishing.
+   */
+  const cancelSongAnalysis = (detail: string): void => {
+    const running = songAnalysisWorker;
+    if (running === null) {
+      return;
+    }
+    songAnalysisWorker = null;
+    running.terminate();
+    if (songAnalysis !== null && songAnalysis.state === 'analyzing') {
+      tellSongAnalysis({ ...songAnalysis, progress: 0, detail });
+    }
+  };
+
+  const startSongAnalysis = (): void => {
+    if (
+      stopped ||
+      songAnalysisDone ||
+      songAnalysisWorker !== null ||
+      analysisInputs === null ||
+      latest?.inAd === true
+    ) {
+      return;
+    }
+    const worker = new Worker(new URL('./song-analysis.worker.ts', import.meta.url), {
+      type: 'module',
+    });
+    songAnalysisWorker = worker;
+    tellSongAnalysis({
+      type: 'song-analysis',
+      videoId: options.stream.videoId,
+      state: 'analyzing',
+      progress: 0,
+      facts: null,
+      detail: 'Reading the song.',
+    });
+
+    worker.addEventListener('message', (event: MessageEvent<SongAnalysisEvent>) => {
+      if (stopped || songAnalysisWorker !== worker) {
+        return;
+      }
+      const message = event.data;
+      switch (message.type) {
+        case 'progress':
+          if (songAnalysis !== null) {
+            tellSongAnalysis({
+              ...songAnalysis,
+              state: 'analyzing',
+              progress: Math.min(0.99, Math.max(0, message.progress)),
+              detail: 'Reading the song.',
+            });
+          }
+          return;
+        case 'facts':
+          songAnalysisDone = true;
+          songAnalysisWorker = null;
+          worker.terminate();
+          // The result is the only thing kept from here on: the three stems
+          // were only ever for this pass.
+          analysisInputs = null;
+          tellSongAnalysis({
+            type: 'song-analysis',
+            videoId: options.stream.videoId,
+            state: 'ready',
+            progress: 1,
+            facts: message.facts,
+            detail: null,
+          });
+          return;
+        case 'failed':
+          failSongAnalysis(message.reason);
+          return;
+      }
+    });
+    worker.addEventListener('error', () => {
+      if (songAnalysisWorker !== worker) {
+        return;
+      }
+      failSongAnalysis('The song analysis worker stopped.');
+    });
+
+    // Copies, because a cancelled run must leave the session able to try
+    // again; the originals stay here until a result is in.
+    const inputs = analysisInputs;
+    const harmonic = inputs.harmonic.slice();
+    const percussive = inputs.percussive.slice();
+    const vocals = inputs.vocals.slice();
+    worker.postMessage(
+      {
+        type: 'analyze',
+        harmonic,
+        percussive,
+        vocals,
+        sampleRate: SONG_ANALYSIS_RATE,
+      } satisfies SongAnalysisCommand,
+      [
+        harmonic.buffer as ArrayBuffer,
+        percussive.buffer as ArrayBuffer,
+        vocals.buffer as ArrayBuffer,
+      ],
+    );
+  };
+
+  /** Starts, reschedules after an ad, or leaves a finished analysis alone. */
+  const maybeStartSongAnalysis = (): void => {
+    if (analysisInputs === null || songAnalysisDone) {
+      return;
+    }
+    if (latest?.inAd === true) {
+      cancelSongAnalysis('Waiting for the song to come back.');
+      return;
+    }
+    startSongAnalysis();
+  };
+
+  /** Turns the accumulated sums into the three averages the worker wants. */
+  const sealAnalysisInputs = (): void => {
+    const buffers = analysisBuffers;
+    if (buffers === null) {
+      return;
+    }
+    finishAnalysisBuffer(buffers.harmonic, buffers.harmonicCounts);
+    finishAnalysisBuffer(buffers.percussive, buffers.percussiveCounts);
+    finishAnalysisBuffer(buffers.vocals, buffers.vocalCounts);
+    analysisInputs = {
+      harmonic: buffers.harmonic,
+      percussive: buffers.percussive,
+      vocals: buffers.vocals,
+    };
+    analysisBuffers = null;
+  };
+
   try {
     const contentLength = Number(options.stream.contentLength);
     const wantedTotal = Number.isFinite(contentLength) && contentLength > 0 ? contentLength : null;
@@ -915,6 +1172,18 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     sampleCount = left.length;
     vocalsMono = new Float32Array(sampleCount);
     durationSeconds = sampleCount / SAMPLE_RATE;
+    const analysisFrames = Math.max(
+      1,
+      Math.ceil(sampleCount / (context.sampleRate / SONG_ANALYSIS_RATE)) + 1,
+    );
+    analysisBuffers = {
+      harmonic: new Float32Array(analysisFrames),
+      percussive: new Float32Array(analysisFrames),
+      vocals: new Float32Array(analysisFrames),
+      harmonicCounts: new Float32Array(analysisFrames),
+      percussiveCounts: new Float32Array(analysisFrames),
+      vocalCounts: new Float32Array(analysisFrames),
+    };
     timings.downloadSeconds = (wallNowMs() - startedAt) / 1000;
     metrics = { ...metrics, downloadBytes: downloadedBytes, downloadTotal: totalBytes };
 
@@ -982,6 +1251,40 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
               vocalsMono[at] =
                 ((vocalLeft?.[frame] ?? 0) + (vocalRight?.[frame] ?? 0)) / 2;
             }
+          }
+          // The analysis copies are made here, while the block is still in
+          // hand: the player takes ownership of these arrays immediately
+          // afterwards, so there is no second chance to read them.
+          const buffers = analysisBuffers;
+          if (buffers !== null) {
+            appendAnalysisBlock(
+              [
+                [channels[2], channels[3]],
+                [channels[4], channels[5]],
+                [channels[6], channels[7]],
+              ],
+              message.startSample,
+              message.frames,
+              buffers.harmonic,
+              buffers.harmonicCounts,
+              context.sampleRate,
+            );
+            appendAnalysisBlock(
+              [[channels[0], channels[1]]],
+              message.startSample,
+              message.frames,
+              buffers.percussive,
+              buffers.percussiveCounts,
+              context.sampleRate,
+            );
+            appendAnalysisBlock(
+              [[channels[6], channels[7]]],
+              message.startSample,
+              message.frames,
+              buffers.vocals,
+              buffers.vocalCounts,
+              context.sampleRate,
+            );
           }
           // Straight on to the player, which copies it into its own track.
           // The offscreen document does not keep a second set of stems.
@@ -1064,6 +1367,11 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       }
       metrics = { ...metrics, stemFrames: sampleCount };
       tellMetrics();
+      // The stems are whole, so the analysis copies can stop growing and the
+      // key/tempo/range pass can begin — unless an ad is on the clock, in
+      // which case it waits for the song to come back.
+      sealAnalysisInputs();
+      maybeStartSongAnalysis();
       moveTo({ type: 'prepared' });
       // The stems being ready does not make a paused video play. If the last
       // report said the video was holding, the session opens in `paused`
@@ -1243,6 +1551,9 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       ) {
         follow(tidy);
       }
+      // An ad has no song to analyse. The pass is stopped when one starts and
+      // started again when the song does, so it never works on an ad's clock.
+      maybeStartSongAnalysis();
     },
 
     debug: () => ({
@@ -1268,6 +1579,11 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
         clearTimeout(routeTimer);
         routeTimer = null;
       }
+      const analysis = songAnalysisWorker;
+      songAnalysisWorker = null;
+      analysis?.terminate();
+      analysisBuffers = null;
+      analysisInputs = null;
       if (duetJobId !== null && duetClient !== null) {
         void duetClient.cancel(duetJobId).catch(() => undefined);
       }

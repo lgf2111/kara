@@ -506,6 +506,60 @@ button[hidden] {
 .practice-detail[data-tone='error'] {
   color: var(--kara-danger);
 }
+.song-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--kara-border);
+  border-radius: var(--kara-radius);
+  background: var(--kara-surface);
+}
+.song-panel[data-state='analyzing'] {
+  border-color: rgba(232, 184, 109, 0.3);
+}
+.song-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.song-title {
+  color: var(--kara-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.song-detail {
+  color: var(--kara-faint);
+  font-size: 10px;
+  line-height: 1.4;
+  text-align: right;
+}
+.song-facts {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 4px 8px;
+  align-items: baseline;
+}
+.song-row {
+  display: contents;
+}
+.song-label {
+  color: var(--kara-faint);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.song-value {
+  overflow: hidden;
+  color: var(--kara-text);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .duet-panel {
   display: flex;
   flex-direction: column;
@@ -1054,6 +1108,38 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   mixer.append(practiceBox);
 
   /**
+   * The song card, under the vocal it describes. It is information rather than
+   * a control: the key stepper below is where a suggestion is acted on, and
+   * this only says what the separated audio appears to be. A key the analysis
+   * is not sure of is a question mark, and a tempo it is not sure of is
+   * absent, so an unsure read never looks like a fact.
+   */
+  const songBox = div('song-panel');
+  songBox.hidden = true;
+  const songHead = div('song-head');
+  const songTitle = span('song-title');
+  songTitle.textContent = 'Song';
+  const songDetail = span('song-detail');
+  songHead.append(songTitle, songDetail);
+  const songFacts = div('song-facts');
+
+  const songRow = (label: string): { readonly row: HTMLDivElement; readonly value: HTMLSpanElement } => {
+    const row = div('song-row');
+    const name = span('song-label');
+    name.textContent = label;
+    const value = span('song-value');
+    row.append(name, value);
+    songFacts.append(row);
+    return { row, value };
+  };
+  const songKeyCell = songRow('Key');
+  const songBpmCell = songRow('BPM');
+  const songRangeCell = songRow('Range');
+  const songTransposeCell = songRow('Suggested');
+  songBox.append(songHead, songFacts);
+  mixer.append(songBox);
+
+  /**
    * The duet panel. It is a second desk, shown only after the helper has
    * returned two voices. While the job runs the single vocal row above stays
    * live, which is the whole point of keeping the second pass opt-in.
@@ -1548,6 +1634,21 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     practiceDetail.textContent = view.practiceDetail ?? '';
     practiceDetail.hidden = view.practiceDetail === null;
     practiceDetail.dataset['tone'] = view.practiceState === 'error' ? 'error' : 'hint';
+
+    songBox.hidden = !view.controls || view.songAnalysisState === 'off';
+    songBox.dataset['state'] = view.songAnalysisState;
+    songTitle.textContent = view.songAnalysisState === 'ready' ? 'Song' : 'Song analysis';
+    songDetail.textContent = view.songDetail ?? '';
+    songDetail.hidden = view.songDetail === null;
+    songFacts.hidden = view.songAnalysisState !== 'ready';
+    if (view.songAnalysisState === 'ready') {
+      songKeyCell.value.textContent = view.songKey ?? '?';
+      songBpmCell.row.hidden = view.songBpm === null;
+      songBpmCell.value.textContent = view.songBpm === null ? '' : String(view.songBpm);
+      songRangeCell.row.hidden = view.songRange === null;
+      songRangeCell.value.textContent = view.songRange ?? '';
+      songTransposeCell.value.textContent = view.songTranspose ?? '';
+    }
 
     for (const index of [0, 1] as const) {
       const control = duetControls.get(index);

@@ -80,6 +80,9 @@ async function start(command: Extract<Command, { type: 'start' }>): Promise<void
     onPractice: (report) => {
       tell(report);
     },
+    onSongAnalysis: (report) => {
+      tell(report);
+    },
   });
   const started = engine;
   if (started !== null) {

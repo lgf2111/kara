@@ -10,6 +10,10 @@ import {
   type PracticeScore,
 } from './audio/practice.ts';
 import type { StemMix } from './audio/stems.ts';
+import {
+  normaliseSongAnalysis,
+  type SongAnalysis,
+} from './audio/song-analysis.ts';
 import { mountAnalysisBar, type AnalysisBar } from './content/analysis-bar.ts';
 import { panelView } from './content/panel-view.ts';
 import { mountPanel, type Panel } from './content/panel.ts';
@@ -31,6 +35,7 @@ import {
   type PracticeAnalysisReport,
   type PracticeLiveReport,
   type Request,
+  type SongAnalysisReport,
   type StatusReport,
   type StreamInfo,
 } from './protocol.ts';
@@ -114,6 +119,12 @@ let practiceSummary: PracticeScore | null = null;
  */
 let practiceRun: Promise<PracticeRun | null> | null = null;
 let practiceFrame: number | null = null;
+/**
+ * The song analysis, kept for the video it belongs to and no other. One entry
+ * rather than a map: this is a cache for the song on screen, not a library or
+ * a history, and moving to another video replaces it.
+ */
+let songAnalysisCache: { readonly videoId: string; readonly analysis: SongAnalysis } | null = null;
 /** The score with every note still unhit, for a run that ended before singing. */
 const NO_PRACTICE_SCORE = normalisePracticeScore(null);
 /**
@@ -141,7 +152,11 @@ function running(): boolean {
 }
 
 function refresh(): void {
-  mounted?.panel.update(panelView({ report, practice }));
+  const analysis =
+    report !== null && songAnalysisCache !== null && report.videoId === songAnalysisCache.videoId
+      ? songAnalysisCache.analysis
+      : null;
+  mounted?.panel.update(panelView({ report, practice, analysis }));
   const ready =
     report !== null && isRunning(report.status) && !inAd
       ? analyzedFraction(report.analyzedSeconds, report.durationSeconds)
@@ -337,6 +352,22 @@ function onPracticeLive(message: PracticeLiveReport): void {
   }
   practiceLive = normalisePracticeLive(message);
   startPracticeLoop();
+}
+
+/**
+ * The song card's report. A late report for the song before this one is
+ * ignored: the card belongs to the video the session is on, and a key from
+ * the last video would be worse than the few hundred milliseconds of waiting.
+ */
+function onSongAnalysis(message: SongAnalysisReport): void {
+  if (report !== null && report.videoId !== null && message.videoId !== report.videoId) {
+    return;
+  }
+  songAnalysisCache = {
+    videoId: message.videoId,
+    analysis: normaliseSongAnalysis(message),
+  };
+  refresh();
 }
 
 /**
@@ -599,6 +630,15 @@ function setKey(semitones: number): void {
 
 function onStatus(next: StatusReport): void {
   report = next;
+  // One cached song at a time. A status that names another video is enough
+  // to know the old analysis is not about what is on screen any more.
+  if (
+    songAnalysisCache !== null &&
+    next.videoId !== null &&
+    next.videoId !== songAnalysisCache.videoId
+  ) {
+    songAnalysisCache = null;
+  }
   // Practice belongs to a live karaoke session. If that session stops or
   // dies, the microphone goes with it rather than scoring a video whose stems
   // are gone.
@@ -683,6 +723,9 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
   }
   if (body.type === 'practice-live') {
     onPracticeLive(body);
+  }
+  if (body.type === 'song-analysis') {
+    onSongAnalysis(body);
   }
   return false;
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { DEFAULT_DUET_MIX, type DuetStatus } from '../src/audio/duet.ts';
 import type { PracticeAnalysis } from '../src/audio/practice.ts';
+import type { SongAnalysis } from '../src/audio/song-analysis.ts';
 import { DEFAULT_MIX, withMute, withSolo, withStem } from '../src/audio/stems.ts';
 import { panelView, prepareDetail } from '../src/content/panel-view.ts';
 import { report, separating } from './report.ts';
@@ -201,6 +202,77 @@ describe('pitch practice', () => {
     expect(view.practiceDetail).toContain('Enable microphone');
     expect(view.practiceActive).toBe(false);
     expect(view.practiceCanStart).toBe(true);
+  });
+});
+
+describe('the song card', () => {
+  const ready: SongAnalysis = {
+    state: 'ready',
+    progress: 1,
+    facts: {
+      key: { tonic: 7, mode: 'major', confidence: 0.8 },
+      bpm: 128.4,
+      bpmConfidence: 0.7,
+      range: { lowMidi: 48, highMidi: 76, confidence: 0.6, frames: 120 },
+      transpose: -2,
+    },
+    detail: null,
+  };
+  const unsure: SongAnalysis = {
+    state: 'ready',
+    progress: 1,
+    facts: {
+      key: null,
+      bpm: null,
+      bpmConfidence: 0.1,
+      range: null,
+      transpose: null,
+    },
+    detail: null,
+  };
+
+  it('has nothing to say before an analysis exists', () => {
+    const view = panelView({ report: report({ status: 'ready' }) });
+
+    expect(view.songAnalysisState).toBe('off');
+    expect(view.songKey).toBeNull();
+    expect(view.songBpm).toBeNull();
+  });
+
+  it('shows the key, tempo, range and suggested fit when it is ready', () => {
+    const view = panelView({ report: report({ status: 'ready' }), analysis: ready });
+
+    expect(view.songAnalysisState).toBe('ready');
+    expect(view.songKey).toBe('G major');
+    expect(view.songBpm).toBe(128);
+    expect(view.songRange).toBe('C3–E5');
+    expect(view.songTranspose).toBe('−2 semitones');
+    expect(view.songDetail).toBeNull();
+  });
+
+  it('asks rather than guessing when the key and tempo are unsure', () => {
+    const view = panelView({ report: report({ status: 'ready' }), analysis: unsure });
+
+    expect(view.songAnalysisState).toBe('ready');
+    expect(view.songKey).toBeNull();
+    expect(view.songBpm).toBeNull();
+    expect(view.songRange).toBeNull();
+    expect(view.songTranspose).toBe('Original key');
+  });
+
+  it('shows the line while the analysis runs', () => {
+    const view = panelView({
+      report: report({ status: 'ready' }),
+      analysis: {
+        state: 'analyzing',
+        progress: 0.3,
+        facts: null,
+        detail: 'Reading the song.',
+      },
+    });
+
+    expect(view.songAnalysisState).toBe('analyzing');
+    expect(view.songDetail).toBe('Reading the song.');
   });
 });
 
