@@ -83,9 +83,9 @@ export interface PanelView {
   readonly practiceState: 'off' | 'analyzing' | 'ready' | 'error';
   readonly practiceLabel: string;
   readonly practiceDetail: string | null;
-  /** The line the Practice section shows while the song is still preparing. */
+  /** The line the Practice & Duet group shows while the song is still preparing. */
   readonly practiceHint: string | null;
-  /** Why the Practice button cannot start yet, for its tooltip, or null. */
+  /** Why the grouped buttons cannot start yet, for their tooltip, or null. */
   readonly practiceTooltip: string | null;
   /** Nought to one while the melody is being learnt, or null when it is not. */
   readonly practiceProgress: number | null;
@@ -93,6 +93,12 @@ export interface PanelView {
   readonly practiceCanStart: boolean;
   /** Whether practice is the thing the player is showing right now. */
   readonly practiceActive: boolean;
+  /** The line the Duet half of the group shows while the song is preparing. */
+  readonly duetHint: string | null;
+  /** Why the Duet button cannot start yet, for its tooltip, or null. */
+  readonly duetTooltip: string | null;
+  /** Whether the helper is splitting a pair or the pair is already playing. */
+  readonly duetActive: boolean;
   /** Key, tempo and range of the separated song, or the state of the read. */
   readonly songAnalysisState: 'off' | 'analyzing' | 'ready' | 'error';
   /** E.g. `G major`, or null when the key was not clear enough to show. */
@@ -179,12 +185,13 @@ export function panelView(input: PanelInput): PanelView {
   const practice = input.practice ?? null;
   const practiceState: PanelView['practiceState'] = practice?.state ?? 'off';
   const practiceActive = practiceState === 'analyzing' || practiceState === 'ready';
-  // Practice reads the whole vocal stem, so the same readiness the engine
-  // guards on is what unlocks the button here.
-  const practiceCanStart =
-    report !== null &&
-    (report.status === 'ready' || report.status === 'paused') &&
-    !practiceActive;
+  const duetActive = duet.state === 'preparing' || duet.state === 'ready';
+  // Practice and Duet both read the whole vocal stem, so the same readiness
+  // the engine guards with `stemEnd` is what unlocks both buttons here.
+  const stemReady =
+    report !== null && (report.status === 'ready' || report.status === 'paused');
+  const practiceCanStart = stemReady && !practiceActive;
+  const duetCanStart = stemReady && !duetActive;
   const practiceLabel =
     practiceState === 'analyzing'
       ? 'Learning the melody'
@@ -205,10 +212,13 @@ export function panelView(input: PanelInput): PanelView {
     report?.status === 'preparing' && !practiceActive
       ? 'Waiting for the whole song to be analyzed.'
       : null;
-  const practiceTooltip =
-    practiceActive || practiceCanStart
-      ? null
-      : 'Practice unlocks when the whole song has been analyzed.';
+  const duetHint =
+    report?.status === 'preparing' && !duetActive
+      ? 'Waiting for the whole song to be analyzed.'
+      : null;
+  const lockedTooltip = 'Practice and Duet unlock when the whole song has been analyzed.';
+  const practiceTooltip = practiceActive || practiceCanStart ? null : lockedTooltip;
+  const duetTooltip = duetActive || duetCanStart ? null : lockedTooltip;
   const practiceProgress =
     practiceState === 'analyzing' && practice?.progress !== null && practice?.progress !== undefined
       ? Math.min(1, Math.max(0, practice.progress))
@@ -267,10 +277,12 @@ export function panelView(input: PanelInput): PanelView {
     duetDetail,
     duetProgress,
     duetMix,
-    duetCanStart:
-      report !== null && (report.status === 'ready' || report.status === 'paused'),
+    duetCanStart,
     duetHasVoices: duet.hasVoices,
     duetLowConfidenceSeconds: duet.lowConfidenceSeconds,
+    duetHint,
+    duetTooltip,
+    duetActive,
     practiceState,
     practiceLabel,
     practiceDetail,

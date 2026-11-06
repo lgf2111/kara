@@ -279,6 +279,17 @@ describe('the compact practice row', () => {
     expect(view.practiceLabel).toBe('Practice');
     expect(view.practiceHint).toBeNull();
     expect(view.practiceTooltip).toBeNull();
+    expect(view.duetCanStart).toBe(true);
+    expect(view.duetTooltip).toBeNull();
+  });
+
+  it('unlocks both buttons on a pause, when the whole stem is still in hand', () => {
+    const view = panelView({ report: report({ status: 'paused' }) });
+
+    expect(view.practiceCanStart).toBe(true);
+    expect(view.practiceTooltip).toBeNull();
+    expect(view.duetCanStart).toBe(true);
+    expect(view.duetTooltip).toBeNull();
   });
 
   it('keeps the entry point disabled while the stem is still arriving', () => {
@@ -288,9 +299,15 @@ describe('the compact practice row', () => {
     expect(view.practiceCanStart).toBe(false);
     expect(view.practiceState).toBe('off');
     expect(view.practiceHint).toBe('Waiting for the whole song to be analyzed.');
+    expect(view.duetHint).toBe('Waiting for the whole song to be analyzed.');
     expect(view.practiceTooltip).toBe(
-      'Practice unlocks when the whole song has been analyzed.',
+      'Practice and Duet unlock when the whole song has been analyzed.',
     );
+    expect(view.duetTooltip).toBe(
+      'Practice and Duet unlock when the whole song has been analyzed.',
+    );
+    expect(view.duetCanStart).toBe(false);
+    expect(view.duetActive).toBe(false);
   });
 
   it('shows the learning pass with its bar and no way to start twice', () => {
@@ -456,14 +473,22 @@ describe('the compact duet row', () => {
 
     expect(view.duetState).toBe('off');
     expect(view.duetCanStart).toBe(true);
+    expect(view.duetActive).toBe(false);
+    expect(view.duetHint).toBeNull();
+    expect(view.duetTooltip).toBeNull();
     expect(view.duetProgress).toBeNull();
   });
 
-  it('keeps the inline start row unavailable before karaoke runs', () => {
+  it('keeps the inline button locked before karaoke runs', () => {
     const view = panelView({ report: null });
 
     expect(view.duetState).toBe('off');
     expect(view.duetCanStart).toBe(false);
+    expect(view.duetActive).toBe(false);
+    expect(view.duetHint).toBeNull();
+    expect(view.duetTooltip).toBe(
+      'Practice and Duet unlock when the whole song has been analyzed.',
+    );
   });
 
   it('shows the second bar while the helper runs, without taking the vocal row', () => {
@@ -474,6 +499,10 @@ describe('the compact duet row', () => {
     expect(view.duetProgress).toBeCloseTo(0.25);
     expect(view.duetDetail).toBe('The normal vocal controls still work while this runs.');
     expect(view.controls).toBe(true);
+    expect(view.duetActive).toBe(true);
+    expect(view.duetCanStart).toBe(false);
+    expect(view.duetHint).toBeNull();
+    expect(view.duetTooltip).toBeNull();
   });
 
   it('cannot start before the first pass has finished', () => {
@@ -482,6 +511,8 @@ describe('the compact duet row', () => {
     });
 
     expect(view.duetCanStart).toBe(false);
+    expect(view.duetActive).toBe(true);
+    expect(view.duetTooltip).toBeNull();
   });
 
   it('keeps the current pair on screen while it learns a new line', () => {
@@ -490,6 +521,8 @@ describe('the compact duet row', () => {
     expect(view.duetState).toBe('preparing');
     expect(view.duetHasVoices).toBe(true);
     expect(view.duetDetail).toBe('The current pair keeps playing while it re-renders.');
+    expect(view.duetActive).toBe(true);
+    expect(view.duetCanStart).toBe(false);
   });
 
   it('shows two voices and warns when the map was unsure', () => {
@@ -499,6 +532,9 @@ describe('the compact duet row', () => {
     expect(view.duetLabel).toBe('Duet ready');
     expect(view.duetDetail).toContain('uncertain');
     expect(view.duetMix.muted).toEqual([false, false]);
+    expect(view.duetActive).toBe(true);
+    expect(view.duetCanStart).toBe(false);
+    expect(view.duetTooltip).toBeNull();
   });
 
   it('keeps karaoke alive when the helper is missing', () => {
@@ -508,5 +544,18 @@ describe('the compact duet row', () => {
     expect(view.duetLabel).toBe('Duet stopped');
     expect(view.duetDetail).toContain('token');
     expect(view.duetCanStart).toBe(true);
+    expect(view.duetActive).toBe(false);
+    expect(view.duetHint).toBeNull();
+    expect(view.duetTooltip).toBeNull();
+  });
+
+  it('shows the same wait in the group while the song is preparing', () => {
+    const view = panelView({ report: report({ status: 'preparing', covered: true }) });
+
+    expect(view.duetCanStart).toBe(false);
+    expect(view.duetHint).toBe('Waiting for the whole song to be analyzed.');
+    expect(view.duetTooltip).toBe(
+      'Practice and Duet unlock when the whole song has been analyzed.',
+    );
   });
 });
