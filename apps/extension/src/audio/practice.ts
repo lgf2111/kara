@@ -2,6 +2,7 @@ import {
   PITCH_CLARITY,
   PITCH_MAX_HZ,
   PITCH_MIN_HZ,
+  PITCH_MIN_LEVEL,
   detectPitch,
   downsampleForPitch,
   type PitchFrame,
@@ -30,6 +31,19 @@ export interface PracticeNote {
   readonly midi: number;
   /** Mean detector clarity over the frames that made the note, nought to one. */
   readonly confidence: number;
+}
+
+/**
+ * The range the song actually measured, as whole MIDI notes.
+ *
+ * The song card takes the fifth and ninety-fifth percentiles of its confident
+ * vocal frames, so this is what the singer was heard to reach rather than the
+ * one scream at either end. Practice uses it as a clamp: a note outside it is
+ * a detector reading, not a guide.
+ */
+export interface PracticeRange {
+  readonly lowMidi: number;
+  readonly highMidi: number;
 }
 
 /** A note and its position in the timeline, which is what an overlay indexes by. */
@@ -443,6 +457,8 @@ export interface MelodyOptions {
   readonly analysisRate?: number;
   readonly frameSize?: number;
   readonly hopSize?: number;
+  /** The song's measured vocal range, when the song card has one. */
+  readonly range?: PracticeRange | null;
   readonly onProgress?: (fraction: number) => void;
 }
 
@@ -453,6 +469,8 @@ export interface SegmentOptions {
   /** Same-pitch gaps up to this long are the same note, not two. */
   readonly gapSeconds?: number;
   readonly minClarity?: number;
+  /** The song's measured vocal range, or null to keep the detector's answer. */
+  readonly range?: PracticeRange | null;
 }
 
 interface Run {
@@ -464,6 +482,41 @@ interface Run {
 }
 
 /**
+ * How the frames become notes.
+ *
+ * The median sees five frames, not three: at a thirty-two millisecond hop that
+ * is a sixth of a second, long enough to outvote one noisy frame and short
+ * enough to keep a vibrato on the note it belongs to. Anything shorter than
+ * {@link MIN_NOTE_SECONDS} is a consonant, a breath or a detector flicker, not
+ * a guide note. The local energy window is what stops a quiet breath between
+ * phrases from becoming a pitch at all.
+ */
+const MIN_NOTE_SECONDS = 0.13;
+const GAP_SECONDS = 0.12;
+const SMOOTHING_RADIUS = 2;
+const LOCAL_ENERGY_SECONDS = 0.25;
+const LOCAL_ENERGY_FRACTION = 0.15;
+/** A high outlier shorter than this, with no neighbour at its pitch, is an error. */
+const SPIKE_SECONDS = 0.25;
+/** A one-off octave jump may be a little longer and still be a detector error. */
+const OCTAVE_SPIKE_SECONDS = 0.3;
+/** A run this far above both neighbours is an isolated high spike. */
+const SPIKE_SEMITONES = 5;
+const OCTAVE_SEMITONES = 12;
+
+function practiceRange(range: PracticeRange | null | undefined): PracticeRange | null {
+  if (range === null || range === undefined) {
+    return null;
+  }
+  const low = Math.round(range.lowMidi);
+  const high = Math.round(range.highMidi);
+  if (!Number.isFinite(low) || !Number.isFinite(high) || low < 0 || high > 127 || high < low) {
+    return null;
+  }
+  return { lowMidi: low, highMidi: high };
+}
+
+/**
  * Frames into notes: smooth out the wobble, round to keys, merge agreements,
  * and drop what was too short or too uncertain to be a guide.
  */
@@ -472,34 +525,82 @@ export function segmentNotes(
   options: SegmentOptions = {},
 ): PracticeNote[] {
   const frameSeconds = positive(options.frameSeconds, ANALYSIS_HOP / ANALYSIS_RATE);
-  const minNoteSeconds = positive(options.minNoteSeconds, 0.1);
-  const gapSeconds = Math.max(0, options.gapSeconds ?? 0.08);
+  const minNoteSeconds = positive(options.minNoteSeconds, MIN_NOTE_SECONDS);
+  const gapSeconds = Math.max(0, options.gapSeconds ?? GAP_SECONDS);
   const minClarity = positive(options.minClarity, PITCH_CLARITY);
+  const range = practiceRange(options.range);
 
-  const valid = (frame: PitchFrame | undefined): frame is PitchFrame =>
+  // A local median rather than one number for the whole take: a quiet phrase
+  // after a loud chorus is still a note, while a breath between phrases is
+  // below the floor even when the detector finds a period in it.
+  const halfWindow = Math.max(1, Math.round(LOCAL_ENERGY_SECONDS / frameSeconds));
+  const floors: number[] = frames.map((_, index) => {
+    const levels: number[] = [];
+    const first = Math.max(0, index - halfWindow);
+    const last = Math.min(frames.length - 1, index + halfWindow);
+    for (let at = first; at <= last; at += 1) {
+      const level = frames[at]?.level;
+      if (level !== undefined && Number.isFinite(level) && level > 0) {
+        levels.push(level);
+      }
+    }
+    if (levels.length === 0) {
+      return PITCH_MIN_LEVEL;
+    }
+    levels.sort((left, right) => left - right);
+    const median = levels[Math.floor(levels.length / 2)] ?? 0;
+    return Math.max(PITCH_MIN_LEVEL, median * LOCAL_ENERGY_FRACTION);
+  });
+
+  const valid = (frame: PitchFrame | undefined, index: number): frame is PitchFrame =>
     frame !== undefined &&
     frame.midi !== null &&
     Number.isFinite(frame.midi) &&
-    frame.clarity >= minClarity;
+    frame.clarity >= minClarity &&
+    Number.isFinite(frame.level) &&
+    frame.level >= (floors[index] ?? PITCH_MIN_LEVEL);
 
-  // Median of three: a single noisy frame cannot invent a note, and vibrato
-  // stays on one side of the semitone boundary it belongs to.
+  // A frame outside a five-frame consensus is a detector flicker, not a new
+  // note. A real note has a neighbour that agrees with it, so it keeps its own
+  // pitch and its onset; a flicker or a vibrato crossing a semitone boundary
+  // is held on the note already sounding. A silent frame clears the hold, so
+  // a rest stays a rest.
+  let sounding: number | null = null;
   const smoothed: (number | null)[] = frames.map((frame, index) => {
-    if (!valid(frame)) {
+    if (!valid(frame, index)) {
+      sounding = null;
       return null;
     }
     const around: number[] = [frame.midi as number];
-    for (const offset of [-1, 1]) {
-      const neighbour = frames[index + offset];
+    const rounded = Math.round(frame.midi as number);
+    let supported = false;
+    for (let offset = -SMOOTHING_RADIUS; offset <= SMOOTHING_RADIUS; offset += 1) {
+      if (offset === 0) {
+        continue;
+      }
+      const at = index + offset;
+      const neighbour = frames[at];
       if (
-        valid(neighbour) &&
-        Math.abs(neighbour.at - frame.at) <= frameSeconds * 1.6
+        valid(neighbour, at) &&
+        Math.abs(neighbour.at - frame.at) <= frameSeconds * (SMOOTHING_RADIUS + 0.6)
       ) {
         around.push(neighbour.midi as number);
+        if (Math.round(neighbour.midi as number) === rounded) {
+          supported = true;
+        }
       }
     }
+    if (supported) {
+      sounding = rounded;
+      return frame.midi;
+    }
+    if (sounding !== null) {
+      return sounding;
+    }
     around.sort((left, right) => left - right);
-    return around[Math.floor(around.length / 2)] ?? null;
+    const median = around[Math.floor(around.length / 2)] ?? (frame.midi as number);
+    sounding = Math.round(median);
+    return median;
   });
 
   const runs: Run[] = [];
@@ -536,11 +637,11 @@ export function segmentNotes(
     runs.push(current);
   }
 
-  const merge = (input: readonly Run[]): Run[] => {
+  const mergeSame = (input: readonly Run[], maxGap: number): Run[] => {
     const merged: Run[] = [];
     for (const run of input) {
       const last = merged[merged.length - 1];
-      if (last !== undefined && last.midi === run.midi && run.start - last.end <= gapSeconds) {
+      if (last !== undefined && last.midi === run.midi && run.start - last.end <= maxGap) {
         last.end = Math.max(last.end, run.end);
         last.clarity += run.clarity;
         last.frames += run.frames;
@@ -551,9 +652,88 @@ export function segmentNotes(
     return merged;
   };
 
-  const longEnough = (run: Run): boolean => run.end - run.start >= minNoteSeconds;
-  return merge(merge(runs).filter(longEnough))
-    .filter(longEnough)
+  const highSpike = (
+    run: Run,
+    previous: Run | undefined,
+    following: Run | undefined,
+  ): boolean => {
+    if (previous?.midi === run.midi || following?.midi === run.midi) {
+      return false;
+    }
+    const above = (other: Run | undefined): boolean =>
+      other === undefined || run.midi - other.midi >= SPIKE_SEMITONES;
+    const octave = (other: Run | undefined): boolean =>
+      other !== undefined && Math.abs(run.midi - other.midi) === OCTAVE_SEMITONES;
+    return (above(previous) && above(following)) || octave(previous) || octave(following);
+  };
+
+  const octaveSpike = (
+    run: Run,
+    previous: Run | undefined,
+    following: Run | undefined,
+  ): boolean => {
+    if (previous?.midi === run.midi || following?.midi === run.midi) {
+      return false;
+    }
+    const from = (other: Run | undefined): boolean =>
+      other !== undefined && Math.abs(run.midi - other.midi) === OCTAVE_SEMITONES;
+    return from(previous) || from(following);
+  };
+
+  // Fragments and one-off outliers are dropped. When the same pitch sits on
+  // both sides, the notes are joined again: the spike was the error, not a
+  // rest, so the phrase stays legato.
+  let cleaned = mergeSame(runs, gapSeconds);
+  for (let pass = 0; pass < 4; pass += 1) {
+    const next: Run[] = [];
+    let changed = false;
+    for (let index = 0; index < cleaned.length; index += 1) {
+      const run = cleaned[index] as Run;
+      const previous = next[next.length - 1];
+      const following = cleaned[index + 1];
+      const duration = run.end - run.start;
+      const fragment = duration < minNoteSeconds;
+      const spike =
+        (duration < SPIKE_SECONDS && highSpike(run, previous, following)) ||
+        (duration < OCTAVE_SPIKE_SECONDS && octaveSpike(run, previous, following));
+      if (fragment || spike) {
+        changed = true;
+        if (
+          previous !== undefined &&
+          following !== undefined &&
+          previous.midi === following.midi &&
+          following.start - previous.end <= duration + frameSeconds * 2.5
+        ) {
+          previous.end = Math.max(previous.end, following.end);
+          previous.clarity += run.clarity + following.clarity;
+          previous.frames += run.frames + following.frames;
+          index += 1;
+        }
+        continue;
+      }
+      if (
+        previous !== undefined &&
+        previous.midi === run.midi &&
+        run.start - previous.end <= gapSeconds
+      ) {
+        previous.end = Math.max(previous.end, run.end);
+        previous.clarity += run.clarity;
+        previous.frames += run.frames;
+      } else {
+        next.push({ ...run });
+      }
+    }
+    cleaned = next;
+    if (!changed) {
+      break;
+    }
+  }
+
+  return cleaned
+    .filter(
+      (run) => range === null || (run.midi >= range.lowMidi && run.midi <= range.highMidi),
+    )
+    .filter((run) => run.end - run.start >= minNoteSeconds)
     .map((run) => ({
       start: run.start,
       end: run.end,
@@ -610,5 +790,6 @@ export function analyseMelody(
   return segmentNotes(frames, {
     frameSeconds: hopSize / analysisRate,
     minClarity: PITCH_CLARITY,
+    range: options.range ?? null,
   });
 }

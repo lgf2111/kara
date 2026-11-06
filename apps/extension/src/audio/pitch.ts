@@ -9,10 +9,12 @@
  *
  * The detector is YIN in the form the paper gives it: an autocorrelation-like
  * difference function, normalised by its own cumulative mean, with the first
- * clear dip taken as the period. That first-dip rule is what stops a strong
- * second harmonic from being reported as an octave above the singer. A pure
- * sine is the easy case; the thresholds are set for a voice over a backing
- * track rather than for the easy case alone.
+ * clear dip taken as the period. A first dip can still land on a strong second
+ * or third harmonic when the fundamental is quiet, so the dip is checked
+ * against the spectrum: if the frame has real energy at a subharmonic, the
+ * lower fundamental wins. A genuine high note has no such energy and stays
+ * where it is. The energy gate is measured after the mean is removed, so a DC
+ * offset cannot make a silent frame look loud.
  */
 
 /** The bottom of the range a singer is expected to reach, in Hz. */
@@ -26,6 +28,18 @@ export const PITCH_CLARITY = 0.75;
 
 /** Quieter than this is silence rather than a quiet note. */
 export const PITCH_MIN_LEVEL = 0.004;
+
+/**
+ * How much direct energy at a subharmonic is needed before an octave-up
+ * candidate is folded back down. Both are relative to the frame's own level
+ * and to the candidate's partial: a leak or a noise floor is not a
+ * fundamental, but a quiet singer under a strong overtone still is.
+ */
+const SUBHARMONIC_FLOOR = 0.015;
+const SUBHARMONIC_RATIO = 0.035;
+
+/** The lower partials an octave-up candidate is checked against. */
+const SUBHARMONIC_FACTORS = [2, 3, 4] as const;
 
 /** One reading of a frame: a frequency, its MIDI twin, and how sure it is. */
 export interface PitchReading {
@@ -116,16 +130,6 @@ export function detectPitch(
     return NO_PITCH;
   }
 
-  let energy = 0;
-  for (const sample of frame) {
-    energy += sample * sample;
-  }
-  const level = Math.sqrt(energy / frame.length);
-  const minLevel = positive(options.minLevel, PITCH_MIN_LEVEL);
-  if (!Number.isFinite(level) || level < minLevel) {
-    return { ...NO_PITCH, level: Number.isFinite(level) ? level : 0 };
-  }
-
   let mean = 0;
   for (const sample of frame) {
     mean += sample;
@@ -135,8 +139,16 @@ export function detectPitch(
   // Centred samples in a private buffer: the difference function is very
   // sensitive to a DC offset, and the caller's array is not ours to change.
   const centred = new Float32Array(frame.length);
+  let energy = 0;
   for (let index = 0; index < frame.length; index += 1) {
-    centred[index] = (frame[index] ?? 0) - mean;
+    const value = (frame[index] ?? 0) - mean;
+    centred[index] = value;
+    energy += value * value;
+  }
+  const level = Math.sqrt(energy / frame.length);
+  const minLevel = positive(options.minLevel, PITCH_MIN_LEVEL);
+  if (!Number.isFinite(level) || level < minLevel) {
+    return { ...NO_PITCH, level: Number.isFinite(level) ? level : 0 };
   }
 
   const minHz = positive(options.minHz, PITCH_MIN_HZ);
@@ -198,9 +210,46 @@ export function detectPitch(
   const curve = before - 2 * bestValue + after;
   const shift = curve === 0 ? 0 : finiteBetween((before - after) / (2 * curve), -0.5, 0.5);
   const period = bestTau + shift;
-  const clarity = finiteBetween(1 - bestValue, 0, 1);
   const minClarity = positive(options.minClarity, 0.5);
-  const hz = period > 0 ? sampleRate / period : Number.NaN;
+  let clarity = finiteBetween(1 - bestValue, 0, 1);
+  let hz = period > 0 ? sampleRate / period : Number.NaN;
+
+  // A strong second or third harmonic can make the first dip land an octave
+  // (or a twelfth) high. If the frame also carries the lower fundamental, the
+  // subharmonic is the note that was sung. The check is deliberately
+  // conservative: a pure high note has no peak below it and is left alone.
+  if (Number.isFinite(hz)) {
+    for (const factor of SUBHARMONIC_FACTORS) {
+      const lower = hz / factor;
+      if (lower < minHz) {
+        continue;
+      }
+      const lowerTau = sampleRate / lower;
+      if (lowerTau > tauMax + 0.5) {
+        continue;
+      }
+      const lowerIndex = Math.floor(lowerTau);
+      const lowerWeight = lowerTau - lowerIndex;
+      const lowerValue =
+        (normalised[lowerIndex] ?? 1) * (1 - lowerWeight) +
+        (normalised[lowerIndex + 1] ?? 1) * lowerWeight;
+      const lowerClarity = finiteBetween(1 - lowerValue, 0, 1);
+      if (lowerClarity < minClarity) {
+        continue;
+      }
+      const subharmonic = toneMagnitude(centred, sampleRate, lower);
+      const candidate = toneMagnitude(centred, sampleRate, hz);
+      if (
+        subharmonic >= level * SUBHARMONIC_FLOOR &&
+        subharmonic >= candidate * SUBHARMONIC_RATIO
+      ) {
+        hz = lower;
+        clarity = lowerClarity;
+        break;
+      }
+    }
+  }
+
   if (
     !Number.isFinite(hz) ||
     hz < minHz ||
@@ -212,6 +261,32 @@ export function detectPitch(
 
   const midi = hzToMidi(hz);
   return { hz, midi: Number.isFinite(midi) ? midi : null, clarity, level };
+}
+
+/**
+ * The amplitude of one frequency in a frame, through a Goertzel pass.
+ *
+ * The frames here are short enough that a full FFT would be more code than
+ * the check needs. A Hann window keeps a neighbour's leakage from being read
+ * as a subharmonic.
+ */
+function toneMagnitude(samples: Float32Array, sampleRate: number, hz: number): number {
+  if (!(hz > 0) || hz >= sampleRate / 2 || samples.length < 2) {
+    return 0;
+  }
+  const size = samples.length;
+  const angle = (2 * Math.PI * hz) / sampleRate;
+  const coefficient = 2 * Math.cos(angle);
+  let previous = 0;
+  let older = 0;
+  for (let index = 0; index < size; index += 1) {
+    const window = 0.5 - 0.5 * Math.cos((2 * Math.PI * index) / (size - 1));
+    const value = (samples[index] ?? 0) * window + coefficient * previous - older;
+    older = previous;
+    previous = value;
+  }
+  const squared = previous * previous + older * older - coefficient * previous * older;
+  return Math.sqrt(Math.max(0, squared)) * (2 / size);
 }
 
 /**

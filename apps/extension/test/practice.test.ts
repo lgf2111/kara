@@ -21,11 +21,17 @@ function frames(
   midi: number,
   count: number,
   start = 0,
-  options: { readonly clarity?: number; readonly step?: number; readonly detune?: number } = {},
+  options: {
+    readonly clarity?: number;
+    readonly step?: number;
+    readonly detune?: number;
+    readonly level?: number;
+  } = {},
 ): PitchFrame[] {
   const clarity = options.clarity ?? 0.9;
   const step = options.step ?? STEP;
   const detune = options.detune ?? 0;
+  const level = options.level ?? 0.1;
   const made: PitchFrame[] = [];
   for (let index = 0; index < count; index += 1) {
     const value = midi + detune * (index % 2 === 0 ? 1 : -1);
@@ -34,10 +40,47 @@ function frames(
       hz: midiToHz(value),
       midi: value,
       clarity,
-      level: 0.1,
+      level,
     });
   }
   return made;
+}
+
+function partials(
+  parts: readonly (readonly [number, number])[],
+  seconds: number,
+  sampleRate = 16_000,
+): Float32Array {
+  const samples = new Float32Array(Math.round(seconds * sampleRate));
+  for (const [hz, amplitude] of parts) {
+    for (let index = 0; index < samples.length; index += 1) {
+      samples[index] =
+        (samples[index] ?? 0) + amplitude * Math.sin((2 * Math.PI * hz * index) / sampleRate);
+    }
+  }
+  return samples;
+}
+
+function vibrato(hz: number, seconds: number, depthCents = 30, sampleRate = 16_000): Float32Array {
+  const samples = new Float32Array(Math.round(seconds * sampleRate));
+  let phase = 0;
+  for (let index = 0; index < samples.length; index += 1) {
+    const at = index / sampleRate;
+    const cents = depthCents * Math.sin(2 * Math.PI * 5 * at);
+    phase += (2 * Math.PI * hz * 2 ** (cents / 1200)) / sampleRate;
+    samples[index] = 0.35 * Math.sin(phase) + 0.1 * Math.sin(2 * phase);
+  }
+  return samples;
+}
+
+function noise(seconds: number, amplitude = 0.08, sampleRate = 16_000): Float32Array {
+  const samples = new Float32Array(Math.round(seconds * sampleRate));
+  let seed = 0x51f15e;
+  for (let index = 0; index < samples.length; index += 1) {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    samples[index] = ((seed / 0xffffffff) * 2 - 1) * amplitude;
+  }
+  return samples;
 }
 
 const melody: PracticeNote[] = [
@@ -99,6 +142,68 @@ describe('segmentNotes', () => {
     const notes = segmentNotes(frames(69, 20, 0, { clarity: 0.2 }));
 
     expect(notes).toEqual([]);
+  });
+
+  it('drops an isolated octave spike and keeps the phrase legato', () => {
+    const notes = segmentNotes([
+      ...frames(69, 20),
+      ...frames(81, 4, 20 * STEP),
+      ...frames(69, 20, 24 * STEP),
+    ]);
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.midi).toBe(69);
+    expect(notes[0]?.end).toBeCloseTo(44 * STEP, 2);
+  });
+
+  it('drops a short high note with no neighbour at its pitch', () => {
+    const notes = segmentNotes([
+      ...frames(60, 20),
+      ...frames(84, 5, 20 * STEP),
+      ...frames(60, 20, 25 * STEP),
+    ]);
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.midi).toBe(60);
+  });
+
+  it('keeps a high note that is actually sustained', () => {
+    const notes = segmentNotes([
+      ...frames(60, 20),
+      ...frames(84, 12, 20 * STEP),
+      ...frames(60, 20, 32 * STEP),
+    ]);
+
+    expect(notes.map((note) => note.midi)).toEqual([60, 84, 60]);
+  });
+
+  it('keeps a rest as a gap instead of joining two phrases', () => {
+    const notes = segmentNotes([
+      ...frames(69, 20),
+      ...frames(69, 20, 36 * STEP),
+    ]);
+
+    expect(notes).toHaveLength(2);
+    expect(notes[1]?.start).toBeCloseTo(36 * STEP, 2);
+  });
+
+  it('ignores frames below the local energy floor', () => {
+    const notes = segmentNotes([
+      ...frames(69, 20),
+      ...frames(72, 8, 20 * STEP, { level: 0.005 }),
+      ...frames(69, 20, 28 * STEP),
+    ]);
+
+    expect(notes.map((note) => note.midi)).toEqual([69, 69]);
+  });
+
+  it('keeps only notes inside the measured vocal range', () => {
+    const notes = segmentNotes(
+      [...frames(60, 20), ...frames(69, 20, 20 * STEP), ...frames(84, 20, 40 * STEP)],
+      { range: { lowMidi: 64, highMidi: 72 } },
+    );
+
+    expect(notes.map((note) => note.midi)).toEqual([69]);
   });
 
   it('has nothing to show for silence', () => {
@@ -287,6 +392,60 @@ describe('analyseMelody', () => {
 
     expect(notes.length).toBeGreaterThan(0);
     expect(notes[0]?.midi).toBe(69);
+  });
+
+  it('keeps a strong second harmonic on the fundamental', () => {
+    const notes = analyseMelody(partials([[220, 0.15], [440, 0.5]], 1), 16_000);
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.midi).toBe(57);
+  });
+
+  it('keeps a weak fundamental under a strong second harmonic', () => {
+    const notes = analyseMelody(partials([[220, 0.03], [440, 0.45]], 1), 16_000);
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.midi).toBe(57);
+  });
+
+  it('keeps vibrato on a sustained note', () => {
+    const notes = analyseMelody(vibrato(440, 1), 16_000);
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.midi).toBe(69);
+  });
+
+  it('keeps a wide vibrato from becoming a run of fragments', () => {
+    const notes = analyseMelody(vibrato(440, 1, 60), 16_000);
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.midi).toBe(69);
+  });
+
+  it('has nothing to show for a breath or noise', () => {
+    const notes = analyseMelody(noise(1), 16_000);
+
+    expect(notes).toEqual([]);
+  });
+
+  it('drops a short high burst in the middle of a sung note', () => {
+    const rate = 16_000;
+    const samples = new Float32Array(rate);
+    for (let index = 0; index < samples.length; index += 1) {
+      const hz = index >= 0.45 * rate && index < 0.53 * rate ? 880 : 440;
+      samples[index] = 0.4 * Math.sin((2 * Math.PI * hz * index) / rate);
+    }
+    const notes = analyseMelody(samples, rate);
+
+    expect(notes.map((note) => note.midi)).toEqual([69]);
+  });
+
+  it('does not invent a note outside the measured range', () => {
+    const notes = analyseMelody(partials([[440, 0.4]], 1), 16_000, {
+      range: { lowMidi: 55, highMidi: 64 },
+    });
+
+    expect(notes).toEqual([]);
   });
 
   it('has nothing to show for a stem with no tone', () => {

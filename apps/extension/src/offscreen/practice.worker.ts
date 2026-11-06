@@ -24,6 +24,7 @@ function post(event: PracticeEvent): void {
 function analyse(command: Extract<PracticeCommand, { type: 'analyze' }>): void {
   try {
     const notes = analyseMelody(command.samples, command.sampleRate, {
+      range: command.range,
       onProgress: (progress) => {
         post({ type: 'progress', progress });
       },

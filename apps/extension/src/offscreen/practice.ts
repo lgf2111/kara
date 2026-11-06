@@ -14,6 +14,7 @@ import {
   scorePracticeFrame,
   targetAt,
   type PracticeNote,
+  type PracticeRange,
   type PracticeScoreState,
 } from '../audio/practice.ts';
 import { wallNowMs } from '../picture/wall-clock.ts';
@@ -82,6 +83,8 @@ export interface PracticeDeps {
    * run opens the microphone at once rather than showing the learning state.
    */
   readonly notes?: readonly PracticeNote[] | null;
+  /** The song card's measured vocal range, or null when it has none yet. */
+  readonly range?: PracticeRange | null;
   readonly onReport: (report: PracticeAnalysisReport | PracticeLiveReport) => void;
 }
 
@@ -346,6 +349,7 @@ export function startPractice(deps: PracticeDeps): PracticeHandle {
         type: 'analyze',
         samples,
         sampleRate: deps.sampleRate,
+        range: deps.range ?? null,
       } satisfies PracticeCommand,
       [samples.buffer as ArrayBuffer],
     );

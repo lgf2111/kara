@@ -1,4 +1,4 @@
-import type { PracticeNote } from '../audio/practice.ts';
+import type { PracticeNote, PracticeRange } from '../audio/practice.ts';
 
 /**
  * What the offscreen document and the practice worker say to each other.
@@ -13,6 +13,8 @@ export type PracticeCommand = {
   readonly type: 'analyze';
   readonly samples: Float32Array;
   readonly sampleRate: number;
+  /** The song card's measured range, or null when it has not finished. */
+  readonly range: PracticeRange | null;
 };
 
 export type PracticeEvent =

@@ -27,6 +27,21 @@ function noise(length: number, amplitude = 0.2): Float32Array {
   return samples;
 }
 
+function partials(
+  parts: readonly (readonly [number, number])[],
+  sampleRate: number,
+  length: number,
+): Float32Array {
+  const samples = new Float32Array(length);
+  for (const [hz, amplitude] of parts) {
+    for (let index = 0; index < length; index += 1) {
+      samples[index] =
+        (samples[index] ?? 0) + amplitude * Math.sin((2 * Math.PI * hz * index) / sampleRate);
+    }
+  }
+  return samples;
+}
+
 describe('detectPitch', () => {
   it('finds A4 in a 440 Hz sine', () => {
     const reading = detectPitch(sine(440, 44_100, 2048), 44_100);
@@ -68,6 +83,49 @@ describe('detectPitch', () => {
     const reading = detectPitch(sine(440, 44_100, 2048, 0.0001), 44_100);
 
     expect(reading.hz).toBeNull();
+  });
+
+  it('does not report a DC offset as a note', () => {
+    const reading = detectPitch(new Float32Array(2048).fill(0.2), 44_100);
+
+    expect(reading.hz).toBeNull();
+    expect(reading.level).toBe(0);
+  });
+
+  it('keeps a strong second harmonic on the fundamental', () => {
+    const frame = partials([[220, 0.15], [440, 0.5]], 16_000, 1024);
+    const reading = detectPitch(frame, 16_000, { minClarity: 0.75 });
+
+    expect(reading.hz).toBeCloseTo(220, -1);
+    expect(reading.midi).toBeCloseTo(57, 0);
+  });
+
+  it('keeps a weak fundamental under a strong second harmonic', () => {
+    const frame = partials([[220, 0.03], [440, 0.45]], 16_000, 1024);
+    const reading = detectPitch(frame, 16_000, { minClarity: 0.75 });
+
+    expect(reading.hz).toBeCloseTo(220, -1);
+    expect(reading.midi).toBeCloseTo(57, 0);
+  });
+
+  it('keeps a fundamental under a strong third harmonic', () => {
+    const frame = partials([[220, 0.05], [660, 0.5]], 16_000, 1024);
+    const reading = detectPitch(frame, 16_000, { minClarity: 0.75 });
+
+    expect(reading.hz).toBeCloseTo(220, -1);
+    expect(reading.midi).toBeCloseTo(57, 0);
+  });
+
+  it('does not fold a genuine high note down an octave', () => {
+    const pure = detectPitch(sine(880, 16_000, 1024), 16_000, { minClarity: 0.75 });
+    const rich = detectPitch(partials([[660, 0.4], [1320, 0.2]], 16_000, 1024), 16_000, {
+      minClarity: 0.75,
+    });
+
+    expect(pure.hz).toBeCloseTo(880, -1);
+    expect(pure.midi).toBeCloseTo(81, 0);
+    expect(rich.hz).toBeCloseTo(660, -1);
+    expect(rich.midi).toBeCloseTo(76, 0);
   });
 });
 

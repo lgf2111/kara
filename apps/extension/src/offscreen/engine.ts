@@ -1022,11 +1022,16 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     // there is nothing to analyse again, and the copy is skipped.
     const cached = practiceNotes;
     const copy = cached === null ? vocalsMono.slice() : null;
+    const measured = songAnalysis?.facts?.range ?? null;
     practice = startPracticeSession({
       samples: copy,
       sampleRate: context.sampleRate,
       media: () => latest,
       notes: cached,
+      range:
+        measured === null
+          ? null
+          : { lowMidi: measured.lowMidi, highMidi: measured.highMidi },
       microphone: {
         acquire: () => room.acquire('practice'),
         release: () => {
