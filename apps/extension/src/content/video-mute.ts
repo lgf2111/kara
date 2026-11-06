@@ -1,4 +1,5 @@
 import type { PlayMode, Status } from '../protocol.ts';
+import { canFollowTempo } from '../audio/tempo.ts';
 
 /**
  * Whether the video's own sound should be muted right now.
@@ -7,16 +8,17 @@ import type { PlayMode, Status } from '../protocol.ts';
  * the stems; this file owns the one decision the page can make better than
  * anybody: when the video's own audio must step aside for them. That is
  * exactly while the stems are playing — the mode is `instrumental`, the video
- * is actually moving, at its own rate, no ad is on screen, and the separated
- * audio has reached the playhead.
+ * is actually moving, at a speed the stems can follow, no ad is on screen, and
+ * the separated audio has reached the playhead.
  *
  * Everything else is the video's own sound:
  *
  * - `original` mode, which is the toggle in its resting position.
  * - a pause, which has no sound to mute and must not come back muted-flavoured.
- * - a rate other than one, which the stems cannot follow (YouTube at 2× is
- *   pitch-preserved; reading stems at 2× is not), so the video's own speed
- *   change is the one that is heard.
+ * - a speed outside the player's range, where the video's own pitch-preserved
+ *   speed change is the honest thing to hear. Inside it the stems follow the
+ *   page's rate and the key shifter cancels the transposition; the engine asks
+ *   `canFollowTempo` the same question, so the two halves cannot disagree.
  * - an ad, which the extension deliberately does not process: the ad's own
  *   audio is the only honest thing to play through it.
  * - a seek ahead of the separated frontier, where there is nothing of ours to
@@ -49,6 +51,6 @@ export function shouldMuteVideo(options: {
     options.covered &&
     options.playing &&
     !options.inAd &&
-    options.rate === 1
+    canFollowTempo(options.rate)
   );
 }

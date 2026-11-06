@@ -60,13 +60,18 @@ function stems(seconds: number, values: readonly number[] = STEM_VALUES): Float3
 }
 
 function start(): Processor {
+  return startWith(stems(4));
+}
+
+/** The same setup with a chosen track, for tests that read samples not levels. */
+function startWith(channels: readonly Float32Array[]): Processor {
   if (ProcessorClass === null) {
     throw new Error('the worklet did not register');
   }
   now = 0;
   vi.stubGlobal('currentTime', 0);
   const processor = new ProcessorClass();
-  command(processor, { type: 'stems', channels: stems(4) });
+  command(processor, { type: 'stems', channels });
   command(processor, { type: 'mix', gains: [1, 1, 1, 1], seconds: 0.03 });
   command(processor, { type: 'master', target: 1, seconds: 0.03, shape: 'linear' });
   command(processor, { type: 'playing', playing: true });
@@ -90,6 +95,25 @@ function rampedStems(seconds: number): Float32Array[] {
   for (let frame = 0; frame < left.length; frame += 1) {
     left[frame] = frame;
     right[frame] = frame;
+  }
+  return channels;
+}
+
+/**
+ * A track whose samples are their own frame number, so the output value says
+ * exactly where the head is reading.
+ */
+function rampStems(seconds: number): Float32Array[] {
+  const frames = Math.floor(seconds * RATE);
+  const channels: Float32Array[] = [];
+  for (let stem = 0; stem < 4; stem += 1) {
+    for (let side = 0; side < 2; side += 1) {
+      const channel = new Float32Array(frames);
+      for (let frame = 0; frame < frames; frame += 1) {
+        channel[frame] = frame;
+      }
+      channels.push(channel);
+    }
   }
   return channels;
 }
@@ -163,6 +187,34 @@ describe('the stem player', () => {
     // The jump fades out and then has to fade back in; the last tenth of a
     // second is after both, and before this fix it was the silence the rest
     // of the song was played into.
+    expect(loudest(peaks, peaks.length - quanta(0.1), peaks.length)).toBeGreaterThan(0.1);
+  });
+
+  it('advances the head at the anchored rate, not one frame per frame', () => {
+    const processor = startWith(rampStems(4));
+    command(processor, { type: 'mix', gains: [1, 0, 0, 0], seconds: 0 });
+    command(processor, { type: 'master', target: 1, seconds: 0, shape: 'linear' });
+    command(processor, { type: 'latency', samples: 2048 });
+    command(processor, { type: 'anchor', mediaSeconds: 0, rate: 2 });
+
+    const peaks = run(processor, 0.1);
+    const last = peaks[peaks.length - 1] ?? 0;
+    const previous = peaks[peaks.length - 2] ?? 0;
+    // The track's samples are their own frame numbers, so a full quantum of
+    // 2× reading advances the value by two frames per sample. A player stuck
+    // at 1× would advance by 128, and this would catch it.
+    expect(last - previous).toBe(2 * QUANTUM);
+  });
+
+  it('fades through a rate change and keeps playing after it', () => {
+    const processor = start();
+    run(processor, 0.3);
+    command(processor, { type: 'anchor', mediaSeconds: 0.3, rate: 1.5 });
+    const peaks = run(processor, 0.4);
+    // A rate change invalidates the read-ahead the shifter has already been
+    // given, so it takes the same short fade as a seek rather than stepping
+    // the head under a full-level signal. The fade must not leave it silent:
+    // the last tenth of a second is after both ends of it.
     expect(loudest(peaks, peaks.length - quanta(0.1), peaks.length)).toBeGreaterThan(0.1);
   });
 

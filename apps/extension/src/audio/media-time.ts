@@ -24,7 +24,7 @@ export interface MediaSample {
   readonly mediaSeconds: number;
   /** Whether the page claimed to be moving through the song. */
   readonly playing: boolean;
-  /** `video.playbackRate`. The stems only follow a rate of one. */
+  /** `video.playbackRate`, which the stems follow within `audio/tempo.ts`. */
   readonly rate: number;
   /** Whether an ad is on screen, which sends the stems away for its length. */
   readonly inAd: boolean;
@@ -56,4 +56,41 @@ export function tidySample(sample: MediaSample): MediaSample {
     rate: Math.max(0, sane(sample.rate, 1)),
     inAd: sample.inAd === true,
   };
+}
+
+/**
+ * Where the player's read head belongs when the video is at `mediaSeconds`.
+ *
+ * The pitch shifter after the player holds each sample for `latencySamples`.
+ * The player is therefore feeding the future: at the instant the shifter
+ * outputs the sample the video is showing, the player must already have read
+ * `latencySamples` of *output* time ahead. At a rate other than one, that much
+ * output time is `rate` times as much source time, so the read-ahead is scaled
+ * with the rate. Reading at 2× with an unscaled lead would leave the stems a
+ * shifter's worth of the song behind the picture.
+ */
+export function anchorHeadFrame(
+  mediaSeconds: number,
+  rate: number,
+  latencySamples: number,
+  sampleRate: number,
+): number {
+  const media = Math.max(0, sane(mediaSeconds, 0));
+  const tempo = rate > 0 ? sane(rate, 1) : 1;
+  const latency = Math.max(0, sane(latencySamples, 0));
+  return media * sane(sampleRate, 0) + tempo * latency;
+}
+
+/**
+ * The media frame a read head implies, which is what the player reports as
+ * its playhead. The inverse of {@link anchorHeadFrame} without the rate's
+ * source time: subtract the same scaled read-ahead.
+ */
+export function headMediaFrame(
+  headFrame: number,
+  rate: number,
+  latencySamples: number,
+): number {
+  const tempo = rate > 0 ? sane(rate, 1) : 1;
+  return sane(headFrame, 0) - tempo * Math.max(0, sane(latencySamples, 0));
 }

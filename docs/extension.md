@@ -235,12 +235,13 @@ bypass the shifter and the player reads the video's own position, so there is no
 vocoder in a path with nothing to shift. Pressing a key fades the dry path out, inserts the
 shifter, and fades it back in once its buffer holds the re-aimed audio. Signalsmith reports its own
 delay — 120 ms at the default block size — and while it is in, the player reads the stems that far
-ahead, so the sample the video is showing is the sample the shifter is about to emit. The head is
-the video position plus the shifter's latency, and every number the worklet reasons about — where
-an anchor lands, where a jump lands, where the report says it is playing — is converted back to
-video time by subtracting it. The cost is that the shifter holds 120 ms of audio: a seek or pause
-can leave that much of the previous position in its buffer. It is the trade for the quality, and
-it is why the block size is left at the library's default rather than shortened.
+ahead in output time, which is the playback rate's worth of source frames, so the sample the video
+is showing is the sample the shifter is about to emit. The head is the video position plus the
+shifter's latency, and every number the worklet reasons about — where an anchor lands, where a jump
+lands, where the report says it is playing — is converted back to video time by subtracting it. The
+cost is that the shifter holds 120 ms of audio: a seek, a pause or a rate change can leave that
+much of the previous position or tempo in its buffer. It is the trade for the quality, and it is
+why the block size is left at the library's default rather than shortened.
 
 Six semitones is a product choice, not the library's limit: the control is for singing along, and a
 key change past half an octave stops being useful long before the arithmetic stops working.
@@ -304,8 +305,16 @@ four anchors a second correct that without anybody hearing it.
   video is unmuted for its duration, and when the ad ends the next anchor lands at the post-ad
   position — a jump, faded like any other. There is no second preparation, which the old design
   could not avoid.
-- **A rate other than one** is also the video's own sound: YouTube at 2× is pitch-preserved, and
-  reading the stems at 2× is not. Back at 1×, the next anchor lands where the video is.
+- **A rate change** is a tempo change, not a key change. The player reads the stems at the
+  video's `playbackRate`, so it advances by that many source frames per output frame, and the
+  Signalsmith shifter after it applies `-12 * log2(rate)` semitones on top of the chosen key. That
+  cancels the transposition reading faster (or slower) would otherwise cause, so 0.5×, 0.75×,
+  1.25× and 1.5× all keep the recording's pitch. The read-ahead the shifter needs is output time,
+  so the head carries `rate` times as many source frames; a rate change takes the same ten
+  millisecond fade as a seek because the shifter's buffered read-ahead belongs to the old tempo.
+  YouTube's menu runs from 0.25× to 2×, which is the range the player follows. Outside it the
+  video's own pitch-preserved sound is the honest one, and the next supported anchor lands where
+  the video is.
 - **The end of the video** switches the mode back to original, so the end screen is not met in
   silence.
 
@@ -321,10 +330,11 @@ screen, because then the bar underneath is the ad's timeline rather than the son
 replaces its progress-list element on a navigation, the next status report reattaches the line.
 
 The content script's half of the switch is the video's mute. It mutes the video exactly while the
-stems are the sound being heard — instrumental mode, actually playing, at rate one, no ad, and the
-stems have reached the playhead — and undoes only a mute it applied itself. A person who muted the video by hand stays muted when the
-toggle moves to original; a person who unmutes it by hand while the stems are playing has asked
-for the video's own sound, so the session moves to original rather than muting them again.
+stems are the sound being heard — instrumental mode, actually playing, at a speed the player can
+follow, no ad, and the stems have reached the playhead — and undoes only a mute it applied itself.
+A person who muted the video by hand stays muted when the toggle moves to original; a person who
+unmutes it by hand while the stems are playing has asked for the video's own sound, so the session
+moves to original rather than muting them again.
 
 ## The one audio source
 
@@ -527,10 +537,11 @@ Then open `http://localhost:5276/test/page.html` and press Start, or drive
   places after a shift. Looking where a chosen partial should have gone is the measurement that
   means something; the loudest bin is only a rough look.
 - `__karaDebug.seek()`, `.pause()` and `.play()` drive the fixture, for testing what each does to
-  the stems at once.
+  the stems at once. `.setRate(rate)` changes the video's speed the way YouTube's menu does, and
+  `.rate()` and `.muted()` read back the speed and the page's mute decision.
 - `__karaDebug.start()` and `.stop()` are the page's own buttons.
 
-Which is three Playwright assertions for the things this design changed:
+Which are the Playwright assertions for the things this design changed:
 
 ```js
 // The bar only ever goes forwards, and it gets there.
@@ -560,6 +571,16 @@ const high = await page.evaluate(
   220 * ratio,
 );
 expect(high / low).toBeCloseTo(ratio, 2);
+
+// A speed change keeps the stems, the mute and the clock together.
+await page.evaluate(() => window.__karaDebug.setRate(1.5));
+await page.waitForTimeout(1000);
+expect(await page.evaluate(() => window.__karaDebug.muted())).toBe(true);
+expect(await page.evaluate(() => window.__karaDebug.mediaSeconds())).toBeCloseTo(
+  await page.evaluate(() => document.querySelector('#video').currentTime),
+  0,
+);
+await page.evaluate(() => window.__karaDebug.setRate(1));
 ```
 
 The fixtures are synthesised: tones and pink noise for the audio. They are the only media this
@@ -598,9 +619,9 @@ repository ever sees, and they are gitignored.
 - **The key shifter is high quality, but it holds 120 ms of audio while it is in use.** Signalsmith
   Stretch is built for this rather than being a hand-rolled phase vocoder, so the old smearing and
   hollowness are gone. The delay is reported by the node and paid in the anchor, so steady playback
-  stays in sync; the cost is that a seek or pause can leave up to 120 ms of the previous position
-  in its buffer. The original key bypasses it entirely, so the cost is only paid while a key is
-  shifted.
+  stays in sync; the cost is that a seek, a pause or a rate change can leave up to 120 ms of the
+  previous position or tempo in its buffer. The original key bypasses it entirely, so the cost is
+  only paid while a key is shifted.
   Six semitones either way is a product choice, not the library's limit — the control is for
   singing along, and a key change past half an octave stops being useful long before the arithmetic
   stops working.

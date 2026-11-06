@@ -36,9 +36,18 @@ describe('shouldMuteVideo', () => {
     expect(shouldMuteVideo({ ...PLAYING, inAd: true })).toBe(false);
   });
 
+  it.each([0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2])(
+    'keeps the video muted at %s× once the stems cover the playhead',
+    (rate) => {
+      expect(shouldMuteVideo({ ...PLAYING, rate })).toBe(true);
+    },
+  );
+
   it('leaves it alone at a speed the stems cannot follow', () => {
-    expect(shouldMuteVideo({ ...PLAYING, rate: 1.5 })).toBe(false);
-    expect(shouldMuteVideo({ ...PLAYING, rate: 0.5 })).toBe(false);
+    expect(shouldMuteVideo({ ...PLAYING, rate: 0 })).toBe(false);
+    expect(shouldMuteVideo({ ...PLAYING, rate: 0.1 })).toBe(false);
+    expect(shouldMuteVideo({ ...PLAYING, rate: 3 })).toBe(false);
+    expect(shouldMuteVideo({ ...PLAYING, rate: Number.NaN })).toBe(false);
   });
 
   it('becomes live while preparing, but only once the stems reach the playhead', () => {

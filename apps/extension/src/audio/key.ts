@@ -59,20 +59,22 @@ export interface KeyRoute {
 }
 
 /**
- * The graph the key asks for.
+ * The graph a shift asks for.
  *
- * At the original key there is nothing to shift, so the stems go straight to
- * the output and the player reads the video's position, not the shifter's
- * delay. Any other key goes through Signalsmith and pays its reported
- * latency. Pure, so the routing is a test rather than a wiring detail.
+ * At zero shift there is nothing to shift, so the stems go straight to the
+ * output and the player reads the video's position, not the shifter's delay.
+ * Any other shift — a key, a tempo compensation, or both — goes through
+ * Signalsmith and pays its reported latency. Pure, so the routing is a test
+ * rather than a wiring detail.
  */
 export function keyRoute(semitones: unknown, shifterLatencySamples: unknown): KeyRoute {
-  const key = clampKey(semitones);
+  const shift =
+    typeof semitones === 'number' && Number.isFinite(semitones) ? semitones : 0;
   const latency =
     typeof shifterLatencySamples === 'number' && Number.isFinite(shifterLatencySamples)
       ? Math.max(0, Math.round(shifterLatencySamples))
       : 0;
-  return key === 0
+  return shift === 0
     ? { bypass: true, latencySamples: 0 }
     : { bypass: false, latencySamples: latency };
 }

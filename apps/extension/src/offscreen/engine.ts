@@ -9,6 +9,7 @@ import { clampKey, KEY_DEFAULT, keyRoute } from '../audio/key.ts';
 import { decodeStereo } from '../audio/decode.ts';
 import { DuetClient } from '../audio/duet-client.ts';
 import { projectMediaSeconds, tidySample, type MediaSample } from '../audio/media-time.ts';
+import { canFollowTempo, pitchSemitonesForKey } from '../audio/tempo.ts';
 import { FADE_SECONDS, type PlayMode } from '../audio/mix-gain.ts';
 import {
   DUET_CONFIG_KEY,
@@ -374,6 +375,8 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
   let mode: PlayMode = options.mode ?? 'instrumental';
   let mix: StemMix = normaliseMix(options.mix ?? DEFAULT_MIX);
   let semitones = clampKey(options.key ?? KEY_DEFAULT);
+  /** The video's speed, as the last report gave it. One until told otherwise. */
+  let tempo = 1;
   /** The opt-in Voice 1 / Voice 2 pair and the job that produced it. */
   let duet: DuetStatus = IDLE_DUET;
   let duetActive = false;
@@ -408,8 +411,11 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     throw cause;
   }
   const pitchLatency = await reportedLatency(pitch);
-  const route = keyRoute(semitones, pitchLatency);
-  await pitch.schedule({ active: !route.bypass, semitones });
+  const route = keyRoute(pitchSemitonesForKey(semitones, tempo), pitchLatency);
+  await pitch.schedule({
+    active: !route.bypass,
+    semitones: pitchSemitonesForKey(semitones, tempo),
+  });
 
   /**
    * The two ways out of the player, crossfaded rather than connected and
@@ -554,8 +560,40 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     toPlayer({ type: 'mix', gains, seconds: FADE_SECONDS });
   };
 
+  /** The shifter's one number: the chosen key plus the tempo compensation. */
+  const currentShift = (): number => pitchSemitonesForKey(semitones, tempo);
+
+  /** Which side of the graph that shift needs. */
+  const wantedRoute = (): 'dry' | 'wet' =>
+    keyRoute(currentShift(), pitchLatency).bypass ? 'dry' : 'wet';
+
   const sendKey = (): void => {
-    void pitch.schedule({ semitones }).catch(() => undefined);
+    // The shifter gets one number: the key plus the inverse of the tempo, so
+    // reading the stems at the video's rate does not transpose them. Keeping
+    // the compensation in this function is deliberate — it is the one place
+    // the pitch-shift node is configured.
+    void pitch.schedule({ semitones: currentShift() }).catch(() => undefined);
+  };
+
+  /**
+   * Follows a change of the video's speed.
+   *
+   * The player reads at the rate and the shifter cancels its transposition;
+   * moving the shifter in the same beat as the anchor is what stops a speed
+   * change being heard as a key change. A rate outside the player's range is
+   * not followed at all, and the page has already handed the sound back.
+   */
+  const setTempo = (rate: number): void => {
+    if (!canFollowTempo(rate) || rate === tempo) {
+      return;
+    }
+    tempo = rate;
+    const want = wantedRoute();
+    if (want !== routeTarget) {
+      setRoute(want);
+    } else {
+      sendKey();
+    }
   };
 
   /** The player's gain: nought for the video's own sound, one for the stems. */
@@ -572,8 +610,10 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
    * Tells the player where the video is, and whether it should be heard.
    *
    * The stems play only where they mean the same thing the video means:
-   * moving at the normal rate, and not through an ad. Everything else is the
-   * video's own sound, which the content script has unmuted for.
+   * moving at a speed the player can follow, and not through an ad.
+   * Everything else is the video's own sound, which the content script has
+   * unmuted for. The rate is also sent to the shifter first, so the stems
+   * never play a tempo change as a key change.
    */
   const follow = (tidy: MediaSample): void => {
     const position = projectMediaSeconds(tidy, wallNowMs());
@@ -586,8 +626,13 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       // before the stems start or stop being the sound.
       tellStatus();
     }
+    setTempo(tidy.rate);
     const active =
-      mode === 'instrumental' && covered && tidy.playing && !tidy.inAd && tidy.rate === 1;
+      mode === 'instrumental' &&
+      covered &&
+      tidy.playing &&
+      !tidy.inAd &&
+      canFollowTempo(tidy.rate);
     toPlayer({ type: 'playing', playing: active });
     if (active) {
       toPlayer({ type: 'anchor', mediaSeconds: position, rate: tidy.rate });
@@ -622,7 +667,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
         return;
       }
       const active = next === 'wet';
-      void pitch.schedule({ active, semitones }).catch(() => undefined);
+      void pitch.schedule({ active, semitones: currentShift() }).catch(() => undefined);
       toPlayer({ type: 'latency', samples: active ? pitchLatency : 0 });
       // Re-aim now rather than waiting for the next quarter-second tick: the
       // head has to move by the shifter's delay while the output is silent.
@@ -1124,6 +1169,13 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     setMode(next) {
       mode = next;
       sendMaster();
+      // The next media report is up to a quarter of a second away, and the
+      // page mutes the video as soon as it sees this mode. Aim the stems and
+      // their tempo now so that the sound that takes over is already the
+      // right one.
+      if (next === 'instrumental' && latest !== null) {
+        follow(latest);
+      }
       tellStatus();
     },
 
@@ -1139,7 +1191,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
         return;
       }
       semitones = wanted;
-      const want = keyRoute(semitones, pitchLatency).bypass ? 'dry' : 'wet';
+      const want = wantedRoute();
       if (want !== routeTarget) {
         setRoute(want);
       } else {

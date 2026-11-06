@@ -52,6 +52,9 @@ describe('keyRoute', () => {
   it('inserts the shifter at any other key, with its reported delay', () => {
     expect(keyRoute(1, 5292)).toEqual({ bypass: false, latencySamples: 5292 });
     expect(keyRoute(-6, 5292)).toEqual({ bypass: false, latencySamples: 5292 });
+    // Tempo compensation can need more than the key control's six semitones.
+    expect(keyRoute(12, 5292)).toEqual({ bypass: false, latencySamples: 5292 });
+    expect(keyRoute(-24, 5292)).toEqual({ bypass: false, latencySamples: 5292 });
   });
 
   it('keeps the latency a whole number of frames, and never negative', () => {

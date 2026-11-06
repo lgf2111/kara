@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 import { gainAt, heldGain, rampTo, type GainRamp } from '../audio/mix-gain.ts';
+import { anchorHeadFrame, headMediaFrame } from '../audio/media-time.ts';
 import { STEMS, stemLevel } from '../audio/stems.ts';
 import {
   JUMP_FRAMES,
@@ -34,27 +35,39 @@ import {
  * audio clock drifts against it by parts per million, and four anchors a
  * second correct for that without anybody noticing.
  *
+ * **A rate is a tempo, not a key.** Reading the stems R frames per output
+ * frame is what resampling does, so the player alone would transpose the song
+ * by the same ratio. The engine cancels that in the Signalsmith Stretch node
+ * after the player with `-12 * log2(R)` semitones, added to the chosen key, so
+ * 0.5×, 0.75×, 1.25× and 1.5× all keep the recording's pitch while moving at
+ * the video's speed. The shifter's latency is output time, so the read-ahead
+ * the head carries is R times as many source frames; without that scaling a
+ * speed change would leave the stems a shifter's worth of the song behind.
+ *
  * **A jump is faded, a drift is not.** A seek moves the head by minutes,
  * which cannot be stepped into: the output fades out over ten milliseconds,
- * the head lands, and it fades back in. A correction of a few frames is
- * stepped bare, because a few frames is a tenth of a millisecond and fading
- * over it would only make it louder.
+ * the head lands, and it fades back in. A rate change takes the same fade,
+ * because the shifter's buffered read-ahead belongs to the old tempo; a
+ * correction of a few frames is stepped bare, because a few frames is a tenth
+ * of a millisecond and fading over it would only make it louder.
  *
  * **Not playing means frozen, and silence.** A pause is not a reset. The
  * head holds where it is, the output mutes on a raised cosine, and a resume
  * carries on from the same frame: nothing is thrown away, nothing is primed.
- * An ad and a rate change ride the same flag, because they are the same
- * sentence from the page's point of view: the video's sound is not what the
- * stems should be playing.
+ * An ad rides the same flag, because it is the same sentence from the page's
+ * point of view: the video's sound is not what the stems should be playing.
+ * A rate change is not that sentence; it is an anchor with a different rate,
+ * and the stems keep playing through it.
  *
  * **The key is last, after the mixing and before the output**, so it applies
  * to the instrumental and the guide vocal alike. At the original key the sum
  * goes straight out, because there is nothing to shift and the shifter's
  * delay is not worth paying; at any other key it goes through a Signalsmith
  * Stretch worklet. When the shifter is in, its reported latency is paid in
- * the anchor: the head is read `shiftSeconds` early, so the sample the video
- * is at leaves the shifter exactly when the video shows it. At the original
- * key `shiftSeconds` is nought and the head is the video's position.
+ * the anchor: the head is read ahead by the shifter's latency in output time,
+ * which is `rate` times as many source frames, so the sample the video is at
+ * leaves the shifter exactly when the video shows it. At the original key
+ * `shiftSeconds` is nought and the head is the video's position.
  */
 
 /** How long a jump's fade is, in seconds. */
@@ -76,7 +89,15 @@ class StemPlayerProcessor extends AudioWorkletProcessor {
    */
   private readyFrames = 0;
   private head = 0;
+  /** The rate future frames advance at, which the anchors set. */
   private rate = 1;
+  /**
+   * The rate the head itself has been advancing at since it last landed.
+   * While a rate change waits for its fade, the head is still on the old
+   * tempo even though the next frames will use the new one; the jump's
+   * comparison and the reported playhead have to use the old number.
+   */
+  private headRate = 1;
   private playing = true;
   /** One level per stem, in `STEMS` order; each is its own ramp. */
   private gains: GainRamp[] = STEMS.map(() => heldGain(0));
@@ -106,8 +127,17 @@ class StemPlayerProcessor extends AudioWorkletProcessor {
    * node reports the number, and the engine passes it on.
    */
   private shiftSeconds = 0;
-  /** A jump that is waiting for its fade to land. */
-  private pendingJump: { readonly at: number; readonly to: number } | null = null;
+  /**
+   * A jump that is waiting for its fade to land. It stores the video position
+   * rather than the frame, so a rate that changes before the fade has fired is
+   * landed with the current read-ahead rather than the old one's.
+   */
+  private pendingJump: {
+    readonly at: number;
+    readonly mediaSeconds: number;
+    /** A rate change keeps its fade even if the next anchor looks close. */
+    readonly rateChanged: boolean;
+  } | null = null;
   private voice: Float32Array[];
   private quanta = 0;
   private playFrame = -1;
@@ -296,6 +326,7 @@ class StemPlayerProcessor extends AudioWorkletProcessor {
     this.length = channels[0]?.length ?? 0;
     this.head = 0;
     this.rate = 1;
+    this.headRate = 1;
     this.playing = false;
     this.draining = false;
     this.pendingJump = null;
@@ -316,35 +347,57 @@ class StemPlayerProcessor extends AudioWorkletProcessor {
    * Puts the head where the video says it is.
    *
    * The head is a *later* position than the video's: the pitch shifter after
-   * this player holds every sample for `shiftSamples`, so the sample fed now
-   * is heard that much later, and it must be the sample the video will be
-   * showing then. The head therefore runs `shiftSamples` ahead of the video,
-   * and the video position implied by the current head is `head - shiftSamples`.
+   * this player holds every sample for `shiftSamples` of output time, so the
+   * sample fed now is heard that much later, and it must be the sample the
+   * video will be showing then. The head therefore runs `shiftSamples * rate`
+   * ahead of the video in source frames, and the video position implied by the
+   * current head is the inverse. At one rate the two are the old arithmetic;
+   * at 1.5× the head has to run half again as far ahead to cover the same
+   * shifter delay.
    *
    * A change beyond {@link JUMP_FRAMES} is a seek: fade out, land the head
-   * when the fade has, fade back in. Anything smaller is the report's own
-   * jitter, not drift, and is left alone. Four reports a second is four
-   * chances to re-aim by the few milliseconds the page's clock and its
-   * message took to arrive; stepping the head for each one repeats or skips
-   * that much audio four times a second, which is heard as a buzz. The
-   * audio clock is the same clock the video runs on, so real drift is parts
-   * per million and will be corrected by a faded jump long before it is
-   * visible.
+   * when the fade has, fade back in. A rate change takes the same fade even
+   * though the positions match, because the shifter's buffered read-ahead was
+   * read at the old tempo. Anything smaller is the report's own jitter, not
+   * drift, and is left alone. Four reports a second is four chances to re-aim
+   * by the few milliseconds the page's clock and its message took to arrive;
+   * stepping the head for each one repeats or skips that much audio four
+   * times a second, which is heard as a buzz. The audio clock is the same
+   * clock the video runs on, so real drift is parts per million and will be
+   * corrected by a faded jump long before it is visible.
    */
   private land(mediaSeconds: number, rate: number): void {
-    this.rate = Number.isFinite(rate) && rate > 0 ? rate : 1;
-    const to = Math.max(0, Number.isFinite(mediaSeconds) ? mediaSeconds : 0) * sampleRate;
+    const nextRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    const at = Math.max(0, Number.isFinite(mediaSeconds) ? mediaSeconds : 0);
     const latency = this.shiftSamples;
-    const from = this.head - latency;
-    if (Math.abs(to - from) >= JUMP_FRAMES) {
-      this.pendingJump = { at: this.heard + JUMP_FADE_SECONDS, to: to + latency };
+    const from = headMediaFrame(this.head, this.headRate, latency) / sampleRate;
+    const rateChanged = nextRate !== this.rate;
+    const jumping = this.pendingJump;
+    this.rate = nextRate;
+    if (rateChanged || Math.abs(at - from) * sampleRate >= JUMP_FRAMES) {
+      this.pendingJump = {
+        at: this.heard + JUMP_FADE_SECONDS,
+        mediaSeconds: at + nextRate * JUMP_FADE_SECONDS,
+        rateChanged: rateChanged || jumping?.rateChanged === true,
+      };
       this.master = rampTo(this.master, 0, this.heard, JUMP_FADE_SECONDS, 'smooth');
       return;
     }
-    // A report that lands where the video already is cancels any jump still
+    if (jumping !== null && jumping.rateChanged) {
+      // The rate change's fade is already running. Keep it and re-aim it;
+      // treating this as a same-place correction would step the head before
+      // the old tempo had been faded out.
+      this.pendingJump = {
+        ...jumping,
+        mediaSeconds: at + nextRate * JUMP_FADE_SECONDS,
+      };
+      return;
+    }
+    // A report that lands where the video already is cancels any seek still
     // waiting to fire, and must undo that jump's fade as well. With no jump
-    // in flight the head is deliberately left where it is.
-    const wasJumping = this.pendingJump !== null;
+    // in flight the head is deliberately left where it is: the report is
+    // jitter, and stepping to it would repeat or skip audio.
+    const wasJumping = jumping !== null;
     this.pendingJump = null;
     if (wasJumping) {
       this.master = rampTo(this.master, this.masterTarget, this.heard, JUMP_FADE_SECONDS, 'smooth');
@@ -376,7 +429,13 @@ class StemPlayerProcessor extends AudioWorkletProcessor {
     const heard = this.heard;
     const jump = this.pendingJump;
     if (jump !== null && heard >= jump.at) {
-      this.head = jump.to;
+      this.head = anchorHeadFrame(
+        jump.mediaSeconds,
+        this.rate,
+        this.shiftSamples,
+        sampleRate,
+      );
+      this.headRate = this.rate;
       this.pendingJump = null;
       this.master = rampTo(this.master, this.wantedMaster, heard, JUMP_FADE_SECONDS, 'smooth');
     }
@@ -387,7 +446,7 @@ class StemPlayerProcessor extends AudioWorkletProcessor {
     }
     const filling = stems !== null && (this.playing || this.draining);
     if (filling) {
-      this.playFrame = Math.round(this.head - this.shiftSamples);
+      this.playFrame = Math.round(headMediaFrame(this.head, this.headRate, this.shiftSamples));
       for (let index = 0; index < frames; index += 1) {
         const frame = Math.round(this.head);
         if (this.ended(frame)) {

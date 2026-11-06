@@ -8,6 +8,7 @@ import {
   withStem,
 } from './audio/stems.ts';
 import { prepareDetail } from './content/panel-view.ts';
+import { shouldMuteVideo } from './content/video-mute.ts';
 import { startEngine, type Engine } from './offscreen/engine.ts';
 import { wallNowMs } from './picture/wall-clock.ts';
 import { reasonText } from './reason.ts';
@@ -104,6 +105,12 @@ export interface KaraDebug {
   peakLevel: () => number | null;
   /** Seconds along the fixture, for testing what a seek does. */
   seek: (seconds: number) => void;
+  /** The video's speed, for testing what a rate change does to the stems. */
+  setRate: (rate: number) => void;
+  /** The video element's own speed, as the engine was last told it. */
+  rate: () => number;
+  /** Whether the page's mute gate has the video muted right now. */
+  muted: () => boolean;
   pause: () => void;
   play: () => Promise<void>;
   stop: () => Promise<void>;
@@ -162,8 +169,15 @@ function tellMedia(): void {
 
 /** The video's mute is the page's half of the switch, as in the content script. */
 function syncMute(): void {
-  const wanted = status?.mode === 'instrumental' && status.status === 'ready' && playingNow();
-  muted = wanted === true;
+  const wanted = shouldMuteVideo({
+    mode: status?.mode ?? 'original',
+    status: status?.status ?? null,
+    covered: status?.covered ?? false,
+    playing: playingNow(),
+    inAd: false,
+    rate: video.playbackRate,
+  });
+  muted = wanted;
   video.muted = muted;
 }
 
@@ -184,6 +198,7 @@ function draw(): void {
       mode: status?.mode ?? 'original',
       mix: status?.mix ?? DEFAULT_MIX,
       semitones: status?.semitones ?? 0,
+      rate: video.playbackRate,
       dominantHz: engine?.dominantHz() ?? null,
       muted,
       progress: { monotonic, max: maxFraction, samples: progressSamples.length },
@@ -310,6 +325,14 @@ window.__karaDebug = {
   seek: (seconds) => {
     video.currentTime = Math.max(0, seconds);
   },
+  setRate: (rate) => {
+    video.playbackRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    tellMedia();
+    syncMute();
+    draw();
+  },
+  rate: () => video.playbackRate,
+  muted: () => muted,
   pause: () => {
     video.pause();
   },
@@ -329,6 +352,13 @@ need<HTMLButtonElement>('#mode').addEventListener('click', () => {
 
 need<HTMLButtonElement>('#seek').addEventListener('click', () => {
   video.currentTime += 5;
+});
+
+need<HTMLButtonElement>('#rate-fast').addEventListener('click', () => {
+  video.playbackRate = video.playbackRate === 1 ? 1.5 : 1;
+  tellMedia();
+  syncMute();
+  draw();
 });
 
 need<HTMLButtonElement>('#hold').addEventListener('click', () => {
