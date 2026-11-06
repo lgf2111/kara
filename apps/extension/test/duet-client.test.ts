@@ -170,6 +170,24 @@ describe('DuetClient', () => {
     expect(await noMap.lowConfidence('job-1')).toBeNull();
   });
 
+  it('calls the browser fetch without the client as its receiver', async () => {
+    const original = globalThis.fetch;
+    const receivers: unknown[] = [];
+    globalThis.fetch = function (this: unknown) {
+      receivers.push(this);
+      return Promise.resolve(
+        json({ state: 'running', phase: 'starting', done: 0, total: 0, version: 1 }),
+      );
+    } as typeof fetch;
+    try {
+      const client = new DuetClient(CONFIG, DECODE);
+      await client.status('job-1');
+    } finally {
+      globalThis.fetch = original;
+    }
+    expect(receivers[0]).toBeUndefined();
+  });
+
   it('reads a non-JSON error as its status', async () => {
     expect(await errorText(new Response('nope', { status: 502 }))).toBe(
       'the helper returned 502',

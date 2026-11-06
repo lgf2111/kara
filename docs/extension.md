@@ -151,9 +151,10 @@ python bridge.py
 ```
 
 It prints a token. Paste the URL and token into the popup's **Duet helper**
-section and press Save; the offscreen document reads them from
-`chrome.storage.local` when Duet is pressed. The helper's setup and CLI are in
-`tools/duet-helper/README.md`.
+section and press Save; the service worker reads them from
+`chrome.storage.local` and hands them to the offscreen document with the
+session (and again after a Save while it is running). The helper's setup and
+CLI are in `tools/duet-helper/README.md`.
 
 What the person sees:
 

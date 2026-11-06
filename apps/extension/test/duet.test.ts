@@ -13,6 +13,7 @@ import {
   withDuetMute,
   withDuetSolo,
 } from '../src/audio/duet.ts';
+import { isCommand } from '../src/protocol.ts';
 
 describe('normaliseDuetConfig', () => {
   it('uses the loopback default and an empty token when nothing is stored', () => {
@@ -32,6 +33,47 @@ describe('normaliseDuetConfig', () => {
     expect(normaliseDuetConfig({ url: '127.0.0.1:8765' }).url).toBe(
       DEFAULT_DUET_CONFIG.url,
     );
+  });
+
+  it('defaults the URL while keeping a token when only the token is stored', () => {
+    expect(normaliseDuetConfig({ token: '  abc  ' })).toEqual({
+      url: DEFAULT_DUET_CONFIG.url,
+      token: 'abc',
+    });
+  });
+
+  it('treats a non-string token as empty', () => {
+    expect(normaliseDuetConfig({ url: 'http://localhost:9000', token: 42 })).toEqual({
+      url: 'http://localhost:9000',
+      token: '',
+    });
+  });
+});
+
+describe('the duet commands', () => {
+  it('recognises a saved connection sent to the audio side', () => {
+    expect(
+      isCommand({
+        type: 'duet-config',
+        config: { url: 'http://127.0.0.1:8765', token: 'abc' },
+      }),
+    ).toBe(true);
+  });
+
+  it('recognises a start that carries the connection', () => {
+    expect(
+      isCommand({
+        type: 'start',
+        stream: {
+          videoId: 'abcdefghijk',
+          url: 'https://example.com/audio',
+          mimeType: 'audio/webm',
+        },
+        tabId: 1,
+        key: 0,
+        duet: { url: 'http://127.0.0.1:8765', token: 'abc' },
+      }),
+    ).toBe(true);
   });
 });
 

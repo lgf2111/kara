@@ -12,6 +12,7 @@ import {
   type StoredStatus,
   type StreamInfo,
 } from './protocol.ts';
+import { readDuetConfig, watchDuetConfig } from './duet-store.ts';
 import { reasonText } from './reason.ts';
 import { readSettings, watchSettings } from './settings-store.ts';
 import { currentVideoId } from './stream/player.ts';
@@ -294,9 +295,9 @@ async function start(tabId: number, stream: StreamInfo): Promise<void> {
   await ensureOffscreen();
   await remember({ tabId, videoId: stream.videoId });
   await show('preparing', tabId);
-  // The offscreen document cannot read storage, so it is told the setting.
-  const settings = await readSettings();
-  send(packet('offscreen', { type: 'start', stream, tabId, key: settings.key }, tabId));
+  // The offscreen document cannot read storage, so it is told the settings.
+  const [settings, duet] = await Promise.all([readSettings(), readDuetConfig()]);
+  send(packet('offscreen', { type: 'start', stream, tabId, key: settings.key, duet }, tabId));
 }
 
 async function asked(tabId: number | null): Promise<void> {
@@ -446,6 +447,21 @@ watchSettings((settings) => {
     .then((active) => {
       if (active !== null) {
         send(packet('offscreen', { type: 'key', semitones: settings.key }, active.tabId));
+      }
+    })
+    .catch(() => undefined);
+});
+
+/**
+ * A Save in the popup reaches a session that is already running, so the next
+ * Duet press uses the new URL and token without a restart. The token is never
+ * logged; only the offscreen document receives it.
+ */
+watchDuetConfig((config) => {
+  session()
+    .then((active) => {
+      if (active !== null) {
+        send(packet('offscreen', { type: 'duet-config', config }, active.tabId));
       }
     })
     .catch(() => undefined);

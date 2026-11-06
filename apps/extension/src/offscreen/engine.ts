@@ -12,7 +12,7 @@ import { projectMediaSeconds, tidySample, type MediaSample } from '../audio/medi
 import { canFollowTempo, pitchSemitonesForKey } from '../audio/tempo.ts';
 import { FADE_SECONDS, type PlayMode } from '../audio/mix-gain.ts';
 import {
-  DUET_CONFIG_KEY,
+  DEFAULT_DUET_CONFIG,
   IDLE_DUET,
   duetGains,
   duetPhaseLabel,
@@ -145,6 +145,11 @@ export interface EngineOptions {
   /** The starting mix. Defaults to karaoke: all sliders full, vocal muted. */
   readonly mix?: StemMix;
   readonly key?: number;
+  /**
+   * The duet helper URL and token, read by the service worker. The offscreen
+   * document cannot read storage, so the connection arrives with the start.
+   */
+  readonly duet?: DuetConfig;
   /** Taps the output with an `AnalyserNode`, for the debug harness only. */
   readonly analyse?: boolean;
   /**
@@ -171,6 +176,8 @@ export interface Engine {
   media(sample: MediaSample): void;
   /** Begin the opt-in second pass against the local helper. */
   startDuet(): void;
+  /** Replace the saved helper connection, for the next Duet start. */
+  setDuetConfig(config: DuetConfig): void;
   setDuetMix(mix: DuetMix): void;
   swapDuet(): void;
   /** Mark a moment in the song as one of the two voices and re-render. */
@@ -482,6 +489,8 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
   let tempo = 1;
   /** The opt-in Voice 1 / Voice 2 pair and the job that produced it. */
   let duet: DuetStatus = IDLE_DUET;
+  /** The helper connection the service worker last handed over. */
+  let duetConfig: DuetConfig = normaliseDuetConfig(options.duet ?? DEFAULT_DUET_CONFIG);
   let duetActive = false;
   let duetJobId: string | null = null;
   let duetClient: DuetClient | null = null;
@@ -872,11 +881,6 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     }
   };
 
-  const loadDuetConfig = async (): Promise<DuetConfig> => {
-    const stored = await chrome.storage.local.get(DUET_CONFIG_KEY);
-    return normaliseDuetConfig(stored[DUET_CONFIG_KEY]);
-  };
-
   const loadDuetResult = async (): Promise<void> => {
     if (duetJobId === null || duetClient === null) {
       throw new Error('the helper job is gone');
@@ -945,7 +949,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
         return;
       }
       try {
-        const config = await loadDuetConfig();
+        const config = duetConfig;
         if (config.token.length === 0) {
           setDuet({
             state: 'error',
@@ -979,6 +983,10 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       seconds: FADE_SECONDS,
     });
     tellStatus();
+  };
+
+  const setDuetConfig = (next: DuetConfig): void => {
+    duetConfig = normaliseDuetConfig(next);
   };
 
   const swapDuet = (): void => {
@@ -1783,6 +1791,8 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     },
 
     startDuet,
+
+    setDuetConfig,
 
     setDuetMix,
 

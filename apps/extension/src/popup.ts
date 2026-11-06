@@ -1,8 +1,5 @@
 import { canNudge, KEY_DEFAULT, nudgeKey } from './audio/key.ts';
-import {
-  DUET_CONFIG_KEY,
-  normaliseDuetConfig,
-} from './audio/duet.ts';
+import { normaliseDuetConfig } from './audio/duet.ts';
 import {
   MIC_CONSTRAINTS,
   microphoneErrorText,
@@ -12,6 +9,7 @@ import { debugReportText } from './debug-report.ts';
 import { clearCache, usage as readCacheUsage, type CacheUsage } from './cache/index.ts';
 import { isRunning } from './audio/status.ts';
 import { cacheUsageView, popupView, type PopupView } from './popup/popup-view.ts';
+import { readDuetConfig, writeDuetConfig } from './duet-store.ts';
 import {
   SCORE_HISTORY_KEY,
   SCORE_SINGER_KEY,
@@ -509,8 +507,7 @@ function showDuetStatus(text: string): void {
 }
 
 async function loadDuetConfig(): Promise<void> {
-  const stored = await chrome.storage.local.get(DUET_CONFIG_KEY);
-  const config = normaliseDuetConfig(stored[DUET_CONFIG_KEY]);
+  const config = await readDuetConfig();
   duetUrl.value = config.url;
   duetToken.value = config.token;
 }
@@ -519,8 +516,9 @@ duetSave.addEventListener('click', () => {
   const config = normaliseDuetConfig({ url: duetUrl.value, token: duetToken.value });
   duetUrl.value = config.url;
   duetToken.value = config.token;
-  chrome.storage.local
-    .set({ [DUET_CONFIG_KEY]: config })
+  // The service worker watches this key and hands the new connection to a
+  // session that is already running.
+  writeDuetConfig(config)
     .then(() => {
       showDuetStatus('Saved.');
     })

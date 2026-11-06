@@ -3,7 +3,12 @@ import type { MediaSample } from './audio/media-time.ts';
 import type { PlayMode } from './audio/mix-gain.ts';
 import type { PrepareProgress } from './audio/progress.ts';
 import type { Status } from './audio/status.ts';
-import { IDLE_DUET, type DuetMix, type DuetStatus } from './audio/duet.ts';
+import {
+  IDLE_DUET,
+  type DuetConfig,
+  type DuetMix,
+  type DuetStatus,
+} from './audio/duet.ts';
 import { IDLE_MIC_STATUS, type MicFx, type MicStatus } from './audio/mic-fx.ts';
 import { DEFAULT_MIX, type StemMix } from './audio/stems.ts';
 import type { CacheStatus } from './cache/status.ts';
@@ -73,6 +78,8 @@ export type Command =
       readonly tabId: number;
       /** The remembered default key. The offscreen document cannot read storage. */
       readonly key?: number;
+      /** The helper URL and token, read by the service worker from storage. */
+      readonly duet?: DuetConfig;
     }
   | { readonly type: 'stop' }
   /** The vocal switch: the video's own sound, or the stems in its place. */
@@ -99,6 +106,11 @@ export type Command =
   | { readonly type: 'duet-anchor'; readonly voice: 1 | 2; readonly seconds: number }
   /** Put the single vocal row back and forget the pair. */
   | { readonly type: 'duet-clear' }
+  /**
+   * A saved helper URL and token. Sent after the popup writes them so a
+   * session already running uses the new connection the next time Duet starts.
+   */
+  | { readonly type: 'duet-config'; readonly config: DuetConfig }
   /**
    * Start pitch practice: learn the guide melody from the separated vocal
    * stem, then open the microphone and score against the video's clock. This
@@ -146,6 +158,7 @@ const COMMANDS: Readonly<Record<Command['type'], true>> = {
   'duet-swap': true,
   'duet-anchor': true,
   'duet-clear': true,
+  'duet-config': true,
   'practice-start': true,
   'practice-stop': true,
   mic: true,

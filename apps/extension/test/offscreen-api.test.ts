@@ -10,15 +10,24 @@ import { describe, expect, it } from 'vitest';
  */
 describe('offscreen document', () => {
   // Comments are free to say what the document lacks; only code can break.
-  const source = readFileSync(new URL('../src/offscreen.ts', import.meta.url), 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//gu, '')
-    .replace(/^\s*\/\/.*$/gmu, '');
+  const stripComments = (source: string): string =>
+    source.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/^\s*\/\/.*$/gmu, '');
+  const source = stripComments(
+    readFileSync(new URL('../src/offscreen.ts', import.meta.url), 'utf8'),
+  );
+  const engine = stripComments(
+    readFileSync(new URL('../src/offscreen/engine.ts', import.meta.url), 'utf8'),
+  );
 
   it('does not use chrome.storage', () => {
     expect(source).not.toMatch(/chrome\.storage/u);
   });
 
+  it('does not use chrome.storage in the engine either', () => {
+    expect(engine).not.toMatch(/chrome\.storage/u);
+  });
+
   it('does not import the module that does', () => {
-    expect(source).not.toMatch(/settings-store/u);
+    expect(source).not.toMatch(/settings-store|duet-store/u);
   });
 });

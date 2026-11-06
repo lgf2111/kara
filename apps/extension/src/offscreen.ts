@@ -1,3 +1,4 @@
+import { DEFAULT_DUET_CONFIG, normaliseDuetConfig, type DuetConfig } from './audio/duet.ts';
 import { clampKey, KEY_DEFAULT } from './audio/key.ts';
 import { normaliseMix, type StemMix } from './audio/stems.ts';
 import { startEngine, type Engine } from './offscreen/engine.ts';
@@ -45,6 +46,8 @@ let turn: Promise<void> = Promise.resolve();
 let pendingMode: PlayMode | null = null;
 let pendingMix: StemMix | null = null;
 let pendingKey: number | null = null;
+/** A saved duet connection that arrived before the engine finished starting. */
+let pendingDuet: DuetConfig | null = null;
 /** The last place the page said the video was, for the same reason. */
 let lastSample: MediaSample | null = null;
 
@@ -71,6 +74,9 @@ async function start(command: Extract<Command, { type: 'start' }>): Promise<void
     // start. From here on the key belongs to the session and only a command
     // moves it.
     key: clampKey(command.key ?? KEY_DEFAULT),
+    // The helper connection, handed over with the start for the same reason:
+    // this document cannot read storage.
+    duet: normaliseDuetConfig(command.duet ?? DEFAULT_DUET_CONFIG),
     onStatus: (report) => {
       tell(report);
     },
@@ -95,6 +101,9 @@ async function start(command: Extract<Command, { type: 'start' }>): Promise<void
     if (pendingKey !== null) {
       started.setKey(pendingKey);
     }
+    if (pendingDuet !== null) {
+      started.setDuetConfig(pendingDuet);
+    }
     if (lastSample !== null) {
       started.media(lastSample);
     }
@@ -102,6 +111,7 @@ async function start(command: Extract<Command, { type: 'start' }>): Promise<void
   pendingMode = null;
   pendingMix = null;
   pendingKey = null;
+  pendingDuet = null;
 }
 
 async function stop(): Promise<void> {
@@ -110,6 +120,7 @@ async function stop(): Promise<void> {
   pendingMode = null;
   pendingMix = null;
   pendingKey = null;
+  pendingDuet = null;
   lastSample = null;
   if (running !== null) {
     await running.stop();
@@ -153,6 +164,15 @@ function accept(command: Command): void {
     case 'duet-clear':
       engine?.clearDuet();
       return;
+    case 'duet-config': {
+      const config = normaliseDuetConfig(command.config);
+      if (engine === null) {
+        pendingDuet = config;
+      } else {
+        engine.setDuetConfig(config);
+      }
+      return;
+    }
     case 'practice-start':
       if (engine === null) {
         tell({

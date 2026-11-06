@@ -8,7 +8,8 @@
  * backing.
  *
  * The helper runs on loopback and requires a token. Both live in
- * `chrome.storage.local`; the popup is where they are entered.
+ * `chrome.storage.local`; the popup is where they are entered, and the service
+ * worker hands them to the offscreen document, which cannot read storage.
  */
 
 export type DuetState = 'off' | 'preparing' | 'ready' | 'error';

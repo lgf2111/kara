@@ -58,10 +58,15 @@ export async function errorText(response: Response): Promise<string> {
 }
 
 export class DuetClient {
+  /**
+   * `fetch` is wrapped rather than stored: calling `this.fetchImpl(...)` with
+   * the native function would hand the client to Chrome as its receiver, which
+   * it refuses with "Illegal invocation" before any request leaves.
+   */
   constructor(
     private readonly config: DuetConfig,
     private readonly decode: DecodeStereo,
-    private readonly fetchImpl: FetchLike = fetch,
+    private readonly fetchImpl: FetchLike = (input, init) => fetch(input, init),
   ) {}
 
   private headers(json = false): Record<string, string> {
