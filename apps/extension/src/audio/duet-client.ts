@@ -7,6 +7,15 @@
  * a bridge, an audio context, or a browser.
  */
 
+import {
+  duetAnchorsOf,
+  duetLowConfidenceOf,
+  duetQualityOf,
+  normaliseDuetMap,
+  type DuetAnchor,
+  type DuetMap,
+  type DuetQuality,
+} from '../cache/duet.ts';
 import { duetPhaseOf, type DuetConfig, type DuetPhase } from './duet.ts';
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -14,6 +23,26 @@ export type DecodeStereo = (
   bytes: ArrayBuffer,
   sampleRate?: number,
 ) => Promise<[Float32Array, Float32Array]>;
+
+/** The helper's map, normalised so the cache can persist it unchanged. */
+export interface RemoteDuetMap {
+  readonly map: DuetMap;
+  readonly anchors: readonly DuetAnchor[];
+  readonly quality: DuetQuality;
+  readonly lowConfidenceSeconds: number | null;
+}
+
+/** Normalise whatever `/map.json` sent into the shape the cache stores. */
+export function remoteDuetMap(value: unknown): RemoteDuetMap {
+  const map = normaliseDuetMap(value);
+  const quality = duetQualityOf(map);
+  return {
+    map,
+    anchors: duetAnchorsOf(map),
+    quality,
+    lowConfidenceSeconds: duetLowConfidenceOf(quality),
+  };
+}
 
 export interface RemoteDuetStatus {
   readonly state: 'running' | 'done' | 'error';
@@ -156,7 +185,14 @@ export class DuetClient {
     return [firstLeft.slice(0, length), secondLeft.slice(0, length)];
   }
 
-  async lowConfidence(jobId: string): Promise<number | null> {
+  /**
+   * The helper's map document, fetched once and normalised for the cache.
+   *
+   * The map is diagnostic, so any failure returns null rather than failing the
+   * split. `lowConfidence` is the same document read through this accessor,
+   * which keeps one endpoint and one normalisation on the path.
+   */
+  async map(jobId: string): Promise<RemoteDuetMap | null> {
     try {
       const response = await this.fetchImpl(`${this.config.url}/v1/jobs/${jobId}/map.json`, {
         headers: this.headers(),
@@ -164,14 +200,14 @@ export class DuetClient {
       if (!response.ok) {
         return null;
       }
-      const body = (await response.json()) as {
-        quality?: { lowConfidence?: unknown };
-      };
-      const value = body.quality?.lowConfidence;
-      return typeof value === 'number' && Number.isFinite(value) ? value : null;
+      return remoteDuetMap(await response.json());
     } catch {
       // The map is diagnostic; a missing one must not fail the split.
       return null;
     }
+  }
+
+  async lowConfidence(jobId: string): Promise<number | null> {
+    return (await this.map(jobId))?.lowConfidenceSeconds ?? null;
   }
 }

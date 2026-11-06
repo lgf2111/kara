@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DuetClient,
   errorText,
+  remoteDuetMap,
   remoteDuetStatus,
   type DecodeStereo,
   type FetchLike,
@@ -168,6 +169,51 @@ describe('DuetClient', () => {
     const missing = fakeFetch([json({}, 404)]);
     const noMap = new DuetClient(CONFIG, DECODE, missing.fetch);
     expect(await noMap.lowConfidence('job-1')).toBeNull();
+  });
+
+  it('reads the whole map once for the cache to persist', async () => {
+    const body = {
+      version: 1,
+      anchors: [{ voice: 1, start: 1.5, end: 4.5 }],
+      quality: { solo: 8, lowConfidence: 2.5 },
+      segments: [{ start: 0, end: 2, kind: 'solo', voice: 1 }],
+    };
+    const { fetch, calls } = fakeFetch([json(body)]);
+    const client = new DuetClient(CONFIG, DECODE, fetch);
+
+    const map = await client.map('job-1');
+
+    expect(calls[0]?.url).toBe('http://helper/v1/jobs/job-1/map.json');
+    expect(headers(calls[0] as Call)).toEqual({ 'X-Kara-Token': 'secret' });
+    expect(map).toEqual({
+      map: body,
+      anchors: body.anchors,
+      quality: body.quality,
+      lowConfidenceSeconds: 2.5,
+    });
+  });
+
+  it('normalises a map without anchors or quality', () => {
+    expect(remoteDuetMap(null)).toEqual({
+      map: {},
+      anchors: [],
+      quality: {},
+      lowConfidenceSeconds: null,
+    });
+    expect(
+      remoteDuetMap({
+        anchors: [{ voice: 3, start: 0, end: 1 }, { voice: 2, start: 2, end: 3 }],
+        quality: { lowConfidence: 'x', solo: 1 },
+      }),
+    ).toEqual({
+      map: {
+        anchors: [{ voice: 3, start: 0, end: 1 }, { voice: 2, start: 2, end: 3 }],
+        quality: { lowConfidence: 'x', solo: 1 },
+      },
+      anchors: [{ voice: 2, start: 2, end: 3 }],
+      quality: { solo: 1 },
+      lowConfidenceSeconds: null,
+    });
   });
 
   it('calls the browser fetch without the client as its receiver', async () => {

@@ -12,6 +12,7 @@ import {
   IDLE_DUET,
   duetPhaseLabel,
   normaliseDuetMix,
+  normaliseDuetStatus,
   type DuetMix,
   type DuetState,
 } from '../audio/duet.ts';
@@ -79,6 +80,8 @@ export interface PanelView {
   readonly duetCanStart: boolean;
   readonly duetHasVoices: boolean;
   readonly duetLowConfidenceSeconds: number | null;
+  /** Whether the current pair came from the sidecar rather than the helper. */
+  readonly duetCached: boolean;
   /** Pitch practice: off, learning, listening, or stopped with a reason. */
   readonly practiceState: 'off' | 'analyzing' | 'ready' | 'error';
   readonly practiceLabel: string;
@@ -156,8 +159,9 @@ export function panelView(input: PanelInput): PanelView {
   const mode: PlayMode = report?.mode ?? 'original';
   const mix = normaliseMix(report?.mix ?? DEFAULT_MIX);
   const semitones = clampKey(report?.semitones ?? KEY_DEFAULT);
-  const duet = report?.duet ?? IDLE_DUET;
+  const duet = normaliseDuetStatus(report?.duet ?? IDLE_DUET);
   const duetMix = normaliseDuetMix(duet.mix);
+  const duetCached = duet.source === 'cache';
   const duetProgress =
     duet.progress !== null && duet.progress.total > 0
       ? duet.progress.done / duet.progress.total
@@ -170,13 +174,20 @@ export function panelView(input: PanelInput): PanelView {
         : duet.state === 'error'
           ? 'Duet stopped'
           : 'Duet (beta)';
+  const readyNotes: string[] = [];
+  if (duetCached) {
+    readyNotes.push('Loaded from cache.');
+  }
+  if (duet.lowConfidenceSeconds !== null && duet.lowConfidenceSeconds > 10) {
+    readyNotes.push('Some lines are uncertain. Use Fix line if a voice is wrong.');
+  }
   const duetDetail =
     duet.state === 'error'
       ? (duet.detail ?? 'the helper stopped')
       : duet.state === 'ready'
-        ? duet.lowConfidenceSeconds !== null && duet.lowConfidenceSeconds > 10
-          ? 'Some lines are uncertain. Use Fix line if a voice is wrong.'
-          : null
+        ? readyNotes.length === 0
+          ? null
+          : readyNotes.join(' ')
         : duet.state === 'preparing'
           ? duet.hasVoices
             ? 'The current pair keeps playing while it re-renders.'
@@ -280,6 +291,7 @@ export function panelView(input: PanelInput): PanelView {
     duetCanStart,
     duetHasVoices: duet.hasVoices,
     duetLowConfidenceSeconds: duet.lowConfidenceSeconds,
+    duetCached,
     duetHint,
     duetTooltip,
     duetActive,

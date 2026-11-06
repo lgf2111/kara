@@ -442,6 +442,7 @@ describe('the compact duet row', () => {
     mix: DEFAULT_DUET_MIX,
     hasVoices: false,
     lowConfidenceSeconds: null,
+    source: null,
   };
   const calibrating: DuetStatus = {
     state: 'preparing',
@@ -450,6 +451,7 @@ describe('the compact duet row', () => {
     mix: DEFAULT_DUET_MIX,
     hasVoices: true,
     lowConfidenceSeconds: 20,
+    source: 'helper',
   };
   const ready: DuetStatus = {
     state: 'ready',
@@ -458,6 +460,7 @@ describe('the compact duet row', () => {
     mix: DEFAULT_DUET_MIX,
     hasVoices: true,
     lowConfidenceSeconds: 20,
+    source: 'helper',
   };
   const failed: DuetStatus = {
     state: 'error',
@@ -466,6 +469,7 @@ describe('the compact duet row', () => {
     mix: DEFAULT_DUET_MIX,
     hasVoices: false,
     lowConfidenceSeconds: null,
+    source: null,
   };
 
   it('is off and offers the button when karaoke is ready', () => {
@@ -535,6 +539,21 @@ describe('the compact duet row', () => {
     expect(view.duetActive).toBe(true);
     expect(view.duetCanStart).toBe(false);
     expect(view.duetTooltip).toBeNull();
+    expect(view.duetCached).toBe(false);
+  });
+
+  it('adds a small loaded-from-cache note without changing ready', () => {
+    const view = panelView({
+      report: report({ status: 'ready', duet: { ...ready, source: 'cache' } }),
+    });
+
+    expect(view.duetState).toBe('ready');
+    expect(view.duetLabel).toBe('Duet ready');
+    expect(view.duetCached).toBe(true);
+    expect(view.duetDetail).toContain('Loaded from cache.');
+    expect(view.duetDetail).toContain('uncertain');
+    expect(view.duetActive).toBe(true);
+    expect(view.duetCanStart).toBe(false);
   });
 
   it('keeps karaoke alive when the helper is missing', () => {

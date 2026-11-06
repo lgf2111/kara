@@ -10,6 +10,11 @@ import {
   type CachedStems,
   type StereoChannels,
 } from '../src/cache/entry.ts';
+import {
+  DUET_FORMAT_VERSION,
+  duetVoicePair,
+  type CachedDuet,
+} from '../src/cache/duet.ts';
 import { startEngine } from '../src/offscreen/engine.ts';
 import type { StemCacheStore } from '../src/offscreen/stem-cache-session.ts';
 import type { StatusReport } from '../src/protocol.ts';
@@ -26,6 +31,81 @@ vi.mock('signalsmith-stretch', () => ({
 
 vi.mock('../src/audio/decode.ts', () => ({
   decodeStereo: async () => [new Float32Array(400), new Float32Array(400)],
+}));
+
+const duetHelper = vi.hoisted(() => ({
+  constructed: 0,
+  mapCalls: 0,
+  anchorCalls: 0,
+  revision: 0,
+}));
+
+vi.mock('../src/audio/duet-client.ts', () => ({
+  DuetClient: class {
+    constructor() {
+      duetHelper.constructed += 1;
+    }
+
+    start(): Promise<string> {
+      return Promise.resolve('job-1');
+    }
+
+    status(): Promise<{
+      state: 'done';
+      phase: 'calibrating';
+      done: number;
+      total: number;
+      error: null;
+      version: number;
+    }> {
+      return Promise.resolve({
+        state: 'done',
+        phase: 'calibrating',
+        done: 1,
+        total: 1,
+        error: null,
+        version: 1,
+      });
+    }
+
+    anchor(): Promise<void> {
+      duetHelper.anchorCalls += 1;
+      duetHelper.revision += 1;
+      return Promise.resolve();
+    }
+
+    cancel(): Promise<void> {
+      return Promise.resolve();
+    }
+
+    voices(): Promise<[Float32Array, Float32Array]> {
+      return Promise.resolve([new Float32Array(400), new Float32Array(400)]);
+    }
+
+    map(): Promise<{
+      map: Record<string, unknown>;
+      anchors: Array<{ voice: 1; start: number; end: number }>;
+      quality: { lowConfidence: number };
+      lowConfidenceSeconds: number;
+    }> {
+      duetHelper.mapCalls += 1;
+      const anchors = Array.from(
+        { length: duetHelper.revision + 1 },
+        (_, index) => ({ voice: 1 as const, start: index + 1, end: index + 2 }),
+      );
+      const lowConfidence = duetHelper.revision === 0 ? 20 : 0;
+      return Promise.resolve({
+        map: { version: 1, anchors, quality: { lowConfidence } },
+        anchors,
+        quality: { lowConfidence },
+        lowConfidenceSeconds: lowConfidence,
+      });
+    }
+
+    lowConfidence(): Promise<number | null> {
+      return Promise.resolve(null);
+    }
+  },
 }));
 
 const VIDEO = 'abcdefghijk';
@@ -219,7 +299,32 @@ function cachedStems(entry: CachedEntry): CachedStems {
   };
 }
 
-function fakeStore(entry: CachedEntry, stems: CachedStems): StemCacheStore {
+function cachedDuet(entry: CachedEntry): CachedDuet {
+  const quality = { solo: 1, lowConfidence: 12.5 };
+  const voice1 = new Float32Array(entry.durationFrames);
+  const voice2 = new Float32Array(entry.durationFrames);
+  const voices = duetVoicePair(voice1, voice2);
+  return {
+    key: entry.key,
+    sampleRate: entry.sampleRate,
+    frames: entry.durationFrames,
+    voices,
+    voice1,
+    voice2,
+    map: { version: 1, anchors: [], quality },
+    quality,
+    anchors: [],
+    helperVersion: 'kara-duet/1',
+    modelVersion: null,
+    duetFormatVersion: DUET_FORMAT_VERSION,
+  };
+}
+
+function fakeStore(
+  entry: CachedEntry,
+  stems: CachedStems,
+  cached: CachedDuet | null = null,
+): StemCacheStore {
   return {
     findEntry: vi.fn(async () => entry),
     readCachedStems: vi.fn(async () => stems),
@@ -230,10 +335,16 @@ function fakeStore(entry: CachedEntry, stems: CachedStems): StemCacheStore {
     savePracticeNotes: vi.fn(async () => true),
     markPlayed: vi.fn(async () => undefined),
     removeConflicts: vi.fn(async () => 0),
+    hasCachedDuet: vi.fn(async () => cached !== null),
+    readCachedDuet: vi.fn(async () => cached),
+    writeCachedDuet: vi.fn(async () => entry),
   };
 }
 
-function missStore(writer: FakeWriter): StemCacheStore {
+function missStore(
+  writer: FakeWriter,
+  options: { readonly duetWriteFails?: boolean } = {},
+): StemCacheStore {
   return {
     findEntry: vi.fn(async () => null),
     readCachedStems: vi.fn(async () => null),
@@ -242,6 +353,14 @@ function missStore(writer: FakeWriter): StemCacheStore {
     savePracticeNotes: vi.fn(async () => true),
     markPlayed: vi.fn(async () => undefined),
     removeConflicts: vi.fn(async () => 0),
+    hasCachedDuet: vi.fn(async () => false),
+    readCachedDuet: vi.fn(async () => null),
+    writeCachedDuet: vi.fn(async () => {
+      if (options.duetWriteFails === true) {
+        throw new Error('the duet sidecar could not be written');
+      }
+      return seedEntry(VIDEO, { durationFrames: 400, bytes: 9000 });
+    }),
   };
 }
 
@@ -271,6 +390,10 @@ describe('starting on a cached video', () => {
     FakeAudioWorkletNode.instances = [];
     FakeAudioContext.instances = [];
     FakeWorker.instances = [];
+    duetHelper.constructed = 0;
+    duetHelper.mapCalls = 0;
+    duetHelper.anchorCalls = 0;
+    duetHelper.revision = 0;
     vi.stubGlobal('AudioContext', FakeAudioContext);
     vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode);
     vi.stubGlobal('GainNode', FakeGainNode);
@@ -479,6 +602,193 @@ describe('starting on a cached video', () => {
       expect(writer.aborted).toBe(true);
     });
     expect(engine.status().status).toBe('ready');
+
+    await engine.stop();
+  });
+
+  it('loads a cached duet pair with no helper, token or fetch', async () => {
+    const entry = seedEntry(VIDEO, {
+      formatVersion: CACHE_FORMAT_VERSION,
+      durationFrames: FRAMES,
+      sampleRate: 44_100,
+      bytes: 20_000,
+    });
+    const cached = cachedDuet(entry);
+    const store = fakeStore(entry, cachedStems(entry), cached);
+    const fetchSpy = vi.fn(async () => {
+      throw new Error('a cached duet must not fetch');
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const engine = await startEngine(engineOptions(store, () => undefined));
+    engine.startDuet();
+
+    await vi.waitFor(() => {
+      expect(engine.status().duet?.state).toBe('ready');
+    });
+    const status = engine.status().duet;
+    expect(status?.source).toBe('cache');
+    expect(status?.hasVoices).toBe(true);
+    expect(status?.lowConfidenceSeconds).toBe(12.5);
+    expect(status?.detail).toBe('Loaded from cache.');
+    expect(duetHelper.constructed).toBe(0);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(store.writeCachedDuet).not.toHaveBeenCalled();
+
+    const player = FakeAudioWorkletNode.instances[0];
+    if (player === undefined) {
+      throw new Error('expected the player node');
+    }
+    const posted = player.port.postMessage.mock.calls.map(
+      (call) =>
+        call[0] as {
+          readonly type: string;
+          readonly voice1?: Float32Array;
+          readonly voice2?: Float32Array;
+        },
+    );
+    const pair = posted.find((message) => message.type === 'duet');
+    expect(pair?.voice1?.length).toBe(FRAMES);
+    expect(pair?.voice2?.length).toBe(FRAMES);
+    expect(posted.some((message) => message.type === 'duet-mix')).toBe(true);
+
+    await engine.stop();
+  });
+
+  it('runs the helper on a miss and writes the pair and map to the entry', async () => {
+    const entry = seedEntry(VIDEO, {
+      formatVersion: CACHE_FORMAT_VERSION,
+      modelVersion: 'htdemucs-web',
+      durationFrames: 400,
+      bytes: 9000,
+    });
+    const writer = new FakeWriter(entry);
+    const store = missStore(writer);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(new Uint8Array(16), {
+          status: 200,
+          headers: { 'content-length': '16' },
+        }),
+      ),
+    );
+    const engine = await startEngine({
+      ...engineOptions(store, () => undefined),
+      duet: { url: 'http://helper', token: 'secret' },
+    });
+    await vi.waitFor(() => {
+      expect(engine.status().status).toBe('ready');
+    });
+
+    engine.startDuet();
+    await vi.waitFor(() => {
+      expect(engine.status().duet?.state).toBe('ready');
+    });
+
+    const status = engine.status().duet;
+    expect(status?.source).toBe('helper');
+    expect(status?.lowConfidenceSeconds).toBe(20);
+    expect(duetHelper.constructed).toBe(1);
+    const writes = vi.mocked(store.writeCachedDuet).mock.calls;
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.[0]).toBe(entry.key);
+    const savedVoices = writes[0]?.[1].voices as readonly [Float32Array, Float32Array];
+    expect(savedVoices[0].length).toBe(400);
+    expect(savedVoices[1].length).toBe(400);
+    expect(writes[0]?.[1].map).toMatchObject({
+      anchors: [{ voice: 1, start: 1, end: 2 }],
+      quality: { lowConfidence: 20 },
+    });
+
+    await engine.stop();
+  });
+
+  it('rewrites the sidecar after an anchor re-render', async () => {
+    const entry = seedEntry(VIDEO, {
+      formatVersion: CACHE_FORMAT_VERSION,
+      modelVersion: 'htdemucs-web',
+      durationFrames: 400,
+      bytes: 9000,
+    });
+    const writer = new FakeWriter(entry);
+    const store = missStore(writer);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(new Uint8Array(16), {
+          status: 200,
+          headers: { 'content-length': '16' },
+        }),
+      ),
+    );
+    const engine = await startEngine({
+      ...engineOptions(store, () => undefined),
+      duet: { url: 'http://helper', token: 'secret' },
+    });
+    await vi.waitFor(() => {
+      expect(engine.status().status).toBe('ready');
+    });
+    engine.startDuet();
+    await vi.waitFor(() => {
+      expect(vi.mocked(store.writeCachedDuet).mock.calls).toHaveLength(1);
+    });
+
+    engine.anchorDuet(1, 5);
+    await vi.waitFor(() => {
+      expect(vi.mocked(store.writeCachedDuet).mock.calls).toHaveLength(2);
+    });
+
+    const second = vi.mocked(store.writeCachedDuet).mock.calls[1]?.[1];
+    expect(duetHelper.anchorCalls).toBe(1);
+    expect(second?.map).toMatchObject({
+      anchors: [
+        { voice: 1, start: 1, end: 2 },
+        { voice: 1, start: 2, end: 3 },
+      ],
+      quality: { lowConfidence: 0 },
+    });
+    expect(engine.status().duet?.state).toBe('ready');
+    expect(engine.status().duet?.lowConfidenceSeconds).toBe(0);
+
+    await engine.stop();
+  });
+
+  it('keeps the helper result when the sidecar cannot be written', async () => {
+    const entry = seedEntry(VIDEO, {
+      formatVersion: CACHE_FORMAT_VERSION,
+      modelVersion: 'htdemucs-web',
+      durationFrames: 400,
+      bytes: 9000,
+    });
+    const writer = new FakeWriter(entry);
+    const store = missStore(writer, { duetWriteFails: true });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(new Uint8Array(16), {
+          status: 200,
+          headers: { 'content-length': '16' },
+        }),
+      ),
+    );
+    const engine = await startEngine({
+      ...engineOptions(store, () => undefined),
+      duet: { url: 'http://helper', token: 'secret' },
+    });
+    await vi.waitFor(() => {
+      expect(engine.status().status).toBe('ready');
+    });
+
+    engine.startDuet();
+    await vi.waitFor(() => {
+      expect(engine.status().duet?.state).toBe('ready');
+    });
+
+    expect(engine.status().duet?.source).toBe('helper');
+    expect(engine.status().duet?.hasVoices).toBe(true);
+    expect(engine.status().status).toBe('ready');
+    expect(vi.mocked(store.writeCachedDuet)).toHaveBeenCalledTimes(1);
 
     await engine.stop();
   });

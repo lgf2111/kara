@@ -184,6 +184,14 @@ export function duetQualityOf(map: DuetMap): DuetQuality {
   return quality;
 }
 
+/** The helper's low-confidence seconds out of a map's quality record. */
+export function duetLowConfidenceOf(quality: DuetQuality): number | null {
+  const value = quality['lowConfidence'];
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
 /** One voice pair out of either accepted input shape. */
 export function normaliseDuetVoices(
   voices: unknown,

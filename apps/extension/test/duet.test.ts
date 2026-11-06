@@ -3,12 +3,14 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_DUET_CONFIG,
   DEFAULT_DUET_MIX,
+  IDLE_DUET,
   duetGains,
   duetPercent,
   duetPhaseLabel,
   duetPhaseOf,
   normaliseDuetConfig,
   normaliseDuetMix,
+  normaliseDuetStatus,
   withDuetLevel,
   withDuetMute,
   withDuetSolo,
@@ -131,5 +133,44 @@ describe('the duet words', () => {
     expect(duetPercent(0.456)).toBe(46);
     expect(duetPercent(-1)).toBe(0);
     expect(duetPercent(2)).toBe(100);
+  });
+});
+
+describe('normaliseDuetStatus', () => {
+  it('keeps a ready cached pair ready and says where it came from', () => {
+    const status = normaliseDuetStatus({
+      state: 'ready',
+      progress: { phase: 'calibrating', done: 2, total: 4 },
+      detail: '  Loaded\nfrom cache.  ',
+      mix: DEFAULT_DUET_MIX,
+      hasVoices: true,
+      lowConfidenceSeconds: 12.5,
+      source: 'cache',
+    });
+
+    expect(status.state).toBe('ready');
+    expect(status.source).toBe('cache');
+    expect(status.progress).toEqual({ phase: 'calibrating', done: 2, total: 4 });
+    expect(status.detail).toBe('Loaded from cache.');
+    expect(status.hasVoices).toBe(true);
+    expect(status.lowConfidenceSeconds).toBe(12.5);
+  });
+
+  it('drops an unknown state and source rather than trusting them', () => {
+    expect(normaliseDuetStatus(null)).toEqual(IDLE_DUET);
+    expect(
+      normaliseDuetStatus({
+        state: 'singing',
+        progress: 'half',
+        hasVoices: 'yes',
+        lowConfidenceSeconds: -1,
+        source: 'somewhere',
+      }),
+    ).toEqual({
+      ...IDLE_DUET,
+      hasVoices: false,
+      lowConfidenceSeconds: null,
+      source: null,
+    });
   });
 });

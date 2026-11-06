@@ -16,6 +16,18 @@ export type DuetState = 'off' | 'preparing' | 'ready' | 'error';
 
 export type DuetPhase = 'starting' | 'separating' | 'mapping' | 'calibrating';
 
+/** Where the current voice pair came from, once there is one. */
+export type DuetSource = 'helper' | 'cache';
+
+/**
+ * The helper contract this build writes into a cached sidecar.
+ *
+ * The sidecar has its own format version; this one names the helper that
+ * produced the voices and map, so a changed helper can invalidate the pair
+ * without touching the four base stems.
+ */
+export const DUET_HELPER_VERSION = 'kara-duet/1';
+
 export interface DuetProgress {
   readonly phase: DuetPhase;
   readonly done: number;
@@ -39,6 +51,8 @@ export interface DuetStatus {
   readonly hasVoices: boolean;
   /** Seconds the helper was unsure about, so the panel can warn honestly. */
   readonly lowConfidenceSeconds: number | null;
+  /** Where the pair came from, or null before there is one. */
+  readonly source: DuetSource | null;
 }
 
 export const DUET_CONFIG_KEY = 'kara.duet';
@@ -67,6 +81,7 @@ export const IDLE_DUET: DuetStatus = {
   mix: DEFAULT_DUET_MIX,
   hasVoices: false,
   lowConfidenceSeconds: null,
+  source: null,
 };
 
 export const DUET_LABEL = ['Voice 1', 'Voice 2'] as const;
@@ -178,6 +193,66 @@ export function duetPhaseOf(value: unknown): DuetPhase {
     default:
       return 'starting';
   }
+}
+
+function count(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.floor(value))
+    : 0;
+}
+
+function detailOf(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const text = value.replace(/\s+/gu, ' ').trim().slice(0, 160).trim();
+  return text === '' ? null : text;
+}
+
+/** Whether a pair came from the helper or from its cache. */
+export function normaliseDuetSource(value: unknown): DuetSource | null {
+  return value === 'helper' || value === 'cache' ? value : null;
+}
+
+const DUET_STATES: readonly DuetState[] = ['off', 'preparing', 'ready', 'error'];
+
+/**
+ * A status out of a report, with every field bounded.
+ *
+ * A report can cross a process boundary, so an unknown state, a malformed
+ * progress object or a bad source is dropped rather than trusted. In
+ * particular, an unknown source is null: the panel then says nothing about
+ * the cache, which is true whatever produced the pair.
+ */
+export function normaliseDuetStatus(raw: unknown): DuetStatus {
+  const stored = recordOf(raw);
+  const state = stored['state'];
+  const rawProgress = stored['progress'];
+  const progress =
+    typeof rawProgress === 'object' && rawProgress !== null && !Array.isArray(rawProgress)
+      ? (() => {
+          const value = rawProgress as Record<string, unknown>;
+          return {
+            phase: duetPhaseOf(value['phase']),
+            done: count(value['done']),
+            total: count(value['total']),
+          };
+        })()
+      : null;
+  const low = stored['lowConfidenceSeconds'];
+  return {
+    state:
+      typeof state === 'string' && DUET_STATES.includes(state as DuetState)
+        ? (state as DuetState)
+        : 'off',
+    progress,
+    detail: detailOf(stored['detail']),
+    mix: normaliseDuetMix(stored['mix']),
+    hasVoices: stored['hasVoices'] === true,
+    lowConfidenceSeconds:
+      typeof low === 'number' && Number.isFinite(low) && low >= 0 ? low : null,
+    source: normaliseDuetSource(stored['source']),
+  };
 }
 
 /** The caption for a job phase, which is also what the panel shows. */

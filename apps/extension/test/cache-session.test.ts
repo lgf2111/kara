@@ -10,6 +10,13 @@ import {
   type CachedStems,
   type StereoChannels,
 } from '../src/cache/entry.ts';
+import {
+  DUET_FORMAT_VERSION,
+  duetVoicePair,
+  type CachedDuet,
+  type CachedDuetInput,
+  type DuetExpectation,
+} from '../src/cache/duet.ts';
 import type { StemWriter } from '../src/cache/store.ts';
 import {
   StemCacheSession,
@@ -123,6 +130,12 @@ class FakeStore implements StemCacheStore {
     readonly videoId: string;
     readonly keepKey: string;
   }> = [];
+  duet: CachedDuet | null = null;
+  duetWriteFails = false;
+  duetReads = 0;
+  readonly duetExpectations: Array<DuetExpectation | undefined> = [];
+  readonly duetWrites: Array<{ readonly key: string; readonly input: CachedDuetInput }> =
+    [];
 
   findEntry(): Promise<CachedEntry | null> {
     this.findCalls += 1;
@@ -173,6 +186,31 @@ class FakeStore implements StemCacheStore {
   ): Promise<number> {
     this.conflicts.push({ videoId: query.videoId, keepKey });
     return Promise.resolve(0);
+  }
+
+  hasCachedDuet(
+    _key: string,
+    expectation?: DuetExpectation,
+  ): Promise<boolean> {
+    this.duetExpectations.push(expectation);
+    return Promise.resolve(this.duet !== null);
+  }
+
+  readCachedDuet(
+    _key: string,
+    expectation?: DuetExpectation,
+  ): Promise<CachedDuet | null> {
+    this.duetReads += 1;
+    this.duetExpectations.push(expectation);
+    return Promise.resolve(this.duet);
+  }
+
+  writeCachedDuet(key: string, input: CachedDuetInput): Promise<CachedEntry> {
+    this.duetWrites.push({ key, input });
+    if (this.duetWriteFails || this.entry === null) {
+      return Promise.reject(new Error('the duet could not be saved'));
+    }
+    return Promise.resolve(this.entry);
   }
 }
 
@@ -342,5 +380,91 @@ describe('a cache miss', () => {
 
     expect(entry).not.toBeNull();
     expect(second.writer?.aborted).toBe(false);
+  });
+});
+
+describe('the duet sidecar through a session', () => {
+  function duet(entry: CachedEntry): CachedDuet {
+    const voice1 = new Float32Array(entry.durationFrames);
+    const voice2 = new Float32Array(entry.durationFrames);
+    const voices = duetVoicePair(voice1, voice2);
+    return {
+      key: entry.key,
+      sampleRate: entry.sampleRate,
+      frames: entry.durationFrames,
+      voices,
+      voice1,
+      voice2,
+      map: { anchors: [] },
+      quality: { lowConfidence: 4.5 },
+      anchors: [],
+      helperVersion: 'helper-1',
+      modelVersion: null,
+      duetFormatVersion: DUET_FORMAT_VERSION,
+    };
+  }
+
+  it('reads a cached pair from the entry the session already has', async () => {
+    const store = new FakeStore();
+    const entry = seedEntry(VIDEO, {
+      formatVersion: CACHE_FORMAT_VERSION,
+      durationFrames: 40,
+    });
+    store.entry = entry;
+    store.stems = cachedStems(entry);
+    store.duet = duet(entry);
+    const cache = session(store);
+
+    await cache.start();
+    const pair = await cache.readCachedDuet();
+
+    expect(pair?.key).toBe(entry.key);
+    expect(pair?.frames).toBe(40);
+    expect(store.duetReads).toBe(1);
+    expect(store.duetExpectations[0]).toMatchObject({
+      helperVersion: expect.any(String),
+      duetFormatVersion: DUET_FORMAT_VERSION,
+    });
+  });
+
+  it('does not look for a pair when the song has no complete entry', async () => {
+    const store = new FakeStore();
+    const cache = session(store);
+    await cache.start();
+
+    expect(await cache.duetEntryKey()).toBeNull();
+    expect(await cache.readCachedDuet()).toBeNull();
+    expect(store.duetReads).toBe(0);
+  });
+
+  it('writes the helper result and keeps a cache failure out of the pair', async () => {
+    const store = new FakeStore();
+    const entry = seedEntry(VIDEO, {
+      formatVersion: CACHE_FORMAT_VERSION,
+      durationFrames: 40,
+    });
+    store.entry = entry;
+    store.stems = cachedStems(entry);
+    const cache = session(store);
+    await cache.start();
+
+    const voice1 = new Float32Array(40);
+    const voice2 = new Float32Array(40);
+    const map = { anchors: [{ voice: 1, start: 1, end: 2 }] };
+    expect(await cache.writeCachedDuet([voice1, voice2], map)).toBe(true);
+    expect(store.duetWrites).toEqual([
+      {
+        key: entry.key,
+        input: {
+          voices: [voice1, voice2],
+          map,
+          helperVersion: expect.any(String),
+          duetFormatVersion: DUET_FORMAT_VERSION,
+        },
+      },
+    ]);
+
+    store.duetWriteFails = true;
+    expect(await cache.writeCachedDuet([voice1, voice2], map)).toBe(false);
   });
 });

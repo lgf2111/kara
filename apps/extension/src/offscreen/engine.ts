@@ -26,7 +26,7 @@ import { encodeWavMono } from '../audio/wav.ts';
 import { IDLE_MIC_STATUS, type MicFx } from '../audio/mic-fx.ts';
 import type { PracticeNote } from '../audio/practice.ts';
 import { SONG_ANALYSIS_RATE } from '../audio/song-analysis.ts';
-import { prepareCache, stemCache } from '../cache/index.ts';
+import { duetLowConfidenceOf, prepareCache, stemCache } from '../cache/index.ts';
 import type { CachedStems } from '../cache/entry.ts';
 import type { CacheStatus } from '../cache/status.ts';
 import { MicRoom } from './mic-room.ts';
@@ -495,6 +495,8 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
   let duetJobId: string | null = null;
   let duetClient: DuetClient | null = null;
   let duetTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The complete cache entry for this song, or null when it has none. */
+  let duetCacheKey: string | null = null;
   /** The vocal stem, kept as mono so it can be uploaded for the second pass. */
   let vocalsMono: Float32Array | null = null;
   /** The opt-in practice desk, or null when nobody has asked for it. */
@@ -881,11 +883,8 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     }
   };
 
-  const loadDuetResult = async (): Promise<void> => {
-    if (duetJobId === null || duetClient === null) {
-      throw new Error('the helper job is gone');
-    }
-    const [voice1, voice2] = await duetClient.voices(duetJobId, sampleCount);
+  /** Hands a pair to the player exactly as the helper result always has. */
+  const playDuetPair = (voice1: Float32Array, voice2: Float32Array): void => {
     toPlayer({ type: 'duet', voice1, voice2 }, [
       voice1.buffer as ArrayBuffer,
       voice2.buffer as ArrayBuffer,
@@ -897,13 +896,31 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       gains: duetGains(duet.mix),
       seconds: FADE_SECONDS,
     });
-    const low = await duetClient.lowConfidence(duetJobId);
+  };
+
+  const loadDuetResult = async (): Promise<void> => {
+    if (duetJobId === null || duetClient === null) {
+      throw new Error('the helper job is gone');
+    }
+    const [voice1, voice2] = await duetClient.voices(duetJobId, sampleCount);
+    // The player takes ownership of these arrays, so the cache gets its own
+    // copies before the transfer. Only when there is an entry to write into.
+    const cacheVoices: [Float32Array, Float32Array] | null =
+      duetCacheKey === null ? null : [voice1.slice(), voice2.slice()];
+    playDuetPair(voice1, voice2);
+    const map = await duetClient.map(duetJobId);
+    if (cacheVoices !== null && map !== null) {
+      // The sidecar is a convenience; the pair is already playing. Without a
+      // map there is nothing worth remembering over a previous sidecar.
+      void cacheSession.writeCachedDuet(cacheVoices, map.map);
+    }
     setDuet({
       state: 'ready',
       progress: null,
       detail: null,
       hasVoices: true,
-      lowConfidenceSeconds: low,
+      lowConfidenceSeconds: map?.lowConfidenceSeconds ?? null,
+      source: 'helper',
     });
   };
 
@@ -949,6 +966,23 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
         return;
       }
       try {
+        // A pair already in the sidecar is the whole result: no helper, no
+        // network, and no token needed. This comes before the token check on
+        // purpose, so a replay works while the helper is not running.
+        duetCacheKey = await cacheSession.duetEntryKey();
+        const cached = await cacheSession.readCachedDuet();
+        if (cached !== null && cached.frames === sampleCount) {
+          playDuetPair(cached.voice1, cached.voice2);
+          setDuet({
+            state: 'ready',
+            progress: null,
+            detail: 'Loaded from cache.',
+            hasVoices: true,
+            lowConfidenceSeconds: duetLowConfidenceOf(cached.quality),
+            source: 'cache',
+          });
+          return;
+        }
         const config = duetConfig;
         if (config.token.length === 0) {
           setDuet({
@@ -964,6 +998,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
           detail: 'Uploading the vocal stem',
           hasVoices: duetActive,
           lowConfidenceSeconds: null,
+          source: duetActive ? duet.source : null,
         });
         const wav = encodeWavMono(vocalsMono, context.sampleRate);
         duetJobId = await duetClient.start(wav);
@@ -1025,6 +1060,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     duetJobId = null;
     duetClient = null;
     duetActive = false;
+    duetCacheKey = null;
     toPlayer({ type: 'duet-clear' });
     duet = IDLE_DUET;
     sendMix();
@@ -1896,6 +1932,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       duetJobId = null;
       duetClient = null;
       duetActive = false;
+      duetCacheKey = null;
       vocalsMono = null;
       toPlayer({ type: 'stop' });
       const running = worker;

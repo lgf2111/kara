@@ -187,6 +187,7 @@ export {
 export {
   DUET_FORMAT_VERSION,
   MAX_DUET_MAP_BYTES,
+  duetLowConfidenceOf,
   type CachedDuet,
   type CachedDuetInput,
   type CachedDuetMeta,

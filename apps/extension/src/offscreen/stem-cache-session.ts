@@ -1,3 +1,4 @@
+import { DUET_HELPER_VERSION } from '../audio/duet.ts';
 import type { PracticeNote } from '../audio/practice.ts';
 import type { SongFacts } from '../audio/song-analysis.ts';
 import { STEMS } from '../audio/stems.ts';
@@ -7,6 +8,14 @@ import {
   type CachedEntry,
   type CachedStems,
 } from '../cache/entry.ts';
+import {
+  DUET_FORMAT_VERSION,
+  type CachedDuet,
+  type CachedDuetInput,
+  type DuetExpectation,
+  type DuetMap,
+  type DuetVoices,
+} from '../cache/duet.ts';
 import type { CacheStatus } from '../cache/status.ts';
 import type { CacheEntryQuery, StemWriter } from '../cache/store.ts';
 
@@ -50,7 +59,19 @@ export interface StemCacheStore {
   markPlayed(key: string): Promise<void>;
   /** Drops older entries for the same video after a fresh write wins. */
   removeConflicts(query: CacheEntryQuery, keepKey: string): Promise<number>;
+  hasCachedDuet(key: string, expectation?: DuetExpectation): Promise<boolean>;
+  readCachedDuet(
+    key: string,
+    expectation?: DuetExpectation,
+  ): Promise<CachedDuet | null>;
+  writeCachedDuet(key: string, input: CachedDuetInput): Promise<CachedEntry>;
 }
+
+/** The helper version and sidecar format this build expects. */
+const DUET_EXPECTATION: DuetExpectation = {
+  helperVersion: DUET_HELPER_VERSION,
+  duetFormatVersion: DUET_FORMAT_VERSION,
+};
 
 export interface StemCacheSessionOptions {
   readonly cache: StemCacheStore;
@@ -118,6 +139,64 @@ export class StemCacheSession {
   /** The entry this session is reading or writing, once it is known. */
   entryKey(): string | null {
     return this.key;
+  }
+
+  /**
+   * The key of a complete entry, or null when there is not one to write a
+   * duet into. A write that is already closing is awaited: the song is ready
+   * by the time Duet can start, and its entry is usually moments away.
+   */
+  async duetEntryKey(): Promise<string | null> {
+    if (this.entry !== null) {
+      return this.entry.key;
+    }
+    if (this.finished !== null) {
+      const entry = await this.finished;
+      return entry?.key ?? null;
+    }
+    return this.savedEntry?.key ?? null;
+  }
+
+  /**
+   * The cached pair for this session's entry, or null for the ordinary helper
+   * path. A version mismatch, a missing sidecar and a corrupt one are all the
+   * same answer: miss.
+   */
+  async readCachedDuet(): Promise<CachedDuet | null> {
+    const key = await this.duetEntryKey();
+    if (key === null) {
+      return null;
+    }
+    try {
+      if (!(await this.cache.hasCachedDuet(key, DUET_EXPECTATION))) {
+        return null;
+      }
+      return await this.cache.readCachedDuet(key, DUET_EXPECTATION);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Stores a helper result beside the stems. The result is already playing by
+   * now, so a cache failure is reported as false and nothing else.
+   */
+  async writeCachedDuet(voices: DuetVoices, map: DuetMap): Promise<boolean> {
+    const key = await this.duetEntryKey();
+    if (key === null) {
+      return false;
+    }
+    try {
+      await this.cache.writeCachedDuet(key, {
+        voices,
+        map,
+        helperVersion: DUET_HELPER_VERSION,
+        duetFormatVersion: DUET_FORMAT_VERSION,
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private set(next: CacheStatus): void {

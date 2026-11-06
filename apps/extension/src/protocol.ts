@@ -36,7 +36,14 @@ export type { MediaSample } from './audio/media-time.ts';
 export type { PlayMode } from './audio/mix-gain.ts';
 export type { PrepareProgress, PrepareStage } from './audio/progress.ts';
 export type { Status } from './audio/status.ts';
-export type { DuetMix, DuetPhase, DuetProgress, DuetState, DuetStatus } from './audio/duet.ts';
+export type {
+  DuetMix,
+  DuetPhase,
+  DuetProgress,
+  DuetSource,
+  DuetState,
+  DuetStatus,
+} from './audio/duet.ts';
 export type { MicFx, MicStatus } from './audio/mic-fx.ts';
 export type { RecordingState, RecordingStatus } from './audio/recording.ts';
 export type {
