@@ -231,7 +231,8 @@
       }
       #duet,
       #practice-permission,
-      #scores {
+      #scores,
+      #cache {
         margin-top: 12px;
         padding: 10px;
         border: 1px solid var(--kara-border);
@@ -307,6 +308,26 @@
         background: var(--kara-accent-tint);
       }
       #mic-status {
+        margin-top: 7px;
+      }
+      #cache-clear {
+        width: 100%;
+        height: var(--kara-control);
+        margin-top: 8px;
+        border-color: var(--kara-border-strong);
+        color: var(--kara-muted);
+        font-size: 11px;
+        font-weight: 650;
+      }
+      #cache-clear:hover {
+        border-color: var(--kara-danger);
+        color: var(--kara-danger);
+      }
+      #cache-clear:disabled:hover {
+        border-color: var(--kara-border-strong);
+        color: var(--kara-muted);
+      }
+      #cache-status {
         margin-top: 7px;
       }
       .singer-field {
@@ -602,6 +623,13 @@
         <h3 class="score-heading">Recent</h3>
         <ol id="scores-recent" class="score-list"></ol>
       </div>
+    </section>
+
+    <section id="cache" aria-label="Stem cache">
+      <h2 class="section-title">Stem cache</h2>
+      <p id="cache-usage" class="hint">Checking…</p>
+      <button id="cache-clear" type="button" disabled>Clear cache</button>
+      <p id="cache-status" class="hint" role="status" aria-live="polite" hidden></p>
     </section>
 
     <section id="duet" aria-label="Duet helper">

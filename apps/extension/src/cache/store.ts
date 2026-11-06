@@ -1,10 +1,13 @@
 import { STEMS, isStem, type Stem } from '../audio/stems.ts';
+import { normalisePracticeNotes, type PracticeNote } from '../audio/practice.ts';
+import { normaliseSongFacts, type SongFacts } from '../audio/song-analysis.ts';
 import {
   CACHE_ENTRY_LIMIT_BYTES,
   CACHE_LIMIT_BYTES,
   CACHE_TTL_MS,
   MAX_CACHE_ARTIST_LENGTH,
   MAX_CACHE_TITLE_LENGTH,
+  MAX_CACHED_PRACTICE_NOTES,
   cacheKey,
   compareForEviction,
   compareForListing,
@@ -85,6 +88,19 @@ export interface CacheUsage {
   readonly bytes: number;
   readonly count: number;
   readonly limitBytes: number;
+}
+
+/**
+ * Everything the engine knows before it reads the stream, except the frame
+ * count that is only known after decoding. The lookup therefore returns null
+ * when more than one entry matches: two frame counts for one video are two
+ * different files, and picking one would be a guess.
+ */
+export interface CacheEntryQuery {
+  readonly videoId: string;
+  readonly modelVersion: string;
+  readonly formatVersion: number;
+  readonly sampleRate: number;
 }
 
 export interface StemCacheOptions {
@@ -314,6 +330,79 @@ export class StemCache {
     }
   }
 
+  /**
+   * The one entry for a video's audio, or null.
+   *
+   * The key also carries the frame count, which is not known until the stream
+   * has been decoded. So the record is found by the fields the engine does
+   * know, and only accepted when exactly one entry matches. Two entries with
+   * different lengths are two different decodes of the same video; playing
+   * either under the other's clock would be a guess.
+   */
+  async findEntry(query: CacheEntryQuery): Promise<CachedEntry | null> {
+    const videoId = query.videoId.trim();
+    const modelVersion = query.modelVersion.trim();
+    if (
+      videoId === '' ||
+      modelVersion === '' ||
+      !isInteger(query.formatVersion, 0) ||
+      !isInteger(query.sampleRate, 8000) ||
+      query.sampleRate > 384000
+    ) {
+      return null;
+    }
+    try {
+      const matches = (await this.readEntries()).filter(
+        (entry) =>
+          entry.videoId === videoId &&
+          entry.modelVersion === modelVersion &&
+          entry.formatVersion === query.formatVersion &&
+          entry.sampleRate === query.sampleRate,
+      );
+      return matches.length === 1 ? (matches[0] as CachedEntry) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Removes the other decodes of one video after a fresh write supersedes
+   * them.
+   *
+   * Two entries for the same video, model, format and rate can disagree on
+   * length when the page serves a differently padded encoding. Lookup refuses
+   * to guess between them, so the next successful separation replaces the
+   * stale copies instead of leaving every later start a miss.
+   */
+  async removeConflicts(query: CacheEntryQuery, keepKey: string): Promise<number> {
+    const videoId = query.videoId.trim();
+    const modelVersion = query.modelVersion.trim();
+    return this.serial(async () => {
+      const entries = await this.readEntries();
+      const stale = entries.filter(
+        (entry) =>
+          entry.key !== keepKey &&
+          entry.videoId === videoId &&
+          entry.modelVersion === modelVersion &&
+          entry.formatVersion === query.formatVersion &&
+          entry.sampleRate === query.sampleRate,
+      );
+      if (stale.length === 0) {
+        return 0;
+      }
+      for (const entry of stale) {
+        try {
+          await this.files.remove(entry.key);
+        } catch {
+          // The record goes either way; cleanup can remove an orphan.
+        }
+      }
+      const staleKeys = new Set(stale.map((entry) => entry.key));
+      await this.writeEntries(entries.filter((entry) => !staleKeys.has(entry.key)));
+      return stale.length;
+    });
+  }
+
   async usage(): Promise<CacheUsage> {
     let entries: CachedEntry[] = [];
     try {
@@ -337,6 +426,50 @@ export class StemCache {
 
   async markPlayed(key: string): Promise<void> {
     await this.serial(() => this.updateEntry(key, true)).catch(() => undefined);
+  }
+
+  /**
+   * Adds the Song card's facts to an existing entry, and nothing else.
+   *
+   * Analysis finishes after the stems are already written, so this is a small
+   * metadata-only update. A missing entry is not an error: the session may
+   * have stopped between the two, and the next play will analyse again.
+   */
+  async saveAnalysis(key: string, facts: SongFacts): Promise<boolean> {
+    const clean = normaliseSongFacts(facts);
+    return this.serial(() => this.setExtrasLocked(key, { analysis: clean }));
+  }
+
+  /** Adds the learnt guide melody to an existing entry, and nothing else. */
+  async savePracticeNotes(
+    key: string,
+    notes: readonly PracticeNote[],
+  ): Promise<boolean> {
+    const clean = normalisePracticeNotes(notes);
+    if (clean.length > MAX_CACHED_PRACTICE_NOTES) {
+      return false;
+    }
+    return this.serial(() => this.setExtrasLocked(key, { practiceNotes: clean }));
+  }
+
+  private async setExtrasLocked(
+    key: string,
+    patch: Pick<CachedEntry, 'analysis' | 'practiceNotes'>,
+  ): Promise<boolean> {
+    const entries = await this.readEntries();
+    const index = entries.findIndex((entry) => entry.key === key);
+    if (index < 0) {
+      return false;
+    }
+    const current = entries[index];
+    if (current === undefined) {
+      return false;
+    }
+    const next: CachedEntry = { ...current, ...patch };
+    const updated = [...entries];
+    updated[index] = next;
+    await this.writeEntries(updated);
+    return true;
   }
 
   private async updateEntry(key: string, played: boolean): Promise<void> {

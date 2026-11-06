@@ -5,8 +5,8 @@ import type { CachedEntry } from './entry.ts';
  *
  * Kept apart from the Chrome implementation so that the store and its tests
  * never need the `chrome` namespace in their program: the Node test project
- * type-checks everything the tests import, and it deliberately has no
- * extension globals.
+ * deliberately has no extension globals, and only the engine integration test
+ * opts into them for the one file it imports.
  */
 export interface CacheMetadata {
   /** Whatever is under the key, or null when it has never been written. */

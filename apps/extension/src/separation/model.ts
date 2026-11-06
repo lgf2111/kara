@@ -10,6 +10,15 @@
 
 export { SAMPLE_RATE, SEGMENT_SAMPLES } from '../../../web/src/separation/htdemucs.ts';
 
+/**
+ * The separation model, as the cache knows it.
+ *
+ * It is part of every cache key: a different model is different stems even
+ * when the video is the same. Kept as its own name here so the engine does not
+ * import the web app's runner (and onnxruntime with it) just to spell it.
+ */
+export const SEPARATION_MODEL_VERSION = 'htdemucs-web';
+
 /** Where the graph's pieces sit inside the packed extension. */
 export const WEIGHTS_PATH = 'weights/htdemucs-web';
 

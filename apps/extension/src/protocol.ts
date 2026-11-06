@@ -6,6 +6,7 @@ import type { Status } from './audio/status.ts';
 import { IDLE_DUET, type DuetMix, type DuetStatus } from './audio/duet.ts';
 import { IDLE_MIC_STATUS, type MicFx, type MicStatus } from './audio/mic-fx.ts';
 import { DEFAULT_MIX, type StemMix } from './audio/stems.ts';
+import type { CacheStatus } from './cache/status.ts';
 import type { PracticeAnalysis, PracticeLive } from './audio/practice.ts';
 import type { SongAnalysis } from './audio/song-analysis.ts';
 import type { Backend } from '../../web/src/separation/protocol.ts';
@@ -241,6 +242,11 @@ export interface StatusReport {
   /** The key the stems are played in, in whole semitones. */
   readonly semitones: number;
   /**
+   * What the stem cache did for this session: checking, hit, miss, writing,
+   * ready or error. Null before a session has looked.
+   */
+  readonly cache?: CacheStatus | null;
+  /**
    * How many seconds from the start have their stems ready. Separation runs
    * from the beginning outwards, so this is a prefix rather than a list of
    * ranges; the page draws it on the progress bar. Null before any block.
@@ -382,6 +388,7 @@ export const IDLE_REPORT: StatusReport = {
   duet: IDLE_DUET,
   mic: IDLE_MIC_STATUS,
   semitones: KEY_DEFAULT,
+  cache: null,
   analyzedSeconds: null,
   videoId: null,
   durationSeconds: null,

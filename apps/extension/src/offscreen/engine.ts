@@ -26,8 +26,16 @@ import { encodeWavMono } from '../audio/wav.ts';
 import { IDLE_MIC_STATUS, type MicFx } from '../audio/mic-fx.ts';
 import type { PracticeNote } from '../audio/practice.ts';
 import { SONG_ANALYSIS_RATE } from '../audio/song-analysis.ts';
+import { prepareCache, stemCache } from '../cache/index.ts';
+import type { CachedStems } from '../cache/entry.ts';
+import type { CacheStatus } from '../cache/status.ts';
 import { MicRoom } from './mic-room.ts';
 import { startPractice as startPracticeSession, type PracticeHandle } from './practice.ts';
+import {
+  StemCacheSession,
+  type CacheStart,
+  type StemCacheStore,
+} from './stem-cache-session.ts';
 import type {
   SongAnalysisCommand,
   SongAnalysisEvent,
@@ -42,7 +50,7 @@ import {
   type StageTimings,
 } from '../audio/progress.ts';
 import { IDLE, nextStatus, type StatusEvent, type StatusState } from '../audio/status.ts';
-import { DEFAULT_MIX, mixGains, normaliseMix, type StemMix } from '../audio/stems.ts';
+import { DEFAULT_MIX, mixGains, normaliseMix, STEMS, type StemMix } from '../audio/stems.ts';
 import {
   STEM_PLAYER_PROCESSOR,
   type StemPlayerCommand,
@@ -51,7 +59,7 @@ import {
 import { wallNowMs } from '../picture/wall-clock.ts';
 import { reasonText } from '../reason.ts';
 import type { SeparatorCommand, SeparatorEvent } from '../separation/messages.ts';
-import { SAMPLE_RATE } from '../separation/model.ts';
+import { SAMPLE_RATE, SEPARATION_MODEL_VERSION } from '../separation/model.ts';
 import type {
   Metrics,
   PipelineDebug,
@@ -139,6 +147,13 @@ export interface EngineOptions {
   readonly key?: number;
   /** Taps the output with an `AnalyserNode`, for the debug harness only. */
   readonly analyse?: boolean;
+  /**
+   * The stem cache. The extension's OPFS cache by default; a test passes a
+   * fake so a hit needs no filesystem or WebCodecs.
+   */
+  readonly cache?: StemCacheStore;
+  /** The maintenance pass before a lookup. Defaults to the real cache's. */
+  readonly prepareCache?: () => Promise<void>;
   readonly onStatus: (report: StatusReport) => void;
   readonly onMetrics: (metrics: Metrics) => void;
   /** Practice analysis and live reports, when a person has opted in. */
@@ -456,6 +471,8 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
   };
 
   let state: StatusState = nextStatus(IDLE, { type: 'start' });
+  /** What the stem cache did, for the report and the panel. */
+  let cacheStatus: CacheStatus | null = null;
   // Karaoke is what the button is for: a session that comes up with the vocal
   // still in it would look like the extension had done nothing.
   let mode: PlayMode = options.mode ?? 'instrumental';
@@ -608,6 +625,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     duet,
     mic: mic?.status() ?? IDLE_MIC_STATUS,
     semitones,
+    cache: cacheStatus,
     analyzedSeconds: stemEnd > 0 ? stemEnd / SAMPLE_RATE : null,
     videoId: options.stream.videoId,
     durationSeconds,
@@ -616,6 +634,27 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
   const tellStatus = (): void => {
     options.onStatus(report());
   };
+
+  /**
+   * The cache as this session sees it. It reports through the same status
+   * channel as everything else, so the panel's one cache row needs no second
+   * subscription.
+   */
+  const cacheSession = new StemCacheSession({
+    cache: options.cache ?? stemCache(),
+    videoId: options.stream.videoId,
+    modelVersion: SEPARATION_MODEL_VERSION,
+    sampleRate: context.sampleRate,
+    title: '',
+    artist: '',
+    onStatus: (status) => {
+      cacheStatus = status;
+      if (!stopped) {
+        tellStatus();
+      }
+    },
+  });
+  let cacheAvailable = true;
 
   /**
    * The microphone desk lives beside the stems and records through its own
@@ -1045,6 +1084,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
           report.notes !== null
         ) {
           practiceNotes = report.notes;
+          void cacheSession.savePracticeNotes(report.notes);
         }
         options.onPractice?.(report);
       },
@@ -1150,6 +1190,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
             facts: message.facts,
             detail: null,
           });
+          void cacheSession.saveAnalysis(message.facts);
           return;
         case 'failed':
           failSongAnalysis(message.reason);
@@ -1214,7 +1255,158 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     analysisBuffers = null;
   };
 
+  /**
+   * Rebuilds the song-analysis inputs from cached stems.
+   *
+   * This is the fallback for an entry whose analysis was never written — the
+   * session stopped before the worker finished, or the entry predates the
+   * cached facts. It is a bounded downmix, not a second separation: the four
+   * stems are already here.
+   */
+  const buildCachedAnalysisInputs = (stems: CachedStems): void => {
+    const frames = stems.frames;
+    const analysisFrames = Math.max(
+      1,
+      Math.ceil(frames / (context.sampleRate / SONG_ANALYSIS_RATE)) + 1,
+    );
+    const buffers: AnalysisBuffers = {
+      harmonic: new Float32Array(analysisFrames),
+      percussive: new Float32Array(analysisFrames),
+      vocals: new Float32Array(analysisFrames),
+      harmonicCounts: new Float32Array(analysisFrames),
+      percussiveCounts: new Float32Array(analysisFrames),
+      vocalCounts: new Float32Array(analysisFrames),
+    };
+    const chunkFrames = Math.round(CHUNK_SECONDS * context.sampleRate);
+    for (let start = 0; start < frames; start += chunkFrames) {
+      const length = Math.min(chunkFrames, frames - start);
+      appendAnalysisBlock(
+        [
+          [stems.stems.bass.left, stems.stems.bass.right],
+          [stems.stems.other.left, stems.stems.other.right],
+          [stems.stems.vocals.left, stems.stems.vocals.right],
+        ],
+        start,
+        length,
+        buffers.harmonic,
+        buffers.harmonicCounts,
+        context.sampleRate,
+      );
+      appendAnalysisBlock(
+        [[stems.stems.drums.left, stems.stems.drums.right]],
+        start,
+        length,
+        buffers.percussive,
+        buffers.percussiveCounts,
+        context.sampleRate,
+      );
+      appendAnalysisBlock(
+        [[stems.stems.vocals.left, stems.stems.vocals.right]],
+        start,
+        length,
+        buffers.vocals,
+        buffers.vocalCounts,
+        context.sampleRate,
+      );
+    }
+    analysisBuffers = buffers;
+    sealAnalysisInputs();
+  };
+
+  /**
+   * A hit: the four decoded stems go straight into the player.
+   *
+   * Nothing is fetched, decoded or separated, and no model worker is made.
+   * The copies the player needs are the cached arrays themselves; the vocal
+   * mono and the analysis inputs are built before the transfer detaches them.
+   */
+  const loadCachedSession = (hit: Extract<CacheStart, { kind: 'hit' }>): void => {
+    const { entry, stems } = hit;
+    sampleCount = stems.frames;
+    durationSeconds = sampleCount / context.sampleRate;
+
+    const vocalChannels = stems.stems.vocals;
+    vocalsMono = new Float32Array(sampleCount);
+    for (let frame = 0; frame < sampleCount; frame += 1) {
+      vocalsMono[frame] =
+        ((vocalChannels.left[frame] ?? 0) + (vocalChannels.right[frame] ?? 0)) / 2;
+    }
+
+    // An empty note list is a real cached answer, but passing it to practice
+    // would skip the analysis and leave the singer with nothing; treat it as
+    // "not cached" so the bounded vocal pass runs instead.
+    practiceNotes =
+      entry.practiceNotes !== undefined &&
+      entry.practiceNotes !== null &&
+      entry.practiceNotes.length > 0
+        ? entry.practiceNotes
+        : null;
+
+    const cachedFacts = entry.analysis ?? null;
+    if (cachedFacts === null) {
+      // The downmix reads the stems, so it has to happen before the transfer.
+      buildCachedAnalysisInputs(stems);
+    }
+
+    const channels: Float32Array[] = [];
+    for (const stem of STEMS) {
+      channels.push(stems.stems[stem].left, stems.stems[stem].right);
+    }
+    toPlayer(
+      { type: 'stems', channels },
+      channels.map((channel) => channel.buffer as ArrayBuffer),
+    );
+    sendMix();
+    sendMaster();
+    sendKey();
+    startClock();
+    stemEnd = sampleCount;
+    metrics = { ...metrics, stemFrames: sampleCount };
+    if (latest !== null) {
+      follow(latest);
+    }
+    moveTo({ type: 'prepared' });
+    if (latest !== null && !latest.playing) {
+      moveTo({ type: 'hold' });
+    }
+    // After the status, so the page already knows which video this is: a
+    // song-analysis report that loses that race is ignored as stale.
+    if (cachedFacts !== null) {
+      songAnalysisDone = true;
+      tellSongAnalysis({
+        type: 'song-analysis',
+        videoId: options.stream.videoId,
+        state: 'ready',
+        progress: 1,
+        facts: cachedFacts,
+        detail: null,
+      });
+    } else {
+      maybeStartSongAnalysis();
+    }
+    void cacheSession.markPlayed();
+  };
+
   try {
+    cacheStatus = { state: 'checking', bytes: null, detail: null };
+    tellStatus();
+    try {
+      await (options.prepareCache ?? prepareCache)();
+    } catch {
+      cacheAvailable = false;
+      cacheStatus = {
+        state: 'error',
+        bytes: null,
+        detail: 'Cache unavailable.',
+      };
+      tellStatus();
+    }
+    const cached = cacheAvailable
+      ? await cacheSession.start()
+      : ({ kind: 'miss' } as const);
+    if (cached.kind === 'hit') {
+      loadCachedSession(cached);
+    } else {
     const contentLength = Number(options.stream.contentLength);
     const wantedTotal = Number.isFinite(contentLength) && contentLength > 0 ? contentLength : null;
     const read = await readWholeStream(options.stream.url, wantedTotal, (fact) => {
@@ -1247,6 +1439,11 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     };
     timings.downloadSeconds = (wallNowMs() - startedAt) / 1000;
     metrics = { ...metrics, downloadBytes: downloadedBytes, downloadTotal: totalBytes };
+    // The frame count is known now, so the cache key is too. A cache failure
+    // from here on is a status line, never a reason to stop the separation.
+    if (cacheAvailable) {
+      cacheSession.beginWrite(sampleCount);
+    }
 
     // The player allocates the whole track now and is filled block by block
     // as the separation reaches it. It can start on the first block instead
@@ -1347,6 +1544,12 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
               context.sampleRate,
             );
           }
+          // Copy the block into the cache before the originals are handed to
+          // the player. The copy is the only extra work on this path, and the
+          // encode happens on the session's own queue.
+          if (cacheAvailable) {
+            cacheSession.appendBlock(message.startSample, channels);
+          }
           // Straight on to the player, which copies it into its own track.
           // The offscreen document does not keep a second set of stems.
           toPlayer(
@@ -1376,11 +1579,13 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
           handStems();
           return;
         case 'failed':
+          void cacheSession.abort();
           moveTo({ type: 'error', reason: message.reason });
           return;
       }
     });
     separation.addEventListener('error', () => {
+      void cacheSession.abort();
       moveTo({ type: 'error', reason: 'the separation worker stopped' });
     });
 
@@ -1421,6 +1626,12 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
         moveTo({ type: 'error', reason: 'the separated audio ended early' });
         return;
       }
+      // Every block is in and the player has the whole track: the cache can
+      // close its writer now. This runs beside the transition to ready rather
+      // than in front of it.
+      if (cacheAvailable) {
+        void cacheSession.finish();
+      }
       // The frontier covers the whole track now, which may have just made the
       // stems usable at the current playhead.
       if (latest !== null) {
@@ -1443,6 +1654,8 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       }
     }
 
+    tellStatus();
+    }
     player.port.onmessage = (event: MessageEvent<StemPlayerReport>) => {
       if (stopped) {
         return;
@@ -1459,8 +1672,8 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       tellMetrics();
     };
 
-    tellStatus();
   } catch (cause) {
+    void cacheSession.abort();
     moveTo({ type: 'error', reason: reasonText(cause) });
   }
 
@@ -1646,6 +1859,9 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
         return;
       }
       stopped = true;
+      // A half-written entry is removed; one already closing is allowed to
+      // finish, because a complete song is worth the few milliseconds.
+      void cacheSession.abort();
       stopDuetPolling();
       stopPractice();
       if (routeTimer !== null) {

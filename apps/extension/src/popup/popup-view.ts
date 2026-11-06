@@ -8,6 +8,11 @@ import {
   type StemMix,
 } from '../audio/stems.ts';
 import { prepareDetail } from '../content/panel-view.ts';
+import {
+  cacheStatusLabel,
+  formatBytes,
+  normaliseCacheStatus,
+} from '../cache/status.ts';
 import type { PipelineDebug, StatusReport } from '../protocol.ts';
 
 /**
@@ -67,6 +72,67 @@ export interface PopupView {
   readonly diagnostics: PopupDiagnostics | null;
 }
 
+/** What the popup's cache section needs to know about the store. */
+export interface CacheUsageFacts {
+  readonly bytes: number;
+  readonly count: number;
+  readonly limitBytes: number;
+}
+
+export interface CacheUsageView {
+  /** `Cached: 14.8 MB · 1 song` or `Cache unavailable.` */
+  readonly label: string;
+  /** The line under it, when there is something useful to add. */
+  readonly detail: string | null;
+  readonly clearLabel: string;
+  readonly clearDisabled: boolean;
+}
+
+export interface CacheUsageOptions {
+  readonly busy?: boolean;
+  readonly running?: boolean;
+}
+
+/**
+ * The popup's small cache readout.
+ *
+ * Clearing is refused while a session runs: the offscreen document may be
+ * writing the very entry being cleared. It is also refused with nothing
+ * cached, because a button that does nothing is worse than no button.
+ */
+export function cacheUsageView(
+  usage: CacheUsageFacts | null,
+  options: CacheUsageOptions = {},
+): CacheUsageView {
+  if (usage === null) {
+    return {
+      label: 'Cache unavailable.',
+      detail: 'Separated stems could not be read from storage.',
+      clearLabel: 'Clear cache',
+      clearDisabled: true,
+    };
+  }
+  const busy = options.busy === true;
+  const running = options.running === true;
+  const label =
+    usage.count === 0
+      ? 'Cached: 0 B'
+      : `Cached: ${formatBytes(usage.bytes)} · ${String(usage.count)} song${
+          usage.count === 1 ? '' : 's'
+        }`;
+  const detail = running
+    ? 'Stop the session before clearing the cache.'
+    : usage.count === 0
+      ? 'Separated stems are saved here; scores and settings are not.'
+      : `Up to ${formatBytes(usage.limitBytes)} of separated stems. Scores and settings are not touched.`;
+  return {
+    label,
+    detail,
+    clearLabel: busy ? 'Clearing…' : 'Clear cache',
+    clearDisabled: busy || running || usage.count === 0,
+  };
+}
+
 export interface PopupInput {
   /** The last report for this tab, or null when there is none. */
   readonly report: StatusReport | null;
@@ -123,16 +189,7 @@ function vocalNote(mix: StemMix): string {
 }
 
 function sizeText(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) {
-    return '0 B';
-  }
-  if (bytes >= 1_000_000) {
-    return `${(bytes / 1_000_000).toFixed(1)} MB`;
-  }
-  if (bytes >= 1_000) {
-    return `${String(Math.round(bytes / 1_000))} KB`;
-  }
-  return `${String(Math.round(bytes))} B`;
+  return formatBytes(bytes);
 }
 
 function downloadText(done: number, total: number | null): string {
@@ -209,6 +266,10 @@ function diagnosticsOf(
         },
         { label: 'Analysed', value: clockText(report?.analyzedSeconds ?? null) },
         { label: 'Length', value: clockText(report?.durationSeconds ?? null) },
+        {
+          label: 'Cache',
+          value: cacheStatusLabel(normaliseCacheStatus(report?.cache ?? null)) ?? '—',
+        },
       ],
     },
     {

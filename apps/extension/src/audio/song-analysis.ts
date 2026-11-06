@@ -690,18 +690,14 @@ export function analyseSong(
 }
 
 /**
- * An analysis report from the offscreen document, made safe for the page.
+ * The facts out of a report or a cached entry, with every number bounded.
  *
- * Everything is bounded the way the panel draws it: a tonic is a pitch class,
- * a range is inside MIDI, and a malformed field falls back to "not known"
- * rather than to a guess.
+ * A malformed field falls back to "not known" rather than to a guess. The
+ * result itself is never null: a song with no clear key, tempo or range is a
+ * real analysis result, and the card draws question marks for it.
  */
-export function normaliseSongAnalysis(raw: unknown): SongAnalysis {
-  const stored = recordOf(raw);
-  const state =
-    stored['state'] === 'ready' || stored['state'] === 'error' ? stored['state'] : 'analyzing';
-  const progress = numberOrNull(stored['progress']);
-  const facts = recordOf(stored['facts']);
+export function normaliseSongFacts(raw: unknown): SongFacts {
+  const facts = recordOf(raw);
 
   const keyStored = recordOf(facts['key']);
   const tonic = numberOrNull(keyStored['tonic']);
@@ -737,18 +733,26 @@ export function normaliseSongAnalysis(raw: unknown): SongAnalysis {
           frames: Math.max(0, Math.round(numberOrNull(rangeStored['frames']) ?? 0)),
         };
 
+  return { key, bpm, bpmConfidence, range };
+}
+
+/**
+ * An analysis report from the offscreen document, made safe for the page.
+ *
+ * Everything is bounded the way the panel draws it: a tonic is a pitch class,
+ * a range is inside MIDI, and a malformed field falls back to "not known"
+ * rather than to a guess.
+ */
+export function normaliseSongAnalysis(raw: unknown): SongAnalysis {
+  const stored = recordOf(raw);
+  const state =
+    stored['state'] === 'ready' || stored['state'] === 'error' ? stored['state'] : 'analyzing';
+  const progress = numberOrNull(stored['progress']);
+
   return {
     state,
     progress: progress === null ? null : clamp(progress, 0, 1),
-    facts:
-      state === 'ready'
-        ? {
-            key,
-            bpm,
-            bpmConfidence,
-            range,
-          }
-        : null,
+    facts: state === 'ready' ? normaliseSongFacts(stored['facts']) : null,
     detail:
       typeof stored['detail'] === 'string' && stored['detail'] !== '' ? stored['detail'] : null,
   };

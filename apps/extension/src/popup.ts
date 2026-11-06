@@ -9,7 +9,9 @@ import {
   stopMicrophone,
 } from './audio/microphone.ts';
 import { debugReportText } from './debug-report.ts';
-import { popupView, type PopupView } from './popup/popup-view.ts';
+import { clearCache, usage as readCacheUsage, type CacheUsage } from './cache/index.ts';
+import { isRunning } from './audio/status.ts';
+import { cacheUsageView, popupView, type PopupView } from './popup/popup-view.ts';
 import {
   SCORE_HISTORY_KEY,
   SCORE_SINGER_KEY,
@@ -102,6 +104,9 @@ const scoresEmpty = need<HTMLParagraphElement>('#scores-empty');
 const scoresBody = need<HTMLDivElement>('#scores-body');
 const scoresBest = need<HTMLOListElement>('#scores-best');
 const scoresRecent = need<HTMLOListElement>('#scores-recent');
+const cacheUsage = need<HTMLParagraphElement>('#cache-usage');
+const cacheClear = need<HTMLButtonElement>('#cache-clear');
+const cacheStatus = need<HTMLParagraphElement>('#cache-status');
 
 let tabId: number | null = null;
 let url: string | undefined;
@@ -117,6 +122,12 @@ let pipeline: PipelineDebug | null = null;
 let diagnosticsOpen = false;
 /** The local score history, newest first once `normaliseScoreHistory` has run. */
 let scores: PracticeRun[] = [];
+/** The stem cache's usage, or null when it could not be read. */
+let cacheStats: CacheUsage | null = null;
+let cacheKnown = true;
+let cacheBusy = false;
+/** A transient clear message, kept above the section's own detail line. */
+let cacheNote: string | null = null;
 
 function send(body: Request): void {
   chrome.runtime.sendMessage(packet('background', body, tabId)).catch(() => undefined);
@@ -228,6 +239,7 @@ function draw(): void {
   } else if (diagnosticsOpen) {
     renderDiagnostics(shown.diagnostics);
   }
+  drawCache();
 }
 
 /** One row of the local leaderboard: rank, song, the words under it, score. */
@@ -284,6 +296,57 @@ function drawScores(): void {
       ),
     ),
   );
+}
+
+/**
+ * The cache section: usage, and one button that removes only the stems.
+ *
+ * It reads the same OPFS index the offscreen document writes. The clear is
+ * refused while a session runs so the popup never deletes the entry being
+ * written; scores and settings live in other stores and are untouched.
+ */
+function drawCache(): void {
+  const view = cacheUsageView(cacheKnown ? cacheStats : null, {
+    busy: cacheBusy,
+    running: report !== null && isRunning(report.status),
+  });
+  cacheUsage.textContent = view.label;
+  cacheClear.disabled = view.clearDisabled;
+  cacheClear.textContent = view.clearLabel;
+  const detail = cacheNote ?? view.detail;
+  cacheStatus.hidden = detail === null;
+  cacheStatus.textContent = detail ?? '';
+}
+
+async function refreshCache(): Promise<void> {
+  try {
+    cacheStats = await readCacheUsage();
+    cacheKnown = true;
+  } catch {
+    cacheStats = null;
+    cacheKnown = false;
+  }
+  drawCache();
+}
+
+function clearStemCache(): void {
+  if (cacheBusy) {
+    return;
+  }
+  cacheBusy = true;
+  cacheNote = 'Clearing the saved stems…';
+  drawCache();
+  void clearCache()
+    .then(() => {
+      cacheNote = 'Saved stems removed. Scores and settings are untouched.';
+    })
+    .catch(() => {
+      cacheNote = 'The cache could not be cleared.';
+    })
+    .finally(() => {
+      cacheBusy = false;
+      void refreshCache();
+    });
 }
 
 /**
@@ -399,6 +462,8 @@ action.addEventListener('click', () => {
 });
 
 copyDebug.addEventListener('click', copyReport);
+
+cacheClear.addEventListener('click', clearStemCache);
 
 /**
  * The microphone permission has to be asked for under a click, and an
@@ -521,6 +586,7 @@ async function open(): Promise<void> {
   scores = history;
   singerName.value = singer;
   drawScores();
+  await refreshCache();
   await loadDuetConfig();
   take((await chrome.storage.session.get(STATUS_KEY))[STATUS_KEY]);
   takeDebug((await chrome.storage.session.get(DEBUG_KEY))[DEBUG_KEY]);

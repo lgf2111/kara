@@ -1,3 +1,7 @@
+import type { PracticeNote } from '../audio/practice.ts';
+import type { SongFacts } from '../audio/song-analysis.ts';
+import { normalisePracticeNotes } from '../audio/practice.ts';
+import { normaliseSongFacts } from '../audio/song-analysis.ts';
 import type { Stem } from '../audio/stems.ts';
 
 /**
@@ -30,7 +34,19 @@ export const CACHE_ENTRY_LIMIT_BYTES = 256 * 1024 * 1024;
 export const CACHE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
 /** The version inside the metadata blob, separate from the audio format. */
-export const CACHE_METADATA_VERSION = 1;
+export const CACHE_METADATA_VERSION = 2;
+
+/**
+ * The entry format this build writes.
+ *
+ * It is part of the key, so an entry written by an older layout — one without
+ * the cached song facts or practice notes — can never be mistaken for one this
+ * engine understands. Bump it whenever the meaning of an entry changes.
+ */
+export const CACHE_FORMAT_VERSION = 2;
+
+/** A pathological note list must not turn into a megabyte of metadata. */
+export const MAX_CACHED_PRACTICE_NOTES = 20_000;
 
 export const MAX_CACHE_TITLE_LENGTH = 160;
 export const MAX_CACHE_ARTIST_LENGTH = 120;
@@ -55,6 +71,18 @@ export interface CachedEntry {
   readonly playCount: number;
   /** Always true for an entry the cache exposes. */
   readonly complete: boolean;
+  /**
+   * The Song card's facts, when they were cached after the analysis ran.
+   * Absent means the entry has none yet, which is a reason to analyse the
+   * cached stems rather than to show nothing.
+   */
+  readonly analysis?: SongFacts | null;
+  /**
+   * The guide melody learnt from the cached vocal stem. An empty array is a
+   * real answer — the analysis ran and found nothing — while absent means it
+   * has not run yet.
+   */
+  readonly practiceNotes?: readonly PracticeNote[] | null;
 }
 
 /** Four stereo channels in the model's order, which is the player's order. */
@@ -187,6 +215,23 @@ export function normaliseCachedEntry(raw: unknown): CachedEntry | null {
     return null;
   }
 
+  // The cached analysis and notes are conveniences: a malformed one is
+  // dropped rather than the whole entry, because the stems are still good and
+  // the engine can analyse them again.
+  const storedAnalysis = stored['analysis'];
+  const analysis =
+    typeof storedAnalysis === 'object' &&
+    storedAnalysis !== null &&
+    !Array.isArray(storedAnalysis)
+      ? normaliseSongFacts(storedAnalysis)
+      : null;
+  const storedNotes = stored['practiceNotes'];
+  const notes = Array.isArray(storedNotes)
+    ? normalisePracticeNotes(storedNotes)
+    : null;
+  const practiceNotes =
+    notes !== null && notes.length <= MAX_CACHED_PRACTICE_NOTES ? notes : null;
+
   return {
     key,
     videoId,
@@ -201,6 +246,8 @@ export function normaliseCachedEntry(raw: unknown): CachedEntry | null {
     lastUsedAt: used,
     playCount,
     complete: true,
+    ...(analysis === null ? {} : { analysis }),
+    ...(practiceNotes === null ? {} : { practiceNotes }),
   };
 }
 

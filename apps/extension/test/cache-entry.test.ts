@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  CACHE_FORMAT_VERSION,
   CACHE_METADATA_VERSION,
   cacheKey,
   normaliseCacheMetadata,
@@ -100,6 +101,38 @@ describe('normaliseCachedEntry', () => {
 
     expect(parsed?.createdAt).toBe(Date.UTC(2026, 10, 6, 12));
     expect(parsed?.lastUsedAt).toBe(Date.UTC(2026, 10, 7, 12));
+  });
+
+  it('keeps the cached song facts and guide melody', () => {
+    const entry = seedEntry('abcdefghijk', { formatVersion: CACHE_FORMAT_VERSION });
+    const analysis = {
+      key: { tonic: 7, mode: 'major' as const, confidence: 0.8 },
+      bpm: 128,
+      bpmConfidence: 0.7,
+      range: { lowMidi: 48, highMidi: 76, confidence: 0.6, frames: 120 },
+    };
+    const practiceNotes = [
+      { start: 0.2, end: 0.8, midi: 67, confidence: 0.9 },
+    ];
+
+    const parsed = normaliseCachedEntry({ ...entry, analysis, practiceNotes });
+
+    expect(parsed?.analysis).toEqual(analysis);
+    expect(parsed?.practiceNotes).toEqual(practiceNotes);
+  });
+
+  it('drops malformed extras but keeps the audio entry', () => {
+    const entry = seedEntry('abcdefghijk');
+
+    const parsed = normaliseCachedEntry({
+      ...entry,
+      analysis: 'not an object',
+      practiceNotes: 'not a list',
+    });
+
+    expect(parsed).toEqual(entry);
+    expect(parsed?.analysis).toBeUndefined();
+    expect(parsed?.practiceNotes).toBeUndefined();
   });
 });
 

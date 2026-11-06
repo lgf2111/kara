@@ -16,6 +16,8 @@ import {
   type DuetState,
 } from '../audio/duet.ts';
 import type { PracticeAnalysis } from '../audio/practice.ts';
+import { cacheStatusLabel, normaliseCacheStatus } from '../cache/status.ts';
+import type { CacheState } from '../cache/status.ts';
 import {
   keyName,
   rangeLabel,
@@ -115,6 +117,13 @@ export interface PanelView {
   readonly recordTimer: string;
   readonly recordActive: boolean;
   readonly recordBusy: boolean;
+  /**
+   * The one compact cache row: `Cached: 14.8 MB`, `Saving cache…` or
+   * `Cache unavailable`. Null when there is nothing to say.
+   */
+  readonly cacheLabel: string | null;
+  readonly cacheDetail: string | null;
+  readonly cacheState: CacheState | null;
 }
 
 export interface PanelInput {
@@ -223,6 +232,8 @@ export function panelView(input: PanelInput): PanelView {
         : null;
   const micDesk = normaliseMicStatus(report?.mic ?? IDLE_MIC_STATUS);
   const recording = micDesk.recording;
+  const cache = normaliseCacheStatus(report?.cache ?? null);
+  const cacheLabel = cacheStatusLabel(cache);
   const recordLabel =
     recording.state === 'recording'
       ? 'Stop'
@@ -284,6 +295,9 @@ export function panelView(input: PanelInput): PanelView {
     recordTimer: recordingTimer(recording.seconds),
     recordActive,
     recordBusy,
+    cacheLabel,
+    cacheDetail: cache?.detail ?? null,
+    cacheState: cache?.state ?? null,
   };
 
   if (report === null || report.status === 'idle') {

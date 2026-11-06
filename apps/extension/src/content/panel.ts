@@ -921,6 +921,21 @@ button[hidden] {
 .advanced-body > .section.flat {
   padding: 6px 8px;
 }
+.cache-row {
+  display: flex;
+  align-items: center;
+  min-height: var(--kara-control);
+  padding: 0 8px;
+  color: var(--kara-faint);
+  font-size: 11px;
+}
+.cache-row[data-state='hit'],
+.cache-row[data-state='ready'] {
+  color: var(--kara-muted);
+}
+.cache-row[data-state='error'] {
+  color: var(--kara-danger);
+}
 .duet-idle {
   display: flex;
   align-items: center;
@@ -1187,7 +1202,12 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   const songSection = div('section flat');
   const practiceSection = div('section flat');
   const duetSection = div('section flat');
+  const cacheRow = div('cache-row');
+  const cacheText = span('cache-text');
+  cacheRow.append(cacheText);
+  cacheRow.hidden = true;
   advanced.body.append(
+    cacheRow,
     backingSection.box,
     songSection,
     practiceSection,
@@ -1922,6 +1942,10 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     launch.hidden = view.state !== 'off';
     loading.hidden = view.state !== 'preparing' || view.controls;
     mixer.hidden = !view.controls;
+    cacheRow.hidden = view.cacheLabel === null;
+    cacheRow.dataset['state'] = view.cacheState ?? '';
+    cacheText.textContent = view.cacheLabel ?? '';
+    cacheRow.title = view.cacheDetail ?? '';
     errorBox.hidden = view.state !== 'error' && view.state !== 'unsupported';
     topActions.dataset['mode'] = view.mode;
     mode.hidden = !view.controls;

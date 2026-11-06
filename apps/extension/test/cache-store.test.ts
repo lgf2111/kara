@@ -475,6 +475,132 @@ describe('use and accounting', () => {
   });
 });
 
+describe('lookup and extras', () => {
+  it('finds the one entry that matches the fields known before decoding', async () => {
+    const entry = seedEntry('video-00001', {
+      formatVersion: 2,
+      modelVersion: 'model',
+      sampleRate: 44100,
+      durationFrames: 5000,
+    });
+    const other = seedEntry('video-00002', {
+      formatVersion: 2,
+      modelVersion: 'model',
+      sampleRate: 44100,
+    });
+    const { cache } = makeCache({ metadata: new FakeMetadata([entry, other]) });
+
+    expect(
+      await cache.findEntry({
+        videoId: 'video-00001',
+        modelVersion: 'model',
+        formatVersion: 2,
+        sampleRate: 44100,
+      }),
+    ).toEqual(entry);
+    expect(
+      await cache.findEntry({
+        videoId: 'video-00001',
+        modelVersion: 'other-model',
+        formatVersion: 2,
+        sampleRate: 44100,
+      }),
+    ).toBeNull();
+    expect(
+      await cache.findEntry({
+        videoId: 'video-00001',
+        modelVersion: 'model',
+        formatVersion: 1,
+        sampleRate: 44100,
+      }),
+    ).toBeNull();
+  });
+
+  it('does not guess when two decodes of one video disagree on length', async () => {
+    const short = seedEntry('video-00001', {
+      formatVersion: 2,
+      durationFrames: 1000,
+    });
+    const long = seedEntry('video-00001', {
+      formatVersion: 2,
+      durationFrames: 2000,
+    });
+    const { cache } = makeCache({ metadata: new FakeMetadata([short, long]) });
+
+    expect(
+      await cache.findEntry({
+        videoId: 'video-00001',
+        modelVersion: 'model',
+        formatVersion: 2,
+        sampleRate: 44100,
+      }),
+    ).toBeNull();
+  });
+
+  it('saves the Song card facts and the guide melody on an existing entry', async () => {
+    const entry = seedEntry('video-00001');
+    const metadata = new FakeMetadata([entry]);
+    const { cache } = makeCache({ metadata });
+    const facts = {
+      key: { tonic: 7, mode: 'major' as const, confidence: 0.8 },
+      bpm: 128,
+      bpmConfidence: 0.7,
+      range: { lowMidi: 48, highMidi: 76, confidence: 0.6, frames: 120 },
+    };
+    const notes = [{ start: 0.2, end: 0.8, midi: 67, confidence: 0.9 }];
+
+    expect(await cache.saveAnalysis(entry.key, facts)).toBe(true);
+    expect(await cache.savePracticeNotes(entry.key, notes)).toBe(true);
+
+    const stored = await cache.cachedEntry(entry.key);
+    expect(stored?.analysis).toEqual(facts);
+    expect(stored?.practiceNotes).toEqual(notes);
+    expect(stored?.bytes).toBe(entry.bytes);
+  });
+
+  it('reports a missing entry rather than creating one', async () => {
+    const { cache } = makeCache();
+    expect(
+      await cache.saveAnalysis('missing', {
+        key: null,
+        bpm: null,
+        bpmConfidence: 0,
+        range: null,
+      }),
+    ).toBe(false);
+    expect(await cache.cachedEntry('missing')).toBeNull();
+  });
+
+  it('drops older decodes of one video while keeping the fresh entry', async () => {
+    const short = seedEntry('video-00001', { formatVersion: 2, durationFrames: 1000 });
+    const long = seedEntry('video-00001', { formatVersion: 2, durationFrames: 2000 });
+    const other = seedEntry('video-00002', { formatVersion: 2 });
+    const metadata = new FakeMetadata([short, long, other]);
+    const files = new FakeCacheFiles();
+    files.seed(short.key);
+    files.seed(long.key);
+    files.seed(other.key);
+    const { cache } = makeCache({ metadata, files });
+
+    expect(
+      await cache.removeConflicts(
+        {
+          videoId: 'video-00001',
+          modelVersion: 'model',
+          formatVersion: 2,
+          sampleRate: 44100,
+        },
+        long.key,
+      ),
+    ).toBe(1);
+
+    expect(metadata.entries().map((entry) => entry.key)).toEqual([long.key, other.key]);
+    expect(files.entries.has(short.key)).toBe(false);
+    expect(files.entries.has(long.key)).toBe(true);
+    expect(files.entries.has(other.key)).toBe(true);
+  });
+});
+
 describe('damage recovery', () => {
   it('never reports an incomplete record as a hit', async () => {
     const entry = seedEntry('video-00001');
