@@ -41,10 +41,10 @@ import type { PanelView } from './panel-view.ts';
  * original/instrumental switch is the one decision beside it.
  *
  * **One control size.** Every actionable control is thirty-two pixels tall:
- * the mode toggle, mute and solo, the disclosure headers, reset, the key
- * stepper, stop, and the primary start button. The earlier panel mixed five
- * heights, so the rows never settled on a line; this one has one horizontal
- * rhythm. The popup owns the diagnostic view; the player stays a player.
+ * the mode toggle, mute and solo, the disclosure headers, both resets, stop,
+ * and the primary start button. The earlier panel mixed five heights, so the
+ * rows never settled on a line; this one has one horizontal rhythm. The
+ * popup owns the diagnostic view; the player stays a player.
  *
  * **The mode is one toggle, not a segmented switch.** Original and
  * Instrumental are the same song through two paths, so the control is a single
@@ -54,8 +54,8 @@ import type { PanelView } from './panel-view.ts';
  * **Advanced is one door.** Backing, song facts, pitch practice, the
  * microphone, duet and key live inside it, but it is one parent surface with
  * inset rows rather than a stack of identical cards. Only the groups that
- * actually open and close — backing, microphone and key — keep a disclosure;
- * song facts, practice and duet are single compact rows. The master and every
+ * actually open and close — backing and microphone — keep a disclosure; song
+ * facts, practice, duet and key are single compact rows. The master and every
  * disclosure remember whether they were open for the session, and only what is
  * already in use is offered inside them.
  *
@@ -201,7 +201,7 @@ button:focus-visible {
   outline-offset: 2px;
 }
 button:disabled {
-  opacity: 0.4;
+  opacity: 0.55;
   cursor: default;
 }
 button:disabled:hover {
@@ -499,7 +499,7 @@ button[hidden] {
   padding: 0 8px;
   border-color: var(--kara-accent);
   color: var(--kara-accent);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   white-space: nowrap;
 }
@@ -520,6 +520,11 @@ button[hidden] {
 .practice-action {
   position: relative;
   display: flex;
+  border-radius: var(--kara-radius);
+}
+.practice-action:focus-visible {
+  outline: 2px solid var(--kara-accent);
+  outline-offset: 2px;
 }
 .practice-tooltip {
   position: absolute;
@@ -606,10 +611,8 @@ button[hidden] {
 }
 .song-label {
   color: var(--kara-faint);
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 600;
 }
 .song-value {
   overflow: hidden;
@@ -623,7 +626,7 @@ button[hidden] {
 .song-detail {
   margin: 0;
   color: var(--kara-faint);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.4;
 }
 .mic-panel {
@@ -743,6 +746,7 @@ button[hidden] {
 }
 .duet-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-height: var(--kara-control);
@@ -756,13 +760,14 @@ button[hidden] {
 .duet-actions {
   display: flex;
   gap: 4px;
+  margin-left: auto;
 }
 .duet-action {
-  height: 28px;
-  padding: 0 8px;
+  height: var(--kara-control);
+  padding: 0 6px;
   border-color: var(--kara-border);
   color: var(--kara-muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
 }
 .duet-action:hover {
@@ -843,6 +848,8 @@ button[hidden] {
 }
 .chevron {
   display: flex;
+  flex: 0 0 auto;
+  margin-left: auto;
   color: var(--kara-faint);
   transition: transform 120ms ease;
 }
@@ -855,12 +862,16 @@ button[hidden] {
   font-weight: 600;
 }
 .section-meta {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--kara-faint);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.section[data-open='true'] > .section-head .section-meta {
+  display: none;
 }
 .reset {
   height: var(--kara-control);
@@ -966,10 +977,16 @@ button[hidden] {
   flex: 0 0 auto;
   min-width: 58px;
   color: var(--kara-text);
-  font-size: 10px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   text-align: right;
   white-space: nowrap;
+}
+.key-reset-slot {
+  display: flex;
+  flex: 0 0 var(--kara-control);
+  width: var(--kara-control);
+  height: var(--kara-control);
 }
 .key-reset {
   flex: 0 0 auto;
@@ -1171,7 +1188,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     label.textContent = title;
     const metaText = span('section-meta');
     metaText.textContent = meta;
-    toggle.append(chevron, label, metaText);
+    toggle.append(label, metaText, chevron);
     head.append(toggle);
     box.append(head, body);
 
@@ -1198,7 +1215,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   advanced.body.classList.add('advanced-body');
   const backingSection = disclosure('advanced-backing', 'Backing', 'Drums, bass, other');
   const micSection = disclosure('advanced-mic', 'Mic & recording', 'Monitor and record');
-  const keySection = disclosure('advanced-key', 'Key', 'Transpose the song');
+  const keySection = div('section flat');
   const songSection = div('section flat');
   const practiceSection = div('section flat');
   const duetSection = div('section flat');
@@ -1213,7 +1230,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     practiceSection,
     micSection.box,
     duetSection,
-    keySection.box,
+    keySection,
   );
 
   const top = div('top');
@@ -1763,8 +1780,10 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   keyValue.textContent = keyLabel(KEY_DEFAULT);
   const keyClear = iconButton('reset', 'icon-button key-reset', 'Back to the original key');
   keyClear.hidden = true;
-  keyRow.append(keySlider, keyValue, keyClear);
-  keySection.body.append(keyRow);
+  const keyResetSlot = span('key-reset-slot');
+  keyResetSlot.append(keyClear);
+  keyRow.append(keySlider, keyValue, keyResetSlot);
+  keySection.append(keyRow);
 
   const paintKey = (value: number): void => {
     keyInput.value = String(value);
