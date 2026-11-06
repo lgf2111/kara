@@ -8,6 +8,7 @@ import {
   type DuetMix,
   type DuetState,
 } from '../audio/duet.ts';
+import type { PracticeAnalysis } from '../audio/practice.ts';
 import type { PlayMode, StatusReport } from '../protocol.ts';
 
 /**
@@ -64,10 +65,22 @@ export interface PanelView {
   readonly duetCanStart: boolean;
   readonly duetHasVoices: boolean;
   readonly duetLowConfidenceSeconds: number | null;
+  /** Pitch practice: off, learning, listening, or stopped with a reason. */
+  readonly practiceState: 'off' | 'analyzing' | 'ready' | 'error';
+  readonly practiceLabel: string;
+  readonly practiceDetail: string | null;
+  /** Nought to one while the melody is being learnt, or null when it is not. */
+  readonly practiceProgress: number | null;
+  /** Whether the Practice button can begin a new run. */
+  readonly practiceCanStart: boolean;
+  /** Whether practice is the thing the player is showing right now. */
+  readonly practiceActive: boolean;
 }
 
 export interface PanelInput {
   readonly report: StatusReport | null;
+  /** The practice analysis from the offscreen document, when one was asked for. */
+  readonly practice?: PracticeAnalysis | null;
 }
 
 /** The stage and the estimate on one line, which is all there is room for. */
@@ -112,6 +125,29 @@ export function panelView(input: PanelInput): PanelView {
             ? 'The current pair keeps playing while it re-renders.'
             : 'The normal vocal controls still work while this runs.'
           : null;
+  const practice = input.practice ?? null;
+  const practiceState: PanelView['practiceState'] = practice?.state ?? 'off';
+  const practiceActive = practiceState === 'analyzing' || practiceState === 'ready';
+  const practiceLabel =
+    practiceState === 'analyzing'
+      ? 'Learning the melody'
+      : practiceState === 'ready'
+        ? 'Practice on'
+        : practiceState === 'error'
+          ? 'Practice stopped'
+          : 'Practice';
+  const practiceDetail =
+    practiceState === 'error'
+      ? (practice?.detail ?? 'the microphone stopped')
+      : practiceState === 'analyzing'
+        ? (practice?.detail ?? 'Learning the guide melody.')
+        : practiceState === 'ready'
+          ? 'Wear headphones for accuracy.'
+          : null;
+  const practiceProgress =
+    practiceState === 'analyzing' && practice?.progress !== null && practice?.progress !== undefined
+      ? Math.min(1, Math.max(0, practice.progress))
+      : null;
   const quiet = {
     progress: null,
     detail: null,
@@ -130,6 +166,15 @@ export function panelView(input: PanelInput): PanelView {
       report !== null && (report.status === 'ready' || report.status === 'paused'),
     duetHasVoices: duet.hasVoices,
     duetLowConfidenceSeconds: duet.lowConfidenceSeconds,
+    practiceState,
+    practiceLabel,
+    practiceDetail,
+    practiceProgress,
+    practiceCanStart:
+      report !== null &&
+      (report.status === 'ready' || report.status === 'paused') &&
+      !practiceActive,
+    practiceActive,
   };
 
   if (report === null || report.status === 'idle') {

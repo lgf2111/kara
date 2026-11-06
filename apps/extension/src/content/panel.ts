@@ -450,6 +450,62 @@ button[hidden] {
 .duet-button:hover {
   background: var(--kara-accent-tint);
 }
+.practice-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--kara-border);
+  border-radius: var(--kara-radius);
+  background: var(--kara-surface);
+}
+.practice-panel[data-state='analyzing'],
+.practice-panel[data-state='ready'] {
+  border-color: rgba(232, 184, 109, 0.45);
+}
+.practice-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--kara-control);
+}
+.practice-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kara-text);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.practice-button {
+  height: var(--kara-control);
+  padding: 0 10px;
+  border-color: var(--kara-border-strong);
+  color: var(--kara-text);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.practice-button:hover {
+  border-color: var(--kara-accent);
+  color: var(--kara-accent);
+}
+.practice-button[data-active='true'] {
+  border-color: var(--kara-accent);
+  background: var(--kara-accent-tint);
+  color: var(--kara-accent);
+}
+.practice-detail {
+  margin: 0;
+  color: var(--kara-faint);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.practice-detail[data-tone='error'] {
+  color: var(--kara-danger);
+}
 .duet-panel {
   display: flex;
   flex-direction: column;
@@ -699,6 +755,10 @@ export interface PanelHandlers {
   /** Mark the current video moment as one of the two voices. */
   readonly onDuetAnchor: (voice: 1 | 2) => void;
   readonly onDuetClear: () => void;
+  /** Begin pitch practice: learn the melody, then listen to the microphone. */
+  readonly onPracticeStart: () => void;
+  /** Release the microphone and put the video back. */
+  readonly onPracticeStop: () => void;
 }
 
 export interface Panel {
@@ -964,6 +1024,34 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
 
   const vocalsRow = stemRow('vocals', true);
   mixer.append(vocalsRow);
+
+  /**
+   * Pitch practice, beside the vocal row it analyses. The button stays
+   * disabled until the whole vocal stem exists, because analysis reads all of
+   * it; the box then carries the learning bar and, once ready, the headphone
+   * advice. Nothing here touches the mixer's four levels.
+   */
+  const practiceBox = div('practice-panel');
+  practiceBox.dataset['state'] = 'off';
+  const practiceHead = div('practice-head');
+  const practiceTitle = span('practice-title');
+  practiceTitle.textContent = 'Pitch practice';
+  const practiceButton = button('Practice', 'practice-button');
+  practiceButton.title = 'Score your singing against the guide melody';
+  practiceButton.setAttribute('aria-label', 'Start pitch practice');
+  practiceHead.append(practiceTitle, practiceButton);
+
+  const practiceBar = div('bar');
+  practiceBar.setAttribute('role', 'progressbar');
+  practiceBar.setAttribute('aria-label', 'Learning the guide melody');
+  practiceBar.setAttribute('aria-valuemin', '0');
+  practiceBar.setAttribute('aria-valuemax', '100');
+  const practiceBarFill = div('fill');
+  practiceBar.append(practiceBarFill);
+
+  const practiceDetail = paragraph('practice-detail');
+  practiceBox.append(practiceHead, practiceBar, practiceDetail);
+  mixer.append(practiceBox);
 
   /**
    * The duet panel. It is a second desk, shown only after the helper has
@@ -1314,6 +1402,13 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   mode.addEventListener('click', () => {
     handlers.onMode(lastView?.mode === 'instrumental' ? 'original' : 'instrumental');
   });
+  practiceButton.addEventListener('click', () => {
+    if (lastView?.practiceActive === true) {
+      handlers.onPracticeStop();
+    } else {
+      handlers.onPracticeStart();
+    }
+  });
   keyDown.addEventListener('click', () => {
     handlers.onKey(nudgeKey(semitones, -1));
   });
@@ -1423,6 +1518,36 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     if (!duetVoicesVisible) {
       duetFixPanel.hidden = true;
     }
+
+    practiceBox.hidden = !view.controls;
+    practiceBox.dataset['state'] = view.practiceState;
+    practiceTitle.textContent = view.practiceLabel;
+    practiceButton.textContent = view.practiceActive
+      ? 'Stop'
+      : view.practiceState === 'error'
+        ? 'Try again'
+        : 'Practice';
+    practiceButton.dataset['active'] = String(view.practiceActive);
+    practiceButton.disabled = !view.practiceActive && !view.practiceCanStart;
+    practiceButton.title = view.practiceActive
+      ? 'Stop practice and release the microphone'
+      : view.practiceCanStart
+        ? 'Score your singing against the guide melody'
+        : 'Finish preparing karaoke first';
+    practiceButton.setAttribute(
+      'aria-label',
+      view.practiceActive ? 'Stop pitch practice' : 'Start pitch practice',
+    );
+    practiceBar.hidden = view.practiceProgress === null;
+    if (view.practiceProgress !== null) {
+      const practicePercent = Math.round(view.practiceProgress * 100);
+      practiceBarFill.style.width = `${String(practicePercent)}%`;
+      practiceBar.setAttribute('aria-valuenow', String(practicePercent));
+      practiceBar.setAttribute('aria-valuetext', view.practiceDetail ?? `${String(practicePercent)}%`);
+    }
+    practiceDetail.textContent = view.practiceDetail ?? '';
+    practiceDetail.hidden = view.practiceDetail === null;
+    practiceDetail.dataset['tone'] = view.practiceState === 'error' ? 'error' : 'hint';
 
     for (const index of [0, 1] as const) {
       const control = duetControls.get(index);

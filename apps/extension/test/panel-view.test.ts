@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { DEFAULT_DUET_MIX, type DuetStatus } from '../src/audio/duet.ts';
+import type { PracticeAnalysis } from '../src/audio/practice.ts';
 import { DEFAULT_MIX, withMute, withSolo, withStem } from '../src/audio/stems.ts';
 import { panelView, prepareDetail } from '../src/content/panel-view.ts';
 import { report, separating } from './report.ts';
@@ -133,6 +134,73 @@ describe('panelView', () => {
 describe('prepareDetail', () => {
   it('is nothing at all when nothing is being prepared', () => {
     expect(prepareDetail(report())).toBeNull();
+  });
+});
+
+describe('pitch practice', () => {
+  const learning: PracticeAnalysis = {
+    state: 'analyzing',
+    progress: 0.42,
+    notes: null,
+    detail: 'Learning the guide melody.',
+  };
+  const listening: PracticeAnalysis = {
+    state: 'ready',
+    progress: 1,
+    notes: [{ start: 0, end: 1, midi: 69, confidence: 0.9 }],
+    detail: null,
+  };
+  const failed: PracticeAnalysis = {
+    state: 'error',
+    progress: null,
+    notes: null,
+    detail: 'Open the Kara popup and press Enable microphone once.',
+  };
+
+  it('offers the entry point once the full vocal stem is ready', () => {
+    const view = panelView({ report: report({ status: 'ready' }) });
+
+    expect(view.practiceState).toBe('off');
+    expect(view.practiceCanStart).toBe(true);
+    expect(view.practiceActive).toBe(false);
+    expect(view.practiceLabel).toBe('Practice');
+  });
+
+  it('keeps the entry point disabled while the stem is still arriving', () => {
+    const view = panelView({ report: report({ status: 'preparing', covered: true }) });
+
+    expect(view.controls).toBe(true);
+    expect(view.practiceCanStart).toBe(false);
+    expect(view.practiceState).toBe('off');
+  });
+
+  it('shows the learning pass with its bar and no way to start twice', () => {
+    const view = panelView({ report: report({ status: 'ready' }), practice: learning });
+
+    expect(view.practiceState).toBe('analyzing');
+    expect(view.practiceActive).toBe(true);
+    expect(view.practiceProgress).toBeCloseTo(0.42);
+    expect(view.practiceDetail).toContain('Learning');
+    expect(view.practiceCanStart).toBe(false);
+  });
+
+  it('says headphones once the microphone is listening', () => {
+    const view = panelView({ report: report({ status: 'ready' }), practice: listening });
+
+    expect(view.practiceState).toBe('ready');
+    expect(view.practiceLabel).toBe('Practice on');
+    expect(view.practiceDetail).toContain('headphones');
+    expect(view.practiceActive).toBe(true);
+    expect(view.practiceCanStart).toBe(false);
+  });
+
+  it('keeps a microphone refusal in the panel where it can be read', () => {
+    const view = panelView({ report: report({ status: 'ready' }), practice: failed });
+
+    expect(view.practiceState).toBe('error');
+    expect(view.practiceDetail).toContain('Enable microphone');
+    expect(view.practiceActive).toBe(false);
+    expect(view.practiceCanStart).toBe(true);
   });
 });
 

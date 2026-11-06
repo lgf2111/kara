@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { buildManifest } from '../src/manifest.ts';
 
 describe('buildManifest', () => {
-  it('asks for the two permissions the audio side needs and no more', () => {
-    expect(buildManifest().permissions).toEqual(['offscreen', 'storage']);
+  it('asks for the permissions the audio side needs and no more', () => {
+    expect(buildManifest().permissions).toEqual(['offscreen', 'storage', 'audioCapture']);
   });
 
   it('is on youtube.com plus the local duet helper by default', () => {

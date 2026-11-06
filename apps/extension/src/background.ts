@@ -54,11 +54,18 @@ const OFFSCREEN_PAGE = 'offscreen.html';
  * kill a session in the middle of the model load. Every other reason is
  * lifetime-free, and this one is honest: the document owns the separation
  * worker as well as the audio context.
+ *
+ * `USER_MEDIA` is there for pitch practice. A microphone is only opened when
+ * a person asks for practice and has already granted it from the popup; the
+ * document itself makes no request until then. Both reasons keep the document
+ * alive for the session rather than tying it to sound or to a device.
  */
-const OFFSCREEN_REASONS = ['WORKERS'] as const;
+const OFFSCREEN_REASONS = ['WORKERS', 'USER_MEDIA'] as const;
 const JUSTIFICATION =
   'Reading, separating and playing a video audio track needs fetch, an ' +
-  'AudioContext and a dedicated worker, none of which a service worker has.';
+  'AudioContext and a dedicated worker; pitch practice also analyses a copied ' +
+  'vocal stem in a worker and reads the microphone the person enabled. A ' +
+  'service worker has none of these.';
 
 const SESSION_KEY = 'kara.session';
 
@@ -338,7 +345,13 @@ chrome.runtime.onMessage.addListener((message: unknown, sender) => {
     return false;
   }
   const body = received.body;
-  if (body.type === 'status' || body.type === 'metrics' || body.type === 'debug-log') {
+  if (
+    body.type === 'status' ||
+    body.type === 'metrics' ||
+    body.type === 'debug-log' ||
+    body.type === 'practice-analysis' ||
+    body.type === 'practice-live'
+  ) {
     relay(body, received.tabId);
   }
   if (body.type === 'request-start') {

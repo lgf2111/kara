@@ -3,6 +3,11 @@ import {
   DUET_CONFIG_KEY,
   normaliseDuetConfig,
 } from './audio/duet.ts';
+import {
+  MIC_CONSTRAINTS,
+  microphoneErrorText,
+  stopMicrophone,
+} from './audio/microphone.ts';
 import { debugReportText } from './debug-report.ts';
 import { popupView, type PopupView } from './popup/popup-view.ts';
 import {
@@ -75,6 +80,8 @@ const duetToken = need<HTMLInputElement>('#duet-token');
 const duetSave = need<HTMLButtonElement>('#duet-save');
 const duetTest = need<HTMLButtonElement>('#duet-test');
 const duetStatus = need<HTMLParagraphElement>('#duet-status');
+const micEnable = need<HTMLButtonElement>('#mic-enable');
+const micStatus = need<HTMLParagraphElement>('#mic-status');
 
 let tabId: number | null = null;
 let url: string | undefined;
@@ -314,6 +321,31 @@ action.addEventListener('click', () => {
 });
 
 copyDebug.addEventListener('click', copyReport);
+
+/**
+ * The microphone permission has to be asked for under a click, and an
+ * offscreen document cannot show that click. So the popup does it once, stops
+ * the tracks it opened, and leaves Chrome's grant behind for the practice
+ * room to use later.
+ */
+micEnable.addEventListener('click', () => {
+  micEnable.disabled = true;
+  micStatus.hidden = false;
+  micStatus.textContent = 'Asking for the microphone…';
+  navigator.mediaDevices
+    .getUserMedia({ audio: MIC_CONSTRAINTS })
+    .then((stream) => {
+      stopMicrophone(stream);
+      micStatus.textContent = 'Microphone enabled. Start Practice from the player.';
+      micEnable.textContent = 'Microphone enabled';
+    })
+    .catch((cause: unknown) => {
+      micStatus.textContent = microphoneErrorText(cause, 'popup');
+    })
+    .finally(() => {
+      micEnable.disabled = false;
+    });
+});
 
 function showDuetStatus(text: string): void {
   duetStatus.hidden = text === '';

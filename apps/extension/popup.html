@@ -23,6 +23,7 @@
         --kara-accent-ink: #21140b;
         --kara-danger: #e58b8b;
         --kara-danger-tint: rgba(229, 139, 139, 0.16);
+        --kara-accent-tint: rgba(232, 184, 109, 0.18);
         --kara-track: #3a2730;
         --kara-control: 32px;
         --kara-radius: 8px;
@@ -228,7 +229,8 @@
         font-size: 11px;
         line-height: 1.45;
       }
-      #duet {
+      #duet,
+      #practice-permission {
         margin-top: 12px;
         padding: 10px;
         border: 1px solid var(--kara-border);
@@ -289,6 +291,21 @@
         color: var(--kara-accent);
       }
       #duet-status {
+        margin-top: 7px;
+      }
+      #mic-enable {
+        width: 100%;
+        height: var(--kara-control);
+        margin-top: 8px;
+        border-color: var(--kara-accent);
+        color: var(--kara-accent);
+        font-size: 11px;
+        font-weight: 650;
+      }
+      #mic-enable:hover {
+        background: var(--kara-accent-tint);
+      }
+      #mic-status {
         margin-top: 7px;
       }
       #diagnostics-toggle {
@@ -464,6 +481,16 @@
       <button id="key-clear" type="button" title="Back to the original key">Reset</button>
     </div>
     <p class="hint">Remembered, and used for the next song too.</p>
+
+    <section id="practice-permission" aria-label="Pitch practice">
+      <h2 class="section-title">Pitch practice</h2>
+      <p class="hint">
+        Scores your singing against the guide melody. The microphone stays on
+        this device; headphones make the reading more accurate.
+      </p>
+      <button id="mic-enable" type="button">Enable microphone</button>
+      <p id="mic-status" class="hint" role="status" aria-live="polite" hidden></p>
+    </section>
 
     <section id="duet" aria-label="Duet helper">
       <h2 class="section-title">Duet helper</h2>

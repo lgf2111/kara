@@ -5,6 +5,7 @@ import type { PrepareProgress } from './audio/progress.ts';
 import type { Status } from './audio/status.ts';
 import { IDLE_DUET, type DuetMix, type DuetStatus } from './audio/duet.ts';
 import { DEFAULT_MIX, type StemMix } from './audio/stems.ts';
+import type { PracticeAnalysis, PracticeLive } from './audio/practice.ts';
 import type { Backend } from '../../web/src/separation/protocol.ts';
 import type { StreamInfo } from './stream/player.ts';
 
@@ -28,6 +29,15 @@ export type { PlayMode } from './audio/mix-gain.ts';
 export type { PrepareProgress, PrepareStage } from './audio/progress.ts';
 export type { Status } from './audio/status.ts';
 export type { DuetMix, DuetPhase, DuetProgress, DuetState, DuetStatus } from './audio/duet.ts';
+export type {
+  PracticeAnalysis,
+  PracticeAnalysisState,
+  PracticeLive,
+  PracticeLiveTarget,
+  PracticeMicReading,
+  PracticeNote,
+  PracticeScore,
+} from './audio/practice.ts';
 
 export type Side = 'background' | 'offscreen' | 'tab';
 
@@ -78,6 +88,14 @@ export type Command =
   /** Put the single vocal row back and forget the pair. */
   | { readonly type: 'duet-clear' }
   /**
+   * Start pitch practice: learn the guide melody from the separated vocal
+   * stem, then open the microphone and score against the video's clock. This
+   * is opt-in and never changes the stems the normal mixer is playing.
+   */
+  | { readonly type: 'practice-start' }
+  /** Release the microphone, stop analysing and put the video back. */
+  | { readonly type: 'practice-stop' }
+  /**
    * The key, in semitones. It belongs to the session rather than to the
    * video, so a seek, a pause or an ad leaves it exactly where the person put
    * it; only another one of these moves it.
@@ -106,6 +124,8 @@ const COMMANDS: Readonly<Record<Command['type'], true>> = {
   'duet-swap': true,
   'duet-anchor': true,
   'duet-clear': true,
+  'practice-start': true,
+  'practice-stop': true,
   key: true,
   media: true,
   debug: true,
@@ -222,7 +242,31 @@ export interface DebugReportMessage {
   readonly pipeline: PipelineDebug;
 }
 
-export type Report = StatusReport | MetricsReport | DebugReportMessage;
+/**
+ * How the guide melody is getting on. Sent once when analysis starts, as it
+ * progresses, and once when it is ready or has failed. The note list travels
+ * with the ready report and not before, so a page never draws a half-melody.
+ */
+export type PracticeAnalysisReport = PracticeAnalysis & {
+  readonly type: 'practice-analysis';
+};
+
+/**
+ * The live practice view, about seventeen times a second while the microphone
+ * is open. It carries measurements rather than audio: a pitch, a level and a
+ * score. Both sides are normalised on receipt, because a report is an
+ * untrusted shape like any other.
+ */
+export type PracticeLiveReport = PracticeLive & {
+  readonly type: 'practice-live';
+};
+
+export type Report =
+  | StatusReport
+  | MetricsReport
+  | DebugReportMessage
+  | PracticeAnalysisReport
+  | PracticeLiveReport;
 
 export type Body = Command | Report | Request;
 

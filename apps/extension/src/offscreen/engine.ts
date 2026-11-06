@@ -22,6 +22,8 @@ import {
   type DuetStatus,
 } from '../audio/duet.ts';
 import { encodeWavMono } from '../audio/wav.ts';
+import type { PracticeNote } from '../audio/practice.ts';
+import { startPractice as startPracticeSession, type PracticeHandle } from './practice.ts';
 import {
   advanceProgress,
   NO_TIMINGS,
@@ -42,7 +44,14 @@ import { wallNowMs } from '../picture/wall-clock.ts';
 import { reasonText } from '../reason.ts';
 import type { SeparatorCommand, SeparatorEvent } from '../separation/messages.ts';
 import { SAMPLE_RATE } from '../separation/model.ts';
-import type { Metrics, PipelineDebug, StatusReport, StreamInfo } from '../protocol.ts';
+import type {
+  Metrics,
+  PipelineDebug,
+  PracticeAnalysisReport,
+  PracticeLiveReport,
+  StatusReport,
+  StreamInfo,
+} from '../protocol.ts';
 import { NO_METRICS } from '../protocol.ts';
 import { medianMs, planJob } from '../../../web/src/separation/job.ts';
 
@@ -117,6 +126,8 @@ export interface EngineOptions {
   readonly analyse?: boolean;
   readonly onStatus: (report: StatusReport) => void;
   readonly onMetrics: (metrics: Metrics) => void;
+  /** Practice analysis and live reports, when a person has opted in. */
+  readonly onPractice?: (report: PracticeAnalysisReport | PracticeLiveReport) => void;
 }
 
 export interface Engine {
@@ -133,6 +144,10 @@ export interface Engine {
   /** Mark a moment in the song as one of the two voices and re-render. */
   anchorDuet(voice: 1 | 2, seconds: number): void;
   clearDuet(): void;
+  /** Learn the guide melody from the vocal stem and open the microphone. */
+  startPractice(): void;
+  /** Release the microphone and forget the analysis. */
+  stopPractice(): void;
   dominantHz(): number | null;
   /** The loudest frequency within `spread` Hz of `hz`, for a known partial. */
   peakHz(hz: number, spread?: number): number | null;
@@ -361,6 +376,14 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
   let duetTimer: ReturnType<typeof setTimeout> | null = null;
   /** The vocal stem, kept as mono so it can be uploaded for the second pass. */
   let vocalsMono: Float32Array | null = null;
+  /** The opt-in practice desk, or null when nobody has asked for it. */
+  let practice: PracticeHandle | null = null;
+  /**
+   * The melody the last practice pass found. Kept for the session so Sing
+   * again after the video ends can open the microphone at once instead of
+   * making the singer wait through the same analysis a second time.
+   */
+  let practiceNotes: readonly PracticeNote[] | null = null;
 
   /** The pitch shifter's delay, which the player has to read ahead by. */
   async function reportedLatency(shifter: StretchNode): Promise<number> {
@@ -709,6 +732,51 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
     tellStatus();
   };
 
+  const stopPractice = (): void => {
+    const running = practice;
+    practice = null;
+    if (running !== null) {
+      void running.stop();
+    }
+  };
+
+  const startPractice = (): void => {
+    if (practice?.running() === true) {
+      return;
+    }
+    if (vocalsMono === null || sampleCount === 0 || stemEnd < sampleCount) {
+      options.onPractice?.({
+        type: 'practice-analysis',
+        state: 'error',
+        progress: null,
+        notes: null,
+        detail: 'Wait for karaoke to finish preparing before starting practice.',
+      });
+      return;
+    }
+    // The worker owns this copy. The duet helper reads the original, so
+    // neither feature can detach the other's buffer. A cached melody means
+    // there is nothing to analyse again, and the copy is skipped.
+    const cached = practiceNotes;
+    const copy = cached === null ? vocalsMono.slice() : null;
+    practice = startPracticeSession({
+      samples: copy,
+      sampleRate: context.sampleRate,
+      media: () => latest,
+      notes: cached,
+      onReport: (report) => {
+        if (
+          report.type === 'practice-analysis' &&
+          report.state === 'ready' &&
+          report.notes !== null
+        ) {
+          practiceNotes = report.notes;
+        }
+        options.onPractice?.(report);
+      },
+    });
+  };
+
   try {
     const contentLength = Number(options.stream.contentLength);
     const wantedTotal = Number.isFinite(contentLength) && contentLength > 0 ? contentLength : null;
@@ -1011,6 +1079,10 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
 
     clearDuet,
 
+    startPractice,
+
+    stopPractice,
+
     dominantHz,
 
     peakHz,
@@ -1060,6 +1132,7 @@ export async function startEngine(options: EngineOptions): Promise<Engine> {
       }
       stopped = true;
       stopDuetPolling();
+      stopPractice();
       if (duetJobId !== null && duetClient !== null) {
         void duetClient.cancel(duetJobId).catch(() => undefined);
       }

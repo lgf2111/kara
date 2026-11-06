@@ -77,6 +77,9 @@ async function start(command: Extract<Command, { type: 'start' }>): Promise<void
     onMetrics: (metrics) => {
       tell({ type: 'metrics', metrics });
     },
+    onPractice: (report) => {
+      tell(report);
+    },
   });
   const started = engine;
   if (started !== null) {
@@ -146,6 +149,22 @@ function accept(command: Command): void {
       return;
     case 'duet-clear':
       engine?.clearDuet();
+      return;
+    case 'practice-start':
+      if (engine === null) {
+        tell({
+          type: 'practice-analysis',
+          state: 'error',
+          progress: null,
+          notes: null,
+          detail: 'Start karaoke before starting practice.',
+        });
+      } else {
+        engine.startPractice();
+      }
+      return;
+    case 'practice-stop':
+      engine?.stopPractice();
       return;
     case 'key':
       if (engine === null) {

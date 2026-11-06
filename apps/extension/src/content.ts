@@ -1,10 +1,20 @@
 import { analyzedFraction } from './audio/analysis.ts';
 import { isRunning } from './audio/status.ts';
 import type { DuetMix } from './audio/duet.ts';
+import {
+  normalisePracticeAnalysis,
+  normalisePracticeLive,
+  normalisePracticeScore,
+  type PracticeAnalysis,
+  type PracticeLive,
+  type PracticeScore,
+} from './audio/practice.ts';
 import type { StemMix } from './audio/stems.ts';
 import { mountAnalysisBar, type AnalysisBar } from './content/analysis-bar.ts';
 import { panelView } from './content/panel-view.ts';
 import { mountPanel, type Panel } from './content/panel.ts';
+import { mountPracticeOverlay, type PracticeOverlay } from './content/practice-overlay.ts';
+import { practiceOverlayView } from './content/practice-view.ts';
 import { shouldMuteVideo } from './content/video-mute.ts';
 import { findPlayer, isAdShowing, isAutohidden, watchPlayer } from './content/youtube.ts';
 import { wallNowMs } from './picture/wall-clock.ts';
@@ -15,19 +25,23 @@ import {
   type Command,
   type MediaSample,
   type PlayMode,
+  type PracticeAnalysisReport,
+  type PracticeLiveReport,
   type Request,
   type StatusReport,
   type StreamInfo,
 } from './protocol.ts';
 
 /**
- * The page's side of it: the panel, the mute, and the reports.
+ * The page's side of it: the panel, the practice overlay, the mute, and the
+ * reports.
  *
- * Three things live here and nothing else does. The panel, which is the only
+ * Four things live here and nothing else does. The panel, which is the only
  * place in the page a person can see what the extension is doing or change
- * what it plays. The video's mute, which is the page's half of the vocal
- * switch. And the media reports — the video's own clock — which the stems are
- * played by.
+ * what it plays. The practice overlay, which draws the guide lane over the
+ * video and is only mounted while somebody has asked for it. The video's
+ * mute, which is the page's half of the vocal switch. And the media reports —
+ * the video's own clock — which the stems and the score are played by.
  *
  * The delayed picture is gone, and with it every decision it needed: there is
  * no delay to hold a picture against, so there is nothing to reset and
@@ -74,6 +88,7 @@ interface Mounted {
   readonly video: HTMLVideoElement;
   readonly panel: Panel;
   readonly analysisBar: AnalysisBar;
+  readonly practiceOverlay: PracticeOverlay;
   readonly unwatch: () => void;
 }
 
@@ -81,6 +96,17 @@ let mounted: Mounted | null = null;
 let report: StatusReport | null = null;
 let inAd = false;
 let moaned = false;
+/**
+ * The practice state, as the offscreen document last reported it. Analysis is
+ * the learning pass; live is the throttled microphone view while listening;
+ * summary is the frozen score the end card shows after the video ends.
+ */
+let practice: PracticeAnalysis | null = null;
+let practiceLive: PracticeLive | null = null;
+let practiceSummary: PracticeScore | null = null;
+let practiceFrame: number | null = null;
+/** The score with every note still unhit, for a run that ended before singing. */
+const NO_PRACTICE_SCORE = normalisePracticeScore(null);
 /**
  * Whether the extension is the one holding the video muted. Only a mute this
  * file applied is ever taken back, so a person who muted the video themselves
@@ -106,12 +132,152 @@ function running(): boolean {
 }
 
 function refresh(): void {
-  mounted?.panel.update(panelView({ report }));
+  mounted?.panel.update(panelView({ report, practice }));
   const ready =
     report !== null && isRunning(report.status) && !inAd
       ? analyzedFraction(report.analyzedSeconds, report.durationSeconds)
       : null;
   mounted?.analysisBar.update(ready);
+}
+
+/** Whether the overlay is on screen, including the end card after a run. */
+function practiceVisible(): boolean {
+  return practice !== null || practiceSummary !== null;
+}
+
+/**
+ * Draws the lane from `video.currentTime`, once a frame while practice is on.
+ * The live reports arrive about seventeen times a second, which is plenty for
+ * a score and not nearly enough for a playhead; the clock comes from the video
+ * itself, which is the same clock the score is measured against.
+ */
+function paintPractice(): void {
+  const here = mounted;
+  if (here === null || !practiceVisible()) {
+    practiceFrame = null;
+    return;
+  }
+  here.practiceOverlay.update(
+    practiceOverlayView({
+      analysis: practice,
+      live: practiceLive,
+      summary: practiceSummary,
+      at: here.video.currentTime,
+    }),
+  );
+  practiceFrame = requestAnimationFrame(paintPractice);
+}
+
+function startPracticeLoop(): void {
+  if (practiceFrame === null) {
+    practiceFrame = requestAnimationFrame(paintPractice);
+  }
+}
+
+function startPractice(): void {
+  if (mounted === null || inAd) {
+    return;
+  }
+  practiceSummary = null;
+  practiceLive = null;
+  practice = {
+    state: 'analyzing',
+    progress: 0,
+    notes: null,
+    detail: 'Learning the guide melody.',
+  };
+  toOffscreen({ type: 'practice-start' });
+  refresh();
+  startPracticeLoop();
+}
+
+/**
+ * Releases the microphone and takes the overlay away. The command goes to the
+ * offscreen document, which owns the tracks; when it has already stopped for
+ * us a closed document simply ignores it.
+ */
+function stopPractice(notify = true): void {
+  const wasVisible = practiceVisible();
+  practice = null;
+  practiceLive = null;
+  practiceSummary = null;
+  if (notify) {
+    toOffscreen({ type: 'practice-stop' });
+  }
+  if (wasVisible) {
+    // The frame loop stops when there is nothing to draw, so the last frame
+    // has to be taken down here rather than left over the video.
+    mounted?.practiceOverlay.update(
+      practiceOverlayView({ analysis: null, live: null, summary: null, at: 0 }),
+    );
+    refresh();
+  }
+}
+
+/**
+ * The video ended: freeze the score the last live report carried, stop the
+ * microphone, and leave the end card up. The guide melody is already learnt,
+ * so Sing again can start at once.
+ */
+function finishPractice(): void {
+  if (!practiceVisible()) {
+    return;
+  }
+  practiceSummary = practiceLive?.score ?? NO_PRACTICE_SCORE;
+  practice = null;
+  practiceLive = null;
+  toOffscreen({ type: 'practice-stop' });
+  refresh();
+  startPracticeLoop();
+}
+
+function singAgain(): void {
+  const here = mounted;
+  if (here === null) {
+    return;
+  }
+  here.video.currentTime = 0;
+  practiceSummary = null;
+  practiceLive = null;
+  practice = {
+    state: 'analyzing',
+    progress: 0,
+    notes: null,
+    detail: 'Learning the guide melody.',
+  };
+  toOffscreen({ type: 'practice-start' });
+  refresh();
+  startPracticeLoop();
+  void here.video.play().catch(() => undefined);
+}
+
+function onPracticeAnalysis(message: PracticeAnalysisReport): void {
+  // A late progress or ready report from a run that was stopped must not put
+  // the overlay back on screen; only a start begun here creates the state
+  // that these reports are allowed to move.
+  if (practice === null) {
+    return;
+  }
+  const next = normalisePracticeAnalysis(message);
+  practice = next;
+  if (next.state !== 'ready') {
+    practiceLive = null;
+  }
+  if (next.state === 'error') {
+    practiceSummary = null;
+  }
+  refresh();
+  startPracticeLoop();
+}
+
+function onPracticeLive(message: PracticeLiveReport): void {
+  // A report can still be in flight when a run stops; it must not resurrect
+  // the overlay or overwrite a frozen summary.
+  if (practice === null || practice.state !== 'ready') {
+    return;
+  }
+  practiceLive = normalisePracticeLive(message);
+  startPracticeLoop();
 }
 
 /**
@@ -193,6 +359,11 @@ function look(): void {
   const ad = isAdShowing(here.player);
   if (ad !== inAd) {
     inAd = ad;
+    // Practice is a microphone and a score against the song's own timeline;
+    // an ad has neither. Stop cleanly now rather than measuring an ad's clock.
+    if (ad && practiceVisible()) {
+      stopPractice();
+    }
     // The stems go quiet for an ad and the video's own sound returns; the
     // next media report carries it, and the mute follows on this tick. The
     // readiness band hides too, because the bar underneath is now the ad's
@@ -210,6 +381,13 @@ function unmount(): void {
   if (was === null) {
     return;
   }
+  if (practiceFrame !== null) {
+    cancelAnimationFrame(practiceFrame);
+    practiceFrame = null;
+  }
+  // A replaced player, a navigation or a closed page must never leave the
+  // microphone open or the video darkened.
+  stopPractice();
   // Leaving a video muted after the panel is gone would be the extension
   // taking something with it.
   if (mutedByUs) {
@@ -221,6 +399,7 @@ function unmount(): void {
   was.unwatch();
   was.analysisBar.destroy();
   was.panel.destroy();
+  was.practiceOverlay.destroy();
 }
 
 function mount(): void {
@@ -263,12 +442,26 @@ function mount(): void {
     onDuetClear: () => {
       toOffscreen({ type: 'duet-clear' });
     },
+    onPracticeStart: () => {
+      startPractice();
+    },
+    onPracticeStop: () => {
+      stopPractice();
+    },
   });
   mounted = {
     player: parts.player,
     video: parts.video,
     panel,
     analysisBar: mountAnalysisBar(parts.player),
+    practiceOverlay: mountPracticeOverlay(parts.player, {
+      onSingAgain: () => {
+        singAgain();
+      },
+      onClose: () => {
+        stopPractice();
+      },
+    }),
     unwatch: watchPlayer(parts.player, look),
   };
   look();
@@ -344,12 +537,24 @@ function setKey(semitones: number): void {
 
 function onStatus(next: StatusReport): void {
   report = next;
+  // Practice belongs to a live karaoke session. If that session stops or
+  // dies, the microphone goes with it rather than scoring a video whose stems
+  // are gone.
+  if (
+    (next.status === 'idle' || next.status === 'error' || next.status === 'unsupported') &&
+    practiceVisible()
+  ) {
+    stopPractice();
+  }
   refresh();
   syncMute();
 }
 
 /** The video ended: the session's work is done, and the original sound is back. */
 function onEnded(): void {
+  if (practiceVisible()) {
+    finishPractice();
+  }
   if (report !== null && report.mode === 'instrumental') {
     setMode('original');
   }
@@ -411,6 +616,12 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
     (globalThis as unknown as ReportHolder).__karaReport = body;
     onStatus(body);
   }
+  if (body.type === 'practice-analysis') {
+    onPracticeAnalysis(body);
+  }
+  if (body.type === 'practice-live') {
+    onPracticeLive(body);
+  }
   return false;
 });
 
@@ -468,6 +679,13 @@ setInterval(() => {
   syncMute();
   refresh();
 }, TICK_MS);
+
+// A page that is being torn down must not leave the microphone open behind it.
+window.addEventListener('pagehide', () => {
+  if (practiceVisible()) {
+    stopPractice();
+  }
+});
 
 // Faster than the panel, because this one is load-bearing: the stems are
 // anchored to these.
