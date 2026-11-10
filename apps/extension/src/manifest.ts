@@ -14,6 +14,8 @@
  * default policy is missing.
  */
 
+export type IconSize = '16' | '32' | '48' | '128';
+
 export interface ManifestOptions {
   /**
    * Also match `http://localhost/*`, so the extension can be pointed at the
@@ -37,10 +39,12 @@ export interface Manifest {
   readonly minimum_chrome_version: string;
   readonly permissions: readonly string[];
   readonly host_permissions: readonly string[];
+  readonly icons: Readonly<Record<IconSize, string>>;
   readonly action: {
     readonly default_title: string;
     /** The popup is the one window that exists with no video playing. */
     readonly default_popup: string;
+    readonly default_icon: Readonly<Record<IconSize, string>>;
   };
   readonly background: { readonly service_worker: string; readonly type: 'module' };
   readonly content_scripts: readonly {
@@ -59,12 +63,25 @@ const GOOGLEVIDEO = 'https://*.googlevideo.com/*';
 const LOCALHOST = 'http://localhost/*';
 const DUET_HELPER = 'http://127.0.0.1/*';
 
+/**
+ * The brand mark, at the four sizes Chrome asks for. 16 and 32 are drawn
+ * separately from 48 and 128 (see `public/icons/icon.svg` and the generator's
+ * small-size variant): the stand and base read as a trophy at 16 px, so the
+ * small sizes drop them.
+ */
+const ICONS: Readonly<Record<IconSize, string>> = {
+  '16': 'icons/icon16.png',
+  '32': 'icons/icon32.png',
+  '48': 'icons/icon48.png',
+  '128': 'icons/icon128.png',
+};
+
 export function buildManifest(options: ManifestOptions = {}): Manifest {
   const matches = options.localhost === true ? [YOUTUBE, LOCALHOST] : [YOUTUBE];
   return {
     manifest_version: 3,
     name: 'Kara',
-    version: options.version ?? '0.1.0',
+    version: options.version ?? '0.1.1',
     description:
       "Takes the vocal out of the video you're watching: the audio is read once, " +
       'separated on this device, and played back in place of the original sound.',
@@ -79,7 +96,12 @@ export function buildManifest(options: ManifestOptions = {}): Manifest {
       options.stable === true
         ? [...matches, GOOGLEVIDEO]
         : [...matches, GOOGLEVIDEO, DUET_HELPER],
-    action: { default_title: 'Kara: separate this video', default_popup: 'popup.html' },
+    icons: ICONS,
+    action: {
+      default_title: 'Kara: separate this video',
+      default_popup: 'popup.html',
+      default_icon: ICONS,
+    },
     background: { service_worker: 'background.js', type: 'module' },
     // Not modules: Chrome runs content scripts as classic scripts, so each is
     // built as its own self-contained file. `stream-info.js` runs in the

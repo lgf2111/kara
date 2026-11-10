@@ -1,3 +1,6 @@
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
 import { buildManifest } from '../src/manifest.ts';
@@ -57,6 +60,19 @@ describe('buildManifest', () => {
       'https://www.youtube.com/*',
       'http://localhost/*',
     ]);
+  });
+
+  it('points both icon sets at files that exist', () => {
+    const manifest = buildManifest();
+    const icons = new URL('../public/', import.meta.url);
+
+    for (const size of ['16', '32', '48', '128'] as const) {
+      const path = manifest.icons[size];
+
+      expect(manifest.action.default_icon[size]).toBe(path);
+      expect(path).toBe(`icons/icon${size}.png`);
+      expect(existsSync(fileURLToPath(new URL(path, icons)))).toBe(true);
+    }
   });
 
   it('runs the stream grabber in the page world before the page can load', () => {
