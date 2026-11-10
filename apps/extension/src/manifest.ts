@@ -20,6 +20,12 @@ export interface ManifestOptions {
    * debug page in `test/`. Off for anything anyone would install.
    */
   readonly localhost?: boolean;
+  /**
+   * The distributed edition. It carries no Duet helper, so it must not ask for
+   * loopback access either: a permission the code cannot use is one the user
+   * has to trust for nothing.
+   */
+  readonly stable?: boolean;
   readonly version?: string;
 }
 
@@ -69,7 +75,10 @@ export function buildManifest(options: ManifestOptions = {}): Manifest {
     permissions: ['offscreen', 'storage', 'audioCapture', 'downloads'],
     // The audio streams YouTube serves live on googlevideo.com, so reading one
     // is a host permission; it is read by extension contexts only.
-    host_permissions: [...matches, GOOGLEVIDEO, DUET_HELPER],
+    host_permissions:
+      options.stable === true
+        ? [...matches, GOOGLEVIDEO]
+        : [...matches, GOOGLEVIDEO, DUET_HELPER],
     action: { default_title: 'Kara: separate this video', default_popup: 'popup.html' },
     background: { service_worker: 'background.js', type: 'module' },
     // Not modules: Chrome runs content scripts as classic scripts, so each is

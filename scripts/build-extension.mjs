@@ -78,8 +78,10 @@ function filesUnder(dir) {
 const args = process.argv.slice(2);
 const requireWeights = args.includes('--weights');
 const localhost = args.includes('--localhost');
+// The edition that is handed to other people: no Duet helper, no Practice.
+const stable = args.includes('--stable');
 for (const arg of args) {
-  if (arg !== '--weights' && arg !== '--localhost') {
+  if (arg !== '--weights' && arg !== '--localhost' && arg !== '--stable') {
     fail(`unknown option ${arg}`);
   }
 }
@@ -99,6 +101,7 @@ for (const target of TARGETS) {
       ...process.env,
       KARA_EXT_TARGET: target,
       KARA_EXT_LOCALHOST: localhost ? '1' : '0',
+      KARA_EXT_EDITION: stable ? 'stable' : 'full',
     },
   });
   if (result.status !== 0) {
@@ -157,5 +160,6 @@ if (existsSync(weights)) {
 
 console.log(
   `build-extension: ${String(filesUnder(dist).length)} files in apps/extension/dist` +
-    `${localhost ? ', matching localhost as well as youtube.com' : ''}`,
+    `${localhost ? ', matching localhost as well as youtube.com' : ''}` +
+    `${stable ? ', stable edition (no duet, no practice)' : ''}`,
 );

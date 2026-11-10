@@ -9,6 +9,7 @@ import { debugReportText } from './debug-report.ts';
 import { clearCache, usage as readCacheUsage, type CacheUsage } from './cache/index.ts';
 import { isRunning } from './audio/status.ts';
 import { cacheUsageView, popupView, type PopupView } from './popup/popup-view.ts';
+import { STABLE } from './features.ts';
 import { readDuetConfig, writeDuetConfig } from './duet-store.ts';
 import {
   SCORE_HISTORY_KEY,
@@ -105,6 +106,15 @@ const scoresRecent = need<HTMLOListElement>('#scores-recent');
 const cacheUsage = need<HTMLParagraphElement>('#cache-usage');
 const cacheClear = need<HTMLButtonElement>('#cache-clear');
 const cacheStatus = need<HTMLParagraphElement>('#cache-status');
+
+// The distributed edition has no Duet helper to point at and no scoreboard to
+// fill. The sections are taken out before anything is ever drawn into them, so
+// there is no state in which one can appear.
+if (STABLE) {
+  for (const id of ['duet', 'practice-permission', 'scores']) {
+    document.getElementById(id)?.remove();
+  }
+}
 
 let tabId: number | null = null;
 let url: string | undefined;

@@ -39,6 +39,18 @@ describe('buildManifest', () => {
     ]);
   });
 
+  it('drops the loopback helper in the stable edition', () => {
+    const stable = buildManifest({ stable: true });
+
+    expect(stable.host_permissions).toEqual([
+      'https://www.youtube.com/*',
+      'https://*.googlevideo.com/*',
+    ]);
+    expect(stable.permissions).toEqual(
+      buildManifest().permissions,
+    );
+  });
+
   it('matches the content script to the same sites as the host permissions', () => {
     expect(buildManifest().content_scripts[0]?.matches).toEqual(['https://www.youtube.com/*']);
     expect(buildManifest({ localhost: true }).content_scripts[0]?.matches).toEqual([

@@ -137,6 +137,7 @@ function emitManifest(): Plugin {
     generateBundle() {
       const manifest = buildManifest({
         localhost: process.env['KARA_EXT_LOCALHOST'] === '1',
+        stable: process.env['KARA_EXT_EDITION'] === 'stable',
       });
       this.emitFile({
         type: 'asset',
@@ -167,6 +168,11 @@ export default defineConfig(() => {
   const shared = {
     optimizeDeps: { exclude: ['onnxruntime-web'] },
     worker: { format: 'es' as const },
+    // The edition is a compile-time constant, so the stable build has no code
+    // path that can reach Duet or Practice at all.
+    define: {
+      __KARA_STABLE__: JSON.stringify(process.env['KARA_EXT_EDITION'] === 'stable'),
+    },
   };
 
   if (which === 'pages') {

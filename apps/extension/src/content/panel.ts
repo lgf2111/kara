@@ -6,6 +6,7 @@ import {
   type MicFx,
 } from '../audio/mic-fx.ts';
 import { progressPercent } from '../audio/progress.ts';
+import { STABLE } from '../features.ts';
 import {
   DEFAULT_DUET_MIX,
   DUET_LABEL,
@@ -1217,7 +1218,9 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     backingSection.box,
     songSection,
     keySection,
-    practiceDuetSection,
+    // The stable edition has no Practice and no Duet, so their surface is
+    // never attached: nothing can open a panel that is not there.
+    ...(STABLE ? [] : [practiceDuetSection]),
     micSection.box,
   );
 
