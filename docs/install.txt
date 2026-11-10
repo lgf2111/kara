@@ -1,0 +1,21 @@
+Kara — install the extension from a folder
+
+This is the stable edition: karaoke only. It has no Duet helper and no
+microphone practice scoring.
+
+1. Unzip the folder somewhere permanent. Chrome loads the extension from this
+   folder every time it starts, so do not delete or move it afterwards.
+2. Open Chrome and go to  chrome://extensions
+3. Turn on "Developer mode" (top right).
+4. Click "Load unpacked" and choose the folder containing manifest.json.
+5. Open a YouTube video, click the Kara pill in the page (or the toolbar icon),
+   then Start.
+
+Notes
+- Chrome 116 or newer. Edge and Brave work too.
+- Everything runs on this machine: no account, no server, nothing uploaded.
+  The audio is read from the tab, separated locally, played back in place.
+- Developer mode has to stay on, or Chrome disables an unpacked extension when
+  it restarts.
+- There are no automatic updates: to take a new version, unzip it and press
+  reload on the extension card.

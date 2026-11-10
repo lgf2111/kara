@@ -1,0 +1,54 @@
+name: release
+
+# A tag is the stable edition. Every release is built here rather than uploaded
+# by hand, so the artifact attached to a tag is the one this commit produces:
+# the same weights, the same command, no local state.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  stable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Fetch the separation weights
+        run: node scripts/spike/models.mjs fetch htdemucs-web
+      - name: Build the stable edition
+        run: pnpm --filter @kara/extension build:stable
+      - name: Package with the manifest at the root
+        run: |
+          cd apps/extension/dist
+          # The debug page is for development; it does not belong in a package.
+          rm -rf test
+          cp "$GITHUB_WORKSPACE/docs/install.txt" INSTALL.txt
+          zip -qr "$GITHUB_WORKSPACE/kara-stable.zip" .
+      - name: Check what was packaged
+        run: |
+          unzip -l kara-stable.zip | head -20
+          test -f apps/extension/dist/manifest.json
+      - name: Attach the package to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: kara-stable.zip
+          name: Kara ${{ github.ref_name }} — stable
+          body: |
+            Stable edition: karaoke only. No Duet helper, no microphone practice
+            scoring, and no loopback permission in the manifest.
+
+            **Install:** unzip, open `chrome://extensions`, turn on Developer mode,
+            press "Load unpacked", and choose the folder containing `manifest.json`.
+            Full steps are in `INSTALL.txt` inside the zip.
+
+            Everything runs on your machine. No account, no server, nothing uploaded.
+            See `NOTICE` in the repository for the licences of the bundled weights.

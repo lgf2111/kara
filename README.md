@@ -53,6 +53,19 @@ pnpm run dev             # http://localhost:5173
 The opt-in duet helper is separate and needs Python 3.12; see
 [tools/duet-helper/README.md](tools/duet-helper/README.md).
 
+## Install the extension
+
+The extension is not on a store. Every tagged release is a zip built by CI with
+the separation weights inside it:
+
+1. Download `kara-stable.zip` from [Releases](../../releases/latest).
+2. Unzip it somewhere permanent — Chrome loads the extension from that folder.
+3. `chrome://extensions` → Developer mode → **Load unpacked** → that folder.
+
+The release build is the **stable edition**: karaoke only, no Duet helper and no
+microphone practice scoring, and no loopback host permission. The duet features
+are still in `main` and are built by `pnpm --filter @kara/extension build:unpacked`.
+
 ## Commands
 
 | Command                  | What it does                                               |
@@ -97,3 +110,9 @@ request range.
 Branch per change, conventional commits, never commit directly to `main`. Before merging, run
 `pnpm verify` and the helper checks (`ruff` and `pytest` under `tools/duet-helper`). Squash merge
 into `main`, push, delete the branch, and leave `main` green and checked out.
+
+## Licence
+
+The source is MIT; see [LICENSE](LICENSE). The weights and libraries that ship inside a release
+package carry their own terms — mostly MIT, plus the non-commercial UNMIXX checkpoint that the
+optional duet helper fetches and never redistributes. [NOTICE](NOTICE) lists them one by one.

@@ -6,6 +6,7 @@
   "scripts": {
     "build": "node ../../scripts/build-extension.mjs",
     "build:unpacked": "node ../../scripts/build-extension.mjs --weights",
+    "build:stable": "node ../../scripts/build-extension.mjs --weights --stable",
     "preview": "vite preview --port 5276",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit"
   },
