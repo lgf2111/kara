@@ -1,3 +1,4 @@
+import { token } from '../ui/tokens.ts';
 import { formatRunDate, type PracticeRun } from './history.ts';
 
 /**
@@ -19,13 +20,13 @@ export const SCORE_CARD_WIDTH = 1080;
 export const SCORE_CARD_HEIGHT = 1350;
 
 export const SCORE_CARD_PALETTE = {
-  ground: '#1b1116',
-  panel: '#24171d',
-  border: '#3b2a30',
-  text: '#f7efe6',
-  muted: '#c3b0a6',
-  faint: '#9a877e',
-  accent: '#e8b86d',
+  ground: token('--kara-ground'),
+  panel: token('--kara-surface'),
+  border: token('--kara-border'),
+  text: token('--kara-text'),
+  muted: token('--kara-muted'),
+  faint: token('--kara-faint'),
+  accent: token('--kara-accent'),
 } as const;
 
 export interface ScoreCardText {

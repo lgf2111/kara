@@ -1,3 +1,4 @@
+import { PALETTE, PRACTICE_TOKENS } from '../ui/tokens.ts';
 import type { PracticeOverlayView } from './practice-view.ts';
 
 /**
@@ -19,21 +20,8 @@ import type { PracticeOverlayView } from './practice-view.ts';
  */
 
 const STYLE = `
-:host {
-  --kara-ground: #1b1116;
-  --kara-surface: #24171d;
-  --kara-border: #3b2a30;
-  --kara-text: #f7efe6;
-  --kara-muted: #c3b0a6;
-  --kara-faint: #9a877e;
-  --kara-accent: #e8b86d;
-  --kara-perfect: #7bd88f;
-  --kara-good: #e8b86d;
-  --kara-off: #e58b8b;
-  --kara-danger: #e58b8b;
-  --kara-ink: #21140b;
-  --kara-radius: 12px;
-  --kara-note-radius: 8px;
+:host {${PALETTE}
+${PRACTICE_TOKENS}
   color: var(--kara-text);
   font: 500 13px/1.4 "Avenir Next", "Segoe UI", system-ui, sans-serif;
 }

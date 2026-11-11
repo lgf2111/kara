@@ -4,30 +4,11 @@
     <meta charset="utf-8" />
     <title>Kara</title>
     <style>
-      /* The popup is an extension page, so none of this can reach a tab. It
-         shares the panel's KTV palette and ShadCN-shaped controls: one warm
-         ground, one gold accent, one 32px control height. Diagnostics stay
-         here, behind one click, because the panel over a video is no place
-         for raw session data. */
-      :root {
-        color-scheme: dark;
-        --kara-ground: #1b1116;
-        --kara-surface: #24171d;
-        --kara-raised: #2c1b22;
-        --kara-border: #3b2a30;
-        --kara-border-strong: #4b343b;
-        --kara-text: #f7efe6;
-        --kara-muted: #c3b0a6;
-        --kara-faint: #9a877e;
-        --kara-accent: #e8b86d;
-        --kara-accent-ink: #21140b;
-        --kara-danger: #e58b8b;
-        --kara-danger-tint: rgba(229, 139, 139, 0.16);
-        --kara-accent-tint: rgba(232, 184, 109, 0.18);
-        --kara-track: #3a2730;
-        --kara-control: 32px;
-        --kara-radius: 8px;
-      }
+      /* The popup is an extension page, so none of this can reach a tab. Its
+         palette is injected from src/ui/tokens.ts, the same file the panel
+         reads, so the two surfaces cannot drift. Diagnostics stay here,
+         behind one click, because the panel over a video is no place for raw
+         session data. */
       * {
         box-sizing: border-box;
       }

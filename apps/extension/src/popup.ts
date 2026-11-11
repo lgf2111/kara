@@ -10,6 +10,13 @@ import { clearCache, usage as readCacheUsage, type CacheUsage } from './cache/in
 import { isRunning } from './audio/status.ts';
 import { cacheUsageView, popupView, type PopupView } from './popup/popup-view.ts';
 import { STABLE } from './features.ts';
+import { popupTokens } from './ui/tokens.ts';
+
+// The palette is shared with the in-page panel: one source, injected before the
+// popup's own rules so a local override is still possible where it is intended.
+const tokenStyle = document.createElement('style');
+tokenStyle.textContent = popupTokens;
+document.head.prepend(tokenStyle);
 import { readDuetConfig, writeDuetConfig } from './duet-store.ts';
 import {
   SCORE_HISTORY_KEY,
