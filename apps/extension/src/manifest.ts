@@ -81,7 +81,7 @@ export function buildManifest(options: ManifestOptions = {}): Manifest {
   return {
     manifest_version: 3,
     name: 'Kara',
-    version: options.version ?? '0.1.1',
+    version: options.version ?? '0.1.2',
     description:
       "Takes the vocal out of the video you're watching: the audio is read once, " +
       'separated on this device, and played back in place of the original sound.',

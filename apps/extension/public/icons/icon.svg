@@ -1,10 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <!-- Kara: the K's stem is the microphone capsule, and the cradle arc is what
-       turns the letter into a microphone. One geometry at every size: this
-       survives 16 px, where the earlier mic-and-stand did not. -->
-  <rect x="0" y="0" width="128" height="128" rx="30" fill="#1b1116"/>
-  <rect x="30" y="22" width="26" height="84" rx="13" fill="#e8b86d"/>
-  <path d="M60 62 96 28" stroke="#e8b86d" stroke-width="19" stroke-linecap="round"/>
-  <path d="M60 70 96 102" stroke="#e8b86d" stroke-width="19" stroke-linecap="round"/>
-  <path d="M18 74a25 25 0 0 0 50 0" fill="none" stroke="#e8b86d" stroke-width="9" stroke-linecap="round"/>
+  <!-- Kara: the K's stem is the microphone capsule, with a stand foot under it.
+       At 16 and 32 px the foot is dropped and the letter alone carries the mark. -->
+  <rect x="0" y="0" width="128" height="128" rx="30" fill="#1b1116"/><g transform="translate(-13.78 -8.64) scale(1.0267)"><path d="M74 60 102 34" stroke="#e8b86d" stroke-width="19" stroke-linecap="round"/>
+  <path d="M74 68 102 108" stroke="#e8b86d" stroke-width="19" stroke-linecap="round"/>
+  <rect x="54" y="94" width="10" height="14" fill="#e8b86d"/>
+  <rect x="40" y="106" width="38" height="9" rx="4.5" fill="#e8b86d"/>
+  <rect x="44" y="24" width="30" height="76" rx="15" fill="#e8b86d"/></g>
 </svg>
