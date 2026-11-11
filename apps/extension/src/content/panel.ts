@@ -22,6 +22,7 @@ import {
   DEFAULT_LEVELS,
   DEFAULT_MIX,
   STEM_LABEL,
+  stemRowLabel,
   STEMS,
   stemFromPercent,
   stemPercent,
@@ -185,6 +186,8 @@ interface Disclosure {
 /** One stem's row, and the controls `update` and the reset reach through it. */
 interface StemControl {
   readonly row: HTMLDivElement;
+  /** The row's own words: the guide's change with its switch. */
+  readonly name: HTMLSpanElement;
   readonly input: HTMLInputElement;
   readonly fill: HTMLDivElement;
   readonly value: HTMLSpanElement;
@@ -442,7 +445,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
       head.append(mark);
     }
     const name = span('stem-name');
-    name.textContent = STEM_LABEL[stem];
+    name.textContent = stemRowLabel(stem, DEFAULT_MIX.muted[stem]);
     const switches = div('switches');
     const mute = button('M', 'switch mute');
     mute.title = `Mute ${STEM_LABEL[stem].toLowerCase()}`;
@@ -472,6 +475,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
 
     const control: StemControl = {
       row,
+      name,
       input,
       fill: sliderFill,
       value: level,
@@ -922,13 +926,17 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   const errorTitle = span('error-title');
   errorHead.append(errorGlyph, errorTitle);
   const errorDetail = paragraph('detail');
+  // What to do next, in one sentence. The engine's own words stay in `detail`,
+  // which is why an unsupported browser is not a dead end any more.
+  const errorAdvice = paragraph('advice');
+  errorAdvice.hidden = true;
   const retry = button('', 'primary');
   const retryGlyph = span('primary-glyph');
   retryGlyph.append(icon('reset'));
   const retryLabel = span('primary-label');
   retryLabel.textContent = 'Try again';
   retry.append(retryGlyph, retryLabel);
-  errorBox.append(errorHead, errorDetail, retry);
+  errorBox.append(errorHead, errorDetail, errorAdvice, retry);
   errorBox.hidden = true;
 
   panel.append(top, launch, loading, mixer, errorBox);
@@ -1093,17 +1101,25 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     loadingDetail.textContent = view.detail ?? '';
     loadingDetail.hidden = view.detail === null;
 
+    // One control, one meaning: the words say what pressing it does, and the
+    // pressed state is not used at all. Naming the current mode here asked a
+    // sighted user to guess whether "Instrumental" meant now or next.
     const instrumental = view.mode === 'instrumental';
-    mode.setAttribute('aria-pressed', String(instrumental));
-    mode.setAttribute('aria-label', instrumental ? 'Switch to original audio' : 'Switch to instrumental');
-    mode.title = instrumental ? 'Switch to original audio' : 'Switch to instrumental';
-    modeLabel.textContent = instrumental ? 'Instrumental' : 'Original';
-    modeGlyph.replaceChildren(icon(instrumental ? 'audio' : 'volume'));
+    const modeVerb = instrumental ? 'Bring the vocal back' : 'Switch to backing only';
+    mode.removeAttribute('aria-pressed');
+    mode.setAttribute('aria-label', modeVerb);
+    mode.title = modeVerb;
+    modeLabel.textContent = modeVerb;
+    modeGlyph.replaceChildren(icon(instrumental ? 'volume' : 'audio'));
 
     errorTitle.textContent = view.label;
     errorDetail.textContent = view.detail ?? '';
     errorDetail.hidden = view.detail === null;
-    retry.hidden = view.state !== 'error';
+    errorAdvice.textContent = view.advice ?? '';
+    errorAdvice.hidden = view.advice === null;
+    // Unsupported used to hide the only control in the box, leaving the power
+    // button as the sole exit. Both states offer the same way forward.
+    retry.hidden = view.state !== 'error' && view.state !== 'unsupported';
 
     note.hidden = !(view.state === 'preparing' && view.controls && view.note !== null);
     noteText.textContent =
@@ -1279,6 +1295,12 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
       control.solo.setAttribute('aria-pressed', String(view.mix.soloed[stem]));
       control.row.dataset['muted'] = String(view.mix.muted[stem]);
       control.row.dataset['soloed'] = String(view.mix.soloed[stem]);
+      // The guide's own words follow its switch, so the row never shows a full
+      // slider while the vocal is silent without saying why.
+      const rowLabel = stemRowLabel(stem, view.mix.muted[stem]);
+      if (control.name.textContent !== rowLabel) {
+        control.name.textContent = rowLabel;
+      }
       const level = stemPercent(view.mix.levels[stem]);
       if (root.activeElement !== control.input) {
         paintLevel(control, level);

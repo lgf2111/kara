@@ -94,16 +94,36 @@ describe('panelView', () => {
     });
 
     expect(view.state).toBe('unsupported');
-    expect(view.label).toBe('Not available here');
+    expect(view.label).toBe("Kara can't run on this machine");
     expect(view.detail).toBe('this machine has no WebGPU');
+    // A dead end still has a next step, which is the point of the advice line.
+    expect(view.advice).toContain('WebGPU');
     expect(view.controls).toBe(false);
   });
 
   it('does not leave an error with no words', () => {
-    const view = panelView({ report: report({ status: 'error', reason: null }) });
+    const noReason = panelView({ report: report({ status: 'error', reason: null }) });
 
-    expect(view.state).toBe('error');
-    expect(view.detail).toBe('no reason given');
+    expect(noReason.state).toBe('error');
+    expect(noReason.detail).toBeNull();
+    expect(noReason.advice).toContain('Try again');
+  });
+
+  it('says what happened in words a person can act on', () => {
+    const view = panelView({
+      report: report({ status: 'error', reason: 'the audio ended early (1234 of 8000 bytes)' }),
+    });
+
+    expect(view.detail).toBe('The video stopped sending sound before the end. Press play, then try again.');
+    expect(view.detail).not.toContain('1234');
+  });
+
+  it('passes an unknown failure through rather than guessing at it', () => {
+    const view = panelView({
+      report: report({ status: 'error', reason: 'the page closed the audio stream' }),
+    });
+
+    expect(view.detail).toBe('the page closed the audio stream');
   });
 
   it('clamps a key and a mix that arrived out of range', () => {

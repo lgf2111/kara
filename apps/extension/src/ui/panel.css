@@ -857,6 +857,14 @@ button[hidden] {
   font-size: 13px;
   font-weight: 600;
 }
+/* The next step reads as instruction, not as another failure line: full
+   contrast against the muted detail above it, and never below the retry. */
+.error .advice {
+  margin: 0;
+  color: var(--kara-text);
+  font-size: 11px;
+  line-height: 1.45;
+}
 @media (prefers-reduced-motion: reduce) {
   :host,
   button,

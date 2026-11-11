@@ -49,6 +49,32 @@ import type { PlayMode, StatusReport } from '../protocol.ts';
 
 export type PanelState = 'off' | 'preparing' | 'ready' | 'paused' | 'unsupported' | 'error';
 
+/**
+ * The engine's failure text in words a person can act on.
+ *
+ * The engine says what happened to the bytes; someone watching a video needs to
+ * know what to do about it. Unmatched reasons pass through untouched: an unknown
+ * failure is better described by itself than by a guess.
+ */
+const PLAIN_REASONS: readonly (readonly [RegExp, string])[] = [
+  [/the audio could not be read \(403\)/i, 'The video refused to send its sound. Reload the page and press play.'],
+  [/the audio could not be read \((?<status>\d+)\)/i, 'The video stopped sending its sound. Reload the page and press play.'],
+  [/the audio ended early/i, 'The video stopped sending sound before the end. Press play, then try again.'],
+  [/the audio arrived out of order/i, 'Part of the sound arrived out of order, so Kara stopped. Try again.'],
+  [/was sent from the beginning partway through/i, 'The video restarted while Kara was listening. Try again.'],
+  [/has not shared its audio yet/i, "Kara hasn't heard this video yet. Press play, wait two seconds, then try again."],
+  [/no reason given/i, 'Kara stopped without saying why. Try again, then send the debug report.'],
+];
+
+function plainReason(reason: string): string {
+  for (const [pattern, plain] of PLAIN_REASONS) {
+    if (pattern.test(reason)) {
+      return plain;
+    }
+  }
+  return reason;
+}
+
 export interface PanelView {
   readonly state: PanelState;
   /** The words for the primary action, or the status while preparing. */
@@ -57,6 +83,12 @@ export interface PanelView {
   readonly progress: number | null;
   /** The one line under the bar: what is being waited for, and for how long. */
   readonly detail: string | null;
+  /**
+   * What to do about the state, in one sentence. Present only where the person
+   * can act on it: an unsupported browser and a failure both need a next step,
+   * and the engine's own words are not one.
+   */
+  readonly advice: string | null;
   /** A line under the controls while the rest of the song is still arriving. */
   readonly note: string | null;
   /** Whether the mode switch and the mix belong on screen. */
@@ -277,6 +309,7 @@ export function panelView(input: PanelInput): PanelView {
   const quiet = {
     progress: null,
     detail: null,
+    advice: null,
     note: null,
     controls: false,
     mode,
@@ -363,10 +396,26 @@ export function panelView(input: PanelInput): PanelView {
     };
   }
 
+  if (report.status === 'unsupported') {
+    return {
+      ...quiet,
+      state: 'unsupported',
+      label: 'Kara can\'t run on this machine',
+      // The engine's reason names what is missing; the advice names what the
+      // person can do about it, which is never "retry on the same machine".
+      detail: report.reason ?? null,
+      advice: 'It needs a browser with WebGPU. Chrome 116 or newer on a desktop has it.',
+    };
+  }
+
   return {
     ...quiet,
-    state: report.status === 'unsupported' ? 'unsupported' : 'error',
-    label: report.status === 'unsupported' ? 'Not available here' : 'Karaoke stopped',
-    detail: report.reason ?? 'no reason given',
+    state: 'error',
+    label: 'Karaoke stopped',
+    // Never the raw exception on its own: a plain sentence first, the engine's
+    // own words underneath, and the next step last. `no reason given` stays
+    // inside diagnostics, where an empty reason is information.
+    detail: report.reason === null ? null : plainReason(report.reason),
+    advice: 'Press Try again. If it stops twice, the debug report in the popup says why.',
   };
 }

@@ -101,6 +101,20 @@ export const STEM_LABEL: Readonly<Record<Stem, string>> = {
   vocals: 'Vocals',
 };
 
+/**
+ * The words on the row itself, and the words its mute switch wears.
+ *
+ * The vocal row is the guide, and Kara starts with it muted, so "Vocals · 100"
+ * read as a bug: a full slider that made no sound, with the only clue a single
+ * letter. The row says what it is and the switch says which way it is thrown.
+ */
+export function stemRowLabel(stem: Stem, muted: boolean): string {
+  if (stem !== 'vocals') {
+    return STEM_LABEL[stem];
+  }
+  return muted ? 'Guide vocal: off' : 'Guide vocal: on';
+}
+
 export function isStem(value: unknown): value is Stem {
   return typeof value === 'string' && (STEMS as readonly string[]).includes(value);
 }
