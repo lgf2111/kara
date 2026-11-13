@@ -7,7 +7,12 @@ import {
   STEMS,
   type StemMix,
 } from '../audio/stems.ts';
-import { prepareDetail } from '../content/panel-view.ts';
+import {
+  prepareDetail,
+  plainReason,
+  RETRY_ADVICE,
+  UNSUPPORTED_ADVICE,
+} from '../content/panel-view.ts';
 import {
   cacheStatusLabel,
   formatBytes,
@@ -61,6 +66,8 @@ export interface PopupView {
   readonly state: PopupState;
   readonly headline: string;
   readonly detail: string | null;
+  /** What to do about it, in one sentence, where there is something to do. */
+  readonly advice: string | null;
   /** Where the bar is, nought to one, or null when there is no bar. */
   readonly progress: number | null;
   readonly action: PopupAction;
@@ -333,6 +340,7 @@ export function popupView(input: PopupInput): PopupView {
   const diagnostics = diagnosticsOf(report, input.pipeline ?? null, semitones, mix);
   const quiet = {
     progress: null,
+    advice: null,
     semitones,
     keyLabel: keyLabel(semitones),
     diagnostics,
@@ -346,6 +354,7 @@ export function popupView(input: PopupInput): PopupView {
       detail:
         pageNote(input.url) ??
         'Reads this video\u2019s audio, takes the vocal out, and lets you switch it on and off.',
+      advice: null,
       action: 'start',
       actionLabel: 'Start',
     };
@@ -358,6 +367,7 @@ export function popupView(input: PopupInput): PopupView {
       headline: 'Getting ready',
       progress: report.prepare?.fraction ?? 0,
       detail: prepareDetail(report),
+      advice: null,
       action: 'stop',
       actionLabel: 'Stop',
     };
@@ -369,6 +379,7 @@ export function popupView(input: PopupInput): PopupView {
       state: 'paused',
       headline: 'Paused',
       detail: null,
+      advice: null,
       action: 'stop',
       actionLabel: 'Stop',
     };
@@ -383,6 +394,19 @@ export function popupView(input: PopupInput): PopupView {
         report.mode === 'instrumental'
           ? vocalNote(mix)
           : 'vocals on — switch them off with Instrumental in the page',
+      advice: null,
+      action: 'stop',
+      actionLabel: 'Stop',
+    };
+  }
+
+  if (report.status === 'unsupported') {
+    return {
+      ...quiet,
+      state: 'unsupported',
+      headline: 'Kara cannot run on this machine',
+      detail: report.reason,
+      advice: UNSUPPORTED_ADVICE,
       action: 'stop',
       actionLabel: 'Stop',
     };
@@ -390,9 +414,12 @@ export function popupView(input: PopupInput): PopupView {
 
   return {
     ...quiet,
-    state: report.status === 'unsupported' ? 'unsupported' : 'error',
-    headline: report.status === 'unsupported' ? 'This machine cannot do it' : 'It went wrong',
-    detail: report.reason ?? 'no reason given',
+    state: 'error',
+    headline: 'It went wrong',
+    // Same translation as the panel: a plain sentence here, the raw text in
+    // diagnostics, and a next step under both.
+    detail: report.reason === null ? null : plainReason(report.reason),
+    advice: RETRY_ADVICE,
     action: 'stop',
     actionLabel: 'Stop',
   };

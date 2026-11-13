@@ -66,7 +66,8 @@ const PLAIN_REASONS: readonly (readonly [RegExp, string])[] = [
   [/no reason given/i, 'Kara stopped without saying why. Try again, then send the debug report.'],
 ];
 
-function plainReason(reason: string): string {
+/** The engine's words, translated. Shared so the popup cannot drift from the panel. */
+export function plainReason(reason: string): string {
   for (const [pattern, plain] of PLAIN_REASONS) {
     if (pattern.test(reason)) {
       return plain;
@@ -74,6 +75,13 @@ function plainReason(reason: string): string {
   }
   return reason;
 }
+
+/** What a person can do about a failure, on either surface. */
+export const RETRY_ADVICE = 'Press Try again. If it stops twice, the debug report in the popup says why.';
+
+/** The one actionable sentence for a browser that cannot run the engine. */
+export const UNSUPPORTED_ADVICE =
+  'It needs a browser with WebGPU. Chrome 116 or newer on a desktop has it.';
 
 export interface PanelView {
   readonly state: PanelState;
@@ -404,7 +412,7 @@ export function panelView(input: PanelInput): PanelView {
       // The engine's reason names what is missing; the advice names what the
       // person can do about it, which is never "retry on the same machine".
       detail: report.reason ?? null,
-      advice: 'It needs a browser with WebGPU. Chrome 116 or newer on a desktop has it.',
+      advice: UNSUPPORTED_ADVICE,
     };
   }
 
@@ -416,6 +424,6 @@ export function panelView(input: PanelInput): PanelView {
     // own words underneath, and the next step last. `no reason given` stays
     // inside diagnostics, where an empty reason is information.
     detail: report.reason === null ? null : plainReason(report.reason),
-    advice: 'Press Try again. If it stops twice, the debug report in the popup says why.',
+    advice: RETRY_ADVICE,
   };
 }

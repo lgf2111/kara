@@ -181,7 +181,44 @@ describe('popupView', () => {
     const view = popupView({ report: report({ status: 'error', reason: null }), url: YOUTUBE, key: 0 });
 
     expect(view.headline).toBe('It went wrong');
-    expect(view.detail).toBe('no reason given');
+    // No engine words to show, but the next step is never missing.
+    expect(view.detail).toBeNull();
+    expect(view.advice).toContain('Try again');
+  });
+
+  it('translates the engine words the same way the panel does', () => {
+    const view = popupView({
+      report: report({ status: 'error', reason: 'the audio ended early (12 of 99 bytes)' }),
+      url: YOUTUBE,
+      key: 0,
+    });
+
+    expect(view.detail).toBe('The video stopped sending sound before the end. Press play, then try again.');
+    expect(view.advice).toContain('Try again');
+  });
+
+  it('gives a dead end its next step too', () => {
+    const view = popupView({
+      report: report({ status: 'unsupported', reason: 'this machine has no WebGPU' }),
+      url: YOUTUBE,
+      key: 0,
+    });
+
+    expect(view.headline).toBe('Kara cannot run on this machine');
+    expect(view.detail).toBe('this machine has no WebGPU');
+    expect(view.advice).toContain('WebGPU');
+  });
+
+  it('says nothing about advice where there is nothing to do', () => {
+    for (const status of ['idle', 'preparing', 'paused', 'ready'] as const) {
+      const view = popupView({
+        report: status === 'idle' ? null : report({ status }),
+        url: YOUTUBE,
+        key: 0,
+      });
+
+      expect(view.advice).toBeNull();
+    }
   });
 
   it('says nothing about a pause beyond its name', () => {

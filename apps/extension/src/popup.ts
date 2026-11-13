@@ -82,6 +82,7 @@ function need<T extends Element>(selector: string): T {
 
 const headline = need<HTMLParagraphElement>('#headline');
 const detail = need<HTMLParagraphElement>('#detail');
+const advice = need<HTMLParagraphElement>('#advice');
 const bar = need<HTMLDivElement>('#bar');
 const barFill = need<HTMLSpanElement>('#bar-fill');
 const stateDot = need<HTMLSpanElement>('#state-dot');
@@ -231,6 +232,10 @@ function draw(): void {
   headline.textContent = starting ? 'Starting…' : shown.headline;
   detail.textContent = failure ?? shown.detail ?? '';
   detail.hidden = detail.textContent === '';
+  // The next step, in the same place the panel puts it. A locally caught
+  // failure has no advice of its own, so the view's line stands.
+  advice.textContent = shown.advice ?? '';
+  advice.hidden = advice.textContent === '';
   bar.hidden = shown.progress === null;
   if (shown.progress !== null) {
     const percent = Math.round(shown.progress * 100);

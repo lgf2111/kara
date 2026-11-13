@@ -104,6 +104,11 @@
         font-size: 15px;
         font-weight: 600;
       }
+      #advice {
+        margin: 6px 0 0;
+        font-size: 11px;
+        line-height: 1.45;
+      }
       #detail {
         margin: 4px 0 0;
         color: var(--kara-muted);
@@ -557,6 +562,7 @@
     <div id="state" role="status" aria-live="polite">
       <p id="headline">Checking…</p>
       <p id="detail" hidden></p>
+      <p id="advice" hidden></p>
       <div id="bar" class="bar" role="progressbar" aria-label="Getting karaoke ready" aria-valuemin="0" aria-valuemax="100" hidden>
         <span id="bar-fill" class="bar-fill"></span>
       </div>
