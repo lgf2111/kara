@@ -5,12 +5,14 @@ import {
   DEFAULT_MIX,
   isStem,
   mixGains,
+  keyLevel,
   normaliseMix,
   railLanes,
   stemFromPercent,
   stemLevel,
   stemPercent,
   STEMS,
+  wheelLevel,
   withMute,
   withSolo,
   withStem,
@@ -269,5 +271,49 @@ describe('railLanes', () => {
 
   it('dims nothing when no stem is soloed', () => {
     expect(railLanes(DEFAULT_MIX).some((lane) => lane.dimmed)).toBe(false);
+  });
+});
+
+describe('wheelLevel', () => {
+  it('turns up for a wheel away from the person', () => {
+    expect(wheelLevel(50, -120)).toBe(55);
+  });
+
+  it('turns down for a wheel towards them', () => {
+    expect(wheelLevel(50, 120)).toBe(45);
+  });
+
+  it('moves one at a time with shift held', () => {
+    expect(wheelLevel(50, -120, true)).toBe(51);
+    expect(wheelLevel(50, 120, true)).toBe(49);
+  });
+
+  it('cannot be turned past either end', () => {
+    expect(wheelLevel(98, -120)).toBe(100);
+    expect(wheelLevel(2, 120)).toBe(0);
+  });
+});
+
+describe('keyLevel', () => {
+  it('steps with the arrows and jumps with Page', () => {
+    expect(keyLevel(50, 'ArrowUp')).toBe(55);
+    expect(keyLevel(50, 'ArrowDown')).toBe(45);
+    expect(keyLevel(50, 'PageUp')).toBe(60);
+    expect(keyLevel(50, 'PageDown')).toBe(40);
+  });
+
+  it('goes to the ends with Home and End', () => {
+    expect(keyLevel(50, 'Home')).toBe(0);
+    expect(keyLevel(50, 'End')).toBe(100);
+  });
+
+  it('moves one at a time with shift held', () => {
+    expect(keyLevel(50, 'ArrowUp', true)).toBe(51);
+    expect(keyLevel(50, 'ArrowDown', true)).toBe(49);
+  });
+
+  it('leaves keys it does not answer alone', () => {
+    expect(keyLevel(50, 'Tab')).toBeNull();
+    expect(keyLevel(50, 'a')).toBeNull();
   });
 });

@@ -242,6 +242,45 @@ export interface RailLane {
   readonly dimmed: boolean;
 }
 
+/**
+ * Where a dial goes when the wheel turns over it.
+ *
+ * Up is more: a wheel away from the person adds. Shift is the fine step, so a
+ * song can be balanced without hunting. Clamped, because a level is a level.
+ */
+export function wheelLevel(current: number, deltaY: number, fine = false): number {
+  const step = fine ? 1 : 5;
+  return clampLevel(current + (deltaY < 0 ? step : -step));
+}
+
+/**
+ * Where a dial goes when a key is pressed on it, or null for keys it does not
+ * answer. Arrows step, Page keys jump, Home and End are the ends.
+ */
+export function keyLevel(current: number, key: string, fine = false): number | null {
+  const step = fine ? 1 : 5;
+  switch (key) {
+    case 'ArrowUp':
+    case 'ArrowRight':
+      return clampLevel(current + step);
+    case 'ArrowDown':
+    case 'ArrowLeft':
+      return clampLevel(current - step);
+    case 'PageUp':
+      return clampLevel(current + 10);
+    case 'PageDown':
+      return clampLevel(current - 10);
+    case 'Home':
+      return 0;
+    case 'End':
+      return 100;
+    default:
+      return null;
+  }
+}
+
+const clampLevel = (value: number): number => Math.max(0, Math.min(100, Math.round(value)));
+
 export function railLanes(mix: StemMix): readonly RailLane[] {
   const anySolo = STEMS.some((stem) => mix.soloed[stem]);
   return [...STEMS]

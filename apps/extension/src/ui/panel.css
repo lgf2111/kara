@@ -213,15 +213,16 @@ button[hidden] {
 /* The level rail: four lanes, vocals first, each lane's height its level. It
    is a picture of the mix, so it earns 22px of height and no interaction. */
 .rail {
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 22px;
-  padding: 0 1px;
+  /* Same four columns and gap as the dials below, so each lane sits over the
+     dial it describes. */
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  align-items: end;
+  height: 20px;
 }
 .rail-lane {
   position: relative;
-  flex: 1;
   height: 100%;
   border-radius: 2px;
   background: var(--kara-track);
@@ -256,15 +257,108 @@ button[hidden] {
     transition: none;
   }
 }
+/* Four dials side by side: the whole mixer at a glance, nothing behind a
+   disclosure. The vocal dial gets a surface of its own because it is the one
+   the product is about; the other three sit flat beside it. */
+.stem-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
 .stem {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 4px;
+  border-radius: var(--kara-radius);
 }
 .stem.featured {
-  padding: 8px;
-  border-radius: var(--kara-radius);
   background: var(--kara-surface);
+}
+.stem[hidden] {
+  display: none;
+}
+.knob {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  cursor: ns-resize;
+  border-radius: 50%;
+  touch-action: none;
+}
+.knob svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+.knob circle {
+  fill: none;
+  stroke-linecap: round;
+  stroke-width: 5;
+}
+.knob-track {
+  stroke: var(--kara-track);
+}
+.knob-value {
+  stroke: var(--kara-accent);
+  /* 2 * pi * 24, the arc's whole length, so one number drives the dial. */
+  stroke-dasharray: 150.8;
+  stroke-dashoffset: calc(150.8 * (1 - var(--value, 1)));
+  transition: stroke-dashoffset 120ms ease;
+}
+.knob-readout {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--kara-text);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.knob:focus-visible {
+  outline: 2px solid var(--kara-accent);
+  outline-offset: 2px;
+}
+.knob-name {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--kara-muted);
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.knob-switches {
+  display: flex;
+  gap: 3px;
+}
+.knob-switches .switch {
+  width: 22px;
+  height: 20px;
+  min-width: 0;
+  font-size: 10px;
+}
+.stem[data-muted='true'] .knob-value {
+  stroke: var(--kara-faint);
+}
+.stem[data-muted='true'] .knob-name,
+.stem[data-muted='true'] .knob-readout {
+  color: var(--kara-faint);
+}
+@media (prefers-reduced-motion: reduce) {
+  .knob-value {
+    transition: none;
+  }
+}
+.stem-foot {
+  display: flex;
+  justify-content: flex-end;
 }
 .stem-head {
   display: flex;
@@ -839,7 +933,33 @@ button[hidden] {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  padding: 4px 0;
+}
+.key-label {
+  color: var(--kara-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.step.key-step {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--kara-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--kara-text);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.step.key-step:hover {
+  border-color: var(--kara-border-strong);
+  background: var(--kara-surface);
+}
+.step.key-step:focus-visible {
+  outline: 2px solid var(--kara-accent);
+  outline-offset: 1px;
 }
 .key-row .slider {
   flex: 1;

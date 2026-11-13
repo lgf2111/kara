@@ -21,9 +21,11 @@ import {
 import {
   DEFAULT_LEVELS,
   DEFAULT_MIX,
+  keyLevel,
   railLanes,
   STEM_LABEL,
   stemRowLabel,
+  wheelLevel,
   STEMS,
   stemFromPercent,
   stemPercent,
@@ -81,16 +83,6 @@ import type { PanelView } from './panel-view.ts';
  */
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-
-/** The three stems behind the disclosure; the vocal is always on screen. */
-const BACKING = ['drums', 'bass', 'other'] as const;
-
-/** One quiet glyph per backing stem, in the Lucide vocabulary. */
-const BACKING_ICONS: Readonly<Record<(typeof BACKING)[number], string>> = {
-  drums: 'drum',
-  bass: 'guitar',
-  other: 'audio',
-};
 
 /** Which disclosures were left open, remembered for this tab's session. */
 const OPEN_DISCLOSURES = new Set<string>();
@@ -186,14 +178,20 @@ interface Disclosure {
 
 /** One stem's row, and the controls `update` and the reset reach through it. */
 interface StemControl {
+  readonly stem: Stem;
   readonly row: HTMLDivElement;
   /** The row's own words: the guide's change with its switch. */
   readonly name: HTMLSpanElement;
   readonly input: HTMLInputElement;
-  readonly fill: HTMLDivElement;
+  /** The dial: the thing a person turns. `input` is only the value's home. */
+  readonly knob: HTMLDivElement;
+  /** The gold arc inside the dial, driven by a custom property. */
+  readonly arc: SVGCircleElement;
   readonly value: HTMLSpanElement;
   readonly mute: HTMLButtonElement;
   readonly solo: HTMLButtonElement;
+  /** True while a pointer is turning this dial, so a report cannot fight it. */
+  dragging: boolean;
 }
 
 /** One voice's row, the duet twin of `StemControl`. */
@@ -337,12 +335,10 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   // duet desk over the slider, and so the slider does not ride the scroll edge.
   advanced.body.append(
     cacheRow,
-    backingSection.box,
     songSection,
-    keySection,
     // The stable edition has no Practice and no Duet, so their surface is
     // never attached: nothing can open a panel that is not there.
-    ...(STABLE ? [] : [practiceDuetSection]),
+    ...(STABLE ? [] : [practiceDuetSection, backingSection.box]),
     micSection.box,
   );
 
@@ -444,6 +440,14 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     const pressed = target.getAttribute('aria-pressed') !== 'true';
     target.setAttribute('aria-pressed', String(pressed));
     control.row.dataset[kind] = String(pressed);
+    // The guide's own words follow its switch, but only its own: the backing
+    // names do not change with a mute. The dial says the state out loud,
+    // because the visible name has to stay short enough to fit a column.
+    const muted = control.mute.getAttribute('aria-pressed') === 'true';
+    if (control.stem === 'vocals') {
+      control.name.textContent = muted ? 'Guide off' : 'Guide';
+    }
+    control.knob.setAttribute('aria-label', `${stemRowLabel(control.stem, muted)} level`);
     handlers.onMix(mixFromControls());
   };
 
@@ -472,22 +476,117 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   const paintLevel = (control: StemControl, percent: number): void => {
     control.input.value = String(percent);
     control.value.textContent = String(percent);
-    control.fill.style.width = `${String(percent)}%`;
+    control.knob.setAttribute('aria-valuenow', String(percent));
+    // The arc is a quarter-turn of whatever the value is: one custom property
+    // the stylesheet turns into a stroke offset.
+    control.arc.style.setProperty('--value', String(percent / 100));
   };
 
-  const stemRow = (stem: Stem, featured: boolean, glyph?: string): HTMLDivElement => {
+  /**
+   * A dial, turned three ways.
+   *
+   * The wheel is the one the request asked for — hover and scroll, up for more,
+   * down for less — with shift for single steps. A vertical drag does the same
+   * with finer control, and the keyboard gets the arrows, Page keys and Home and
+   * End because a control that only answers a mouse is not finished. Every path
+   * ends in the same place: write the hidden range input, repaint, tell the
+   * engine. The input stays the single home of the value so that `mixFromControls`
+   * and the mid-drag guard in `update` keep working unchanged.
+   */
+  const wireKnob = (control: StemControl): void => {
+    const set = (percent: number): void => {
+      const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+      if (String(clamped) === control.input.value) {
+        return;
+      }
+      paintLevel(control, clamped);
+      handlers.onMix(mixFromControls());
+    };
+
+    control.knob.addEventListener(
+      'wheel',
+      (event) => {
+        // The panel already stops page events; this keeps the page from
+        // scrolling while somebody is turning a dial over it.
+        event.preventDefault();
+        set(wheelLevel(Number(control.input.value), event.deltaY, event.shiftKey));
+      },
+      { passive: false },
+    );
+
+    control.knob.addEventListener('pointerdown', (event) => {
+      control.knob.setPointerCapture(event.pointerId);
+      control.knob.focus();
+      control.dragging = true;
+      event.preventDefault();
+    });
+
+    control.knob.addEventListener('pointermove', (event) => {
+      if (!control.dragging) {
+        return;
+      }
+      // Up is more: a dial turned away from the person. Half a percent a pixel
+      // makes a 200 px drag the whole range.
+      set(Number(control.input.value) - event.movementY * 0.5);
+    });
+
+    const release = (event: PointerEvent): void => {
+      if (control.dragging) {
+        control.dragging = false;
+        control.knob.releasePointerCapture?.(event.pointerId);
+      }
+    };
+    control.knob.addEventListener('pointerup', release);
+    control.knob.addEventListener('pointercancel', release);
+
+    control.knob.addEventListener('keydown', (event) => {
+      const next = keyLevel(Number(control.input.value), event.key, event.shiftKey);
+      if (next !== null) {
+        event.preventDefault();
+        set(next);
+      }
+    });
+  };
+
+  const stemRow = (stem: Stem, featured: boolean): HTMLDivElement => {
     const row = div(featured ? 'stem featured' : 'stem');
     row.setAttribute('role', 'group');
     row.setAttribute('aria-label', STEM_LABEL[stem]);
-    const head = div('stem-head');
-    if (glyph !== undefined) {
-      const mark = span('stem-glyph');
-      mark.append(icon(glyph));
-      head.append(mark);
+
+    // The dial. `role="slider"` on the knob itself, so the accessibility tree
+    // has exactly one level control per stem and it is the thing on screen.
+    const knob = div('knob');
+    knob.setAttribute('role', 'slider');
+    knob.setAttribute('tabindex', '0');
+    knob.setAttribute('aria-label', `${stemRowLabel(stem, DEFAULT_MIX.muted[stem])} level`);
+    knob.setAttribute('aria-valuemin', '0');
+    knob.setAttribute('aria-valuemax', '100');
+    knob.setAttribute('aria-valuenow', String(stemPercent(DEFAULT_LEVELS[stem])));
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 56 56');
+    svg.setAttribute('aria-hidden', 'true');
+    const trackArc = document.createElementNS(SVG_NS, 'circle');
+    trackArc.setAttribute('class', 'knob-track');
+    for (const [name, value] of Object.entries({ cx: '28', cy: '28', r: '24' })) {
+      trackArc.setAttribute(name, value);
     }
-    const name = span('stem-name');
-    name.textContent = stemRowLabel(stem, DEFAULT_MIX.muted[stem]);
-    const switches = div('switches');
+    const valueArc = document.createElementNS(SVG_NS, 'circle');
+    valueArc.setAttribute('class', 'knob-value');
+    for (const [name, value] of Object.entries({ cx: '28', cy: '28', r: '24' })) {
+      valueArc.setAttribute(name, value);
+    }
+    svg.append(trackArc, valueArc);
+    const readout = span('knob-readout');
+    readout.textContent = String(stemPercent(DEFAULT_LEVELS[stem]));
+    knob.append(svg, readout);
+
+    const name = span('knob-name');
+    name.textContent = STEM_LABEL[stem];
+    if (stem === 'vocals') {
+      name.textContent = 'Guide';
+    }
+
+    const switches = div('knob-switches');
     const mute = button('M', 'switch mute');
     mute.title = `Mute ${STEM_LABEL[stem].toLowerCase()}`;
     mute.setAttribute('aria-label', `Mute ${STEM_LABEL[stem].toLowerCase()}`);
@@ -497,38 +596,37 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     solo.setAttribute('aria-label', `Solo ${STEM_LABEL[stem].toLowerCase()}`);
     solo.setAttribute('aria-pressed', String(DEFAULT_MIX.soloed[stem]));
     switches.append(mute, solo);
-    const level = span('level');
-    head.append(name, switches, level);
+
     row.dataset['muted'] = String(DEFAULT_MIX.muted[stem]);
     row.dataset['soloed'] = String(DEFAULT_MIX.soloed[stem]);
 
-    const slider = div('slider');
-    const track = div('track');
-    const sliderFill = div('slider-fill');
+    // The range input is the value's home and nothing else: hidden from the
+    // page, kept in the DOM so `mixFromControls` reads one shape for all stems.
     const input = document.createElement('input');
     input.type = 'range';
     input.min = '0';
     input.max = '100';
     input.step = '1';
+    input.hidden = true;
     input.setAttribute('aria-label', `${STEM_LABEL[stem]} level`);
-    slider.append(track, sliderFill, input);
-    row.append(head, slider);
+
+    row.append(knob, name, switches, input);
 
     const control: StemControl = {
+      stem,
       row,
       name,
       input,
-      fill: sliderFill,
-      value: level,
+      knob,
+      arc: valueArc,
+      value: readout,
       mute,
       solo,
+      dragging: false,
     };
     stemControls.set(stem, control);
     paintLevel(control, stemPercent(DEFAULT_LEVELS[stem]));
-    input.addEventListener('input', () => {
-      paintLevel(control, Number(input.value));
-      handlers.onMix(mixFromControls());
-    });
+    wireKnob(control);
     mute.addEventListener('click', () => {
       flipSwitch(control, 'mute');
     });
@@ -538,8 +636,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     return row;
   };
 
-  const vocalsRow = stemRow('vocals', true);
-  mixer.append(rail, vocalsRow, advanced.box);
+
 
   /**
    * Practice and Duet share one row because they share one readiness rule:
@@ -897,17 +994,14 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
 
   practiceDuetBox.append(duetProgress, duetReady, duetError);
 
-  const reset = button('Reset', 'reset');
-  reset.title = 'Backing stems to full, unmuted and unsoloed';
-  backingSection.head.append(reset);
-  for (const stem of BACKING) {
-    backingSection.body.append(stemRow(stem, false, BACKING_ICONS[stem]));
+  const reset = button('Reset levels', 'reset');
+  reset.title = 'Every level back to its default, nothing muted or soloed';
+  const stemsRow = div('stem-row');
+  for (const stem of STEMS) {
+    stemsRow.append(stemRow(stem, stem === 'vocals'));
   }
-  const syncReset = (): void => {
-    reset.hidden = backingSection.toggle.getAttribute('aria-expanded') !== 'true';
-  };
-  backingSection.toggle.addEventListener('click', syncReset);
-  syncReset();
+  const stemsFoot = div('stem-foot');
+  stemsFoot.append(reset);
 
   const keyRow = div('key-row');
   /** The last key drawn, which is what a slider move or a shortcut moves from. */
@@ -932,7 +1026,35 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   keyClear.hidden = true;
   const keyResetSlot = span('key-reset-slot');
   keyResetSlot.append(keyClear);
-  keyRow.append(keySlider, keyValue, keyResetSlot);
+
+  // The key is basic, not advanced: it is on screen, and it steps on a click.
+  // The slider stays for a big jump; the two buttons are for the way people
+  // actually use it — one semitone at a time while a song is playing.
+  const keyLabelSpan = span('key-label');
+  keyLabelSpan.textContent = 'Key';
+  const keyDown = button('\u2212', 'step key-step');
+  keyDown.setAttribute('aria-label', 'Lower the key by one semitone');
+  keyDown.title = 'Lower the key one semitone';
+  const keyUp = button('+', 'step key-step');
+  keyUp.setAttribute('aria-label', 'Raise the key by one semitone');
+  keyUp.title = 'Raise the key one semitone';
+  const stepKey = (by: number): void => {
+    const next = Math.max(KEY_MIN, Math.min(KEY_MAX, semitones + by));
+    if (next === semitones) {
+      return;
+    }
+    semitones = next;
+    paintKey(next);
+    handlers.onKey(next);
+  };
+  keyDown.addEventListener('click', () => {
+    stepKey(-1);
+  });
+  keyUp.addEventListener('click', () => {
+    stepKey(1);
+  });
+
+  keyRow.append(keyLabelSpan, keyDown, keySlider, keyUp, keyValue, keyResetSlot);
   keySection.append(keyRow);
 
   const paintKey = (value: number): void => {
@@ -958,7 +1080,9 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   const noteText = span('note-text');
   note.append(noteGlyph, noteText);
   note.hidden = true;
-  mixer.append(note);
+  // Everything above is now built: rail, the four dials, the key, the note,
+  // then only what genuinely needs a disclosure.
+  mixer.append(rail, stemsRow, stemsFoot, keyRow, note, advanced.box);
 
   const errorBox = div('error');
   const errorHead = div('error-head');
@@ -1098,7 +1222,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   // would not be a reset, so the switches go back too. While collapsed there
   // is nothing to reset that can be seen, so the button is not shown.
   reset.addEventListener('click', () => {
-    for (const stem of BACKING) {
+    for (const stem of STEMS) {
       const control = stemControls.get(stem);
       if (control === undefined) {
         continue;
@@ -1169,7 +1293,11 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
         : `${view.note}${percent === null ? '' : ` · ${String(percent)}%`}`;
 
     const duetVoicesVisible = view.duetHasVoices;
-    vocalsRow.hidden = duetVoicesVisible;
+    // With duet voices on, the vocal dial gives way to the two-voice desk.
+    const vocalControl = stemControls.get('vocals');
+    if (vocalControl !== undefined) {
+      vocalControl.row.hidden = duetVoicesVisible;
+    }
     duetProgress.hidden = view.duetState !== 'preparing';
     duetReady.hidden = !duetVoicesVisible;
     duetError.hidden = view.duetState !== 'error';
@@ -1344,7 +1472,9 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
       }
       const level = stemPercent(view.mix.levels[stem]);
       paintRailLane(stem, level, view.mix);
-      if (root.activeElement !== control.input) {
+      // A report arriving mid-turn must not pull the dial out of the hand
+      // that is turning it; the readout still follows so nothing goes stale.
+      if (!control.dragging) {
         paintLevel(control, level);
       } else {
         control.value.textContent = String(level);
