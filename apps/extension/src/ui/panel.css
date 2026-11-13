@@ -210,6 +210,52 @@ button[hidden] {
   flex-direction: column;
   gap: 8px;
 }
+/* The level rail: four lanes, vocals first, each lane's height its level. It
+   is a picture of the mix, so it earns 22px of height and no interaction. */
+.rail {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 22px;
+  padding: 0 1px;
+}
+.rail-lane {
+  position: relative;
+  flex: 1;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--kara-track);
+  overflow: hidden;
+}
+.rail-lane .rail-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--lane, 100%);
+  border-radius: 2px;
+  background: var(--kara-muted);
+  transition: height 160ms ease;
+}
+/* The vocal lane is the one thing Kara actually changed, so it is the ink. */
+.rail-lane[data-stem='vocals'] .rail-fill {
+  background: var(--kara-accent);
+}
+.rail-lane[data-muted='true'] .rail-fill {
+  background: var(--kara-faint);
+  opacity: 0.5;
+}
+.rail-lane[data-soloed='true'] .rail-fill {
+  background: var(--kara-accent);
+}
+.rail-lane[data-dimmed='true'] {
+  opacity: 0.45;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rail-lane .rail-fill {
+    transition: none;
+  }
+}
 .stem {
   display: flex;
   flex-direction: column;

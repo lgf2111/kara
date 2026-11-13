@@ -225,6 +225,36 @@ export function mixGains(mix: StemMix): readonly number[] {
 }
 
 /** Where a slider sits for a gain, and the gain for a slider position. */
+/**
+ * The four lanes of the panel's level rail, in the order they are drawn.
+ *
+ * Vocals first: it is the one stem Kara is actually about, and a person
+ * glancing at the rail should see what the product did before what it kept.
+ * The rail is a summary, not a second set of sliders, so mute collapses a lane
+ * to a hairline and solo lifts one and dims the rest — the same rules the rows
+ * below it already follow.
+ */
+export interface RailLane {
+  readonly stem: Stem;
+  readonly percent: number;
+  readonly muted: boolean;
+  readonly soloed: boolean;
+  readonly dimmed: boolean;
+}
+
+export function railLanes(mix: StemMix): readonly RailLane[] {
+  const anySolo = STEMS.some((stem) => mix.soloed[stem]);
+  return [...STEMS]
+    .reverse()
+    .map((stem) => ({
+      stem,
+      percent: stemPercent(mix.levels[stem]),
+      muted: mix.muted[stem],
+      soloed: mix.soloed[stem],
+      dimmed: anySolo && !mix.soloed[stem],
+    }));
+}
+
 export function stemPercent(level: number): number {
   if (!Number.isFinite(level)) {
     return 0;

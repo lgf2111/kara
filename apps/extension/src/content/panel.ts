@@ -21,6 +21,7 @@ import {
 import {
   DEFAULT_LEVELS,
   DEFAULT_MIX,
+  railLanes,
   STEM_LABEL,
   stemRowLabel,
   STEMS,
@@ -390,6 +391,24 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   const mixer = div('mixer');
 
   /**
+   * The level rail: four lanes that summarise the mix above the rows that own
+   * the controls. It is a picture, not a second set of sliders — the lanes are
+   * `aria-hidden`, and the named rows below stay the only interactive surface,
+   * so a screen reader is not told about four sliders twice.
+   */
+  const rail = div('rail');
+  rail.setAttribute('aria-hidden', 'true');
+  const railLanesByStem = new Map<Stem, HTMLDivElement>();
+  for (const stem of STEMS) {
+    const lane = div('rail-lane');
+    lane.dataset['stem'] = stem;
+    const fill = div('rail-fill');
+    lane.append(fill);
+    rail.append(lane);
+    railLanesByStem.set(stem, lane);
+  }
+
+  /**
    * One slider and two switches per stem, built the same way, so a level can
    * never mean something different from one row to the next. `stemControls`
    * is how `update` reaches them and how the reset finds them without a second
@@ -426,6 +445,28 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
     target.setAttribute('aria-pressed', String(pressed));
     control.row.dataset[kind] = String(pressed);
     handlers.onMix(mixFromControls());
+  };
+
+  /**
+   * One lane of the rail: height is the level, a mute collapses it to a
+   * hairline, and a solo anywhere dims every lane that is not soloed. Silence
+   * has to be visible, or the rail lies about which stems are actually heard.
+   */
+  const paintRailLane = (
+    stem: Stem,
+    percent: number,
+    mix: Parameters<typeof railLanes>[0],
+  ): void => {
+    const lane = railLanesByStem.get(stem);
+    if (lane === undefined) {
+      return;
+    }
+    const state = railLanes(mix).find((entry) => entry.stem === stem);
+    const shown = state?.muted === true ? 2 : percent;
+    lane.dataset['muted'] = String(state?.muted === true);
+    lane.dataset['soloed'] = String(state?.soloed === true);
+    lane.dataset['dimmed'] = String(state?.dimmed === true);
+    lane.style.setProperty('--lane', `${String(shown)}%`);
   };
 
   const paintLevel = (control: StemControl, percent: number): void => {
@@ -498,7 +539,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
   };
 
   const vocalsRow = stemRow('vocals', true);
-  mixer.append(vocalsRow, advanced.box);
+  mixer.append(rail, vocalsRow, advanced.box);
 
   /**
    * Practice and Duet share one row because they share one readiness rule:
@@ -1302,6 +1343,7 @@ export function mountPanel(container: HTMLElement, handlers: PanelHandlers): Pan
         control.name.textContent = rowLabel;
       }
       const level = stemPercent(view.mix.levels[stem]);
+      paintRailLane(stem, level, view.mix);
       if (root.activeElement !== control.input) {
         paintLevel(control, level);
       } else {

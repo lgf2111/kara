@@ -6,6 +6,7 @@ import {
   isStem,
   mixGains,
   normaliseMix,
+  railLanes,
   stemFromPercent,
   stemLevel,
   stemPercent,
@@ -235,5 +236,38 @@ describe('percentage conversion', () => {
     expect(stemFromPercent(500)).toBe(1);
     expect(stemPercent(Number.NaN)).toBe(0);
     expect(stemFromPercent(Number.NaN)).toBe(0);
+  });
+});
+
+describe('railLanes', () => {
+  it('draws vocals first, then the backing stems', () => {
+    const lanes = railLanes(DEFAULT_MIX);
+
+    expect(lanes.map((lane) => lane.stem)).toEqual(['vocals', 'other', 'bass', 'drums']);
+  });
+
+  it('reads each lane height from its level', () => {
+    const lanes = railLanes(withStem(DEFAULT_MIX, 'drums', 0.25));
+
+    expect(lanes.find((lane) => lane.stem === 'drums')?.percent).toBe(25);
+    expect(lanes.find((lane) => lane.stem === 'vocals')?.percent).toBe(100);
+  });
+
+  it('marks the guide as muted on the default mix, because it is', () => {
+    const lanes = railLanes(DEFAULT_MIX);
+
+    expect(lanes.find((lane) => lane.stem === 'vocals')?.muted).toBe(true);
+    expect(lanes.filter((lane) => lane.stem !== 'vocals').every((lane) => !lane.muted)).toBe(true);
+  });
+
+  it('dims every lane that is not soloed once one is', () => {
+    const lanes = railLanes(withSolo(DEFAULT_MIX, 'bass', true));
+
+    expect(lanes.find((lane) => lane.stem === 'bass')?.dimmed).toBe(false);
+    expect(lanes.filter((lane) => lane.stem !== 'bass').every((lane) => lane.dimmed)).toBe(true);
+  });
+
+  it('dims nothing when no stem is soloed', () => {
+    expect(railLanes(DEFAULT_MIX).some((lane) => lane.dimmed)).toBe(false);
   });
 });
