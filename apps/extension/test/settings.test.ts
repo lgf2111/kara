@@ -20,8 +20,8 @@ describe('the defaults', () => {
 
 describe('parseSettings', () => {
   it('reads back what was written', () => {
-    expect(parseSettings({ key: 0 })).toEqual({ key: 0 });
-    expect(parseSettings({ key: -3 })).toEqual({ key: -3 });
+    expect(parseSettings({ key: 0 })).toEqual({ key: 0, showAdvanced: false });
+    expect(parseSettings({ key: -3 })).toEqual({ key: -3, showAdvanced: false });
   });
 
   it('falls back to the default rather than throwing, whatever is in storage', () => {
@@ -37,13 +37,29 @@ describe('parseSettings', () => {
   });
 
   it('ignores anything else that happens to be alongside it', () => {
-    expect(parseSettings({ key: 2, guide: 0.4, onReady: 'continue' })).toEqual({ key: 2 });
+    expect(parseSettings({ key: 2, guide: 0.4, onReady: 'continue' })).toEqual({
+      key: 2,
+      showAdvanced: false,
+    });
   });
 });
 
 describe('withSettings', () => {
   it('changes the one field and keeps the rest readable', () => {
-    expect(withSettings(DEFAULT_SETTINGS, { key: 4 })).toEqual({ key: 4 });
-    expect(withSettings({ key: 4 }, {})).toEqual({ key: 4 });
+    expect(withSettings(DEFAULT_SETTINGS, { key: 4 })).toEqual({
+      key: 4,
+      showAdvanced: false,
+    });
+    expect(withSettings({ key: 4, showAdvanced: false }, {})).toEqual({
+      key: 4,
+      showAdvanced: false,
+    });
+  });
+
+  it('remembers the advanced switch and only that', () => {
+    expect(withSettings(DEFAULT_SETTINGS, { showAdvanced: true })).toEqual({
+      key: 0,
+      showAdvanced: true,
+    });
   });
 });

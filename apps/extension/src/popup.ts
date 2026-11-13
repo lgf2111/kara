@@ -91,6 +91,10 @@ const keyValue = need<HTMLSpanElement>('#key-value');
 const keyDown = need<HTMLButtonElement>('#key-down');
 const keyUp = need<HTMLButtonElement>('#key-up');
 const keyClear = need<HTMLButtonElement>('#key-clear');
+const advancedToggle = need<HTMLButtonElement>('#advanced-toggle');
+const advancedBody = need<HTMLElement>('#advanced-body');
+const showAdvanced = need<HTMLInputElement>('#show-advanced');
+let advancedOpen = false;
 const diagnosticsToggle = need<HTMLButtonElement>('#diagnostics-toggle');
 const diagnosticsLabel = need<HTMLSpanElement>('#diagnostics-label');
 const diagnosticsBox = need<HTMLElement>('#diagnostics');
@@ -572,6 +576,35 @@ diagnosticsToggle.addEventListener('click', () => {
   setDiagnostics(!diagnosticsOpen);
 });
 
+/**
+ * Advanced is opt-in, and off means absent rather than closed: with the setting
+ * off the disclosure is not in the page at all, so there is nothing to tab to
+ * and nothing to read out. Opening it is a session's business; the decision to
+ * have it is the setting's.
+ */
+const setAdvancedAvailable = (available: boolean): void => {
+  advancedToggle.hidden = !available;
+  if (!available) {
+    advancedOpen = false;
+    advancedToggle.setAttribute('aria-expanded', 'false');
+    advancedBody.hidden = true;
+  }
+  showAdvanced.checked = available;
+};
+
+advancedToggle.addEventListener('click', () => {
+  advancedOpen = !advancedOpen;
+  advancedToggle.setAttribute('aria-expanded', String(advancedOpen));
+  advancedBody.hidden = !advancedOpen;
+  // The chevron points the way the section will move, like the panel's.
+  advancedToggle.dataset['open'] = String(advancedOpen);
+});
+
+showAdvanced.addEventListener('change', () => {
+  writeSettings({ showAdvanced: showAdvanced.checked }).catch(() => undefined);
+  setAdvancedAvailable(showAdvanced.checked);
+});
+
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'session' && Object.hasOwn(changes, STATUS_KEY)) {
     take(changes[STATUS_KEY]?.newValue);
@@ -602,6 +635,7 @@ async function open(): Promise<void> {
   url = tab?.url;
   const settings = await readSettings();
   key = settings.key;
+  setAdvancedAvailable(settings.showAdvanced);
   const [history, singer] = await Promise.all([readScoreHistory(), readSingerName()]);
   scores = history;
   singerName.value = singer;

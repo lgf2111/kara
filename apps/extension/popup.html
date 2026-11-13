@@ -104,6 +104,69 @@
         font-size: 15px;
         font-weight: 600;
       }
+      #advanced-toggle {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid var(--kara-border);
+        border-radius: 10px;
+        background: transparent;
+        color: var(--kara-text);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #advanced-toggle[hidden] {
+        display: none;
+      }
+      #advanced-toggle:hover {
+        border-color: var(--kara-border-strong);
+      }
+      #advanced-toggle:focus-visible {
+        outline: 2px solid var(--kara-accent);
+        outline-offset: 1px;
+      }
+      #advanced-toggle .chevron {
+        display: flex;
+        transition: transform 140ms ease;
+      }
+      #advanced-toggle[data-open='true'] .chevron {
+        transform: rotate(90deg);
+      }
+      #advanced-body {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      #advanced-body[hidden] {
+        display: none;
+      }
+      .setting {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 2px;
+        padding-top: 12px;
+        border-top: 1px solid var(--kara-border);
+        color: var(--kara-muted);
+        font-size: 11px;
+        cursor: pointer;
+      }
+      .setting input {
+        width: 14px;
+        height: 14px;
+        margin: 0;
+        accent-color: var(--kara-accent);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #advanced-toggle .chevron {
+          transition: none;
+        }
+      }
       #advice {
         margin: 6px 0 0;
         font-size: 11px;
@@ -581,6 +644,19 @@
     </div>
     <p class="hint">Remembered, and used for the next song too.</p>
 
+    <!-- Everything that is not the state, the action or the key lives behind
+         one disclosure, and the disclosure itself only exists when the person
+         has asked for it in the setting at the bottom. -->
+    <button id="advanced-toggle" type="button" aria-expanded="false" aria-controls="advanced-body" hidden>
+      <span>Advanced</span>
+      <span class="chevron" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m9 18 6-6-6-6" />
+        </svg>
+      </span>
+    </button>
+
+    <div id="advanced-body" hidden>
     <section id="practice-permission" aria-label="Pitch practice">
       <h2 class="section-title">Pitch practice</h2>
       <p class="hint">
@@ -661,6 +737,13 @@
       <p id="copy-note" hidden></p>
       <textarea id="debug-dump" rows="5" readonly hidden></textarea>
     </section>
+
+    </div>
+
+    <label class="setting">
+      <input type="checkbox" id="show-advanced" />
+      <span>Show advanced settings</span>
+    </label>
 
     <script type="module" src="/src/popup.ts"></script>
   </body>
