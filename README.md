@@ -9,9 +9,8 @@ nothing is uploaded.
 ## Two ways to use it
 
 **On the web, with a file you own.** Open [kara.leeguanfeng.com](https://kara.leeguanfeng.com), drop in a
-song from your own folder, and Kara separates it in your browser. You get a player with a vocal switch,
-a live key change and synced lyrics. [Kara Studio](https://kara.leeguanfeng.com/studio/) saves the backing
-as a WAV file.
+song from your own folder, and Kara Studio separates it in your browser. Set each part's level, change the
+key, play the mix and save the backing as a WAV file.
 
 **In Chrome, over YouTube.** The extension adds the same vocal switch, key change and mixer to the video you
 are already watching, so you can sing to the backing track.
